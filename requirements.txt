@@ -1,0 +1,28 @@
+# Pinned build/runtime dependencies for Elysian Player.
+#
+# Every version is pinned with == so that what gets tested here is exactly
+# what everyone else builds. BUILD_EXE.bat wipes and recreates .venv on every
+# run, so nothing outside this file can leak into a build.
+#
+# Targets Python 3.13.12 on Windows (enforced by BUILD_EXE.bat).
+# tkinter is not listed because it ships with CPython.
+
+# ---- Runtime dependencies (imported by Elysian_Player.py) ----
+# pygame   - audio playback via pygame.mixer.music
+# mutagen  - MP3 duration, ID3 TIT2/TPE1 tags, embedded APIC album art
+# pillow   - decodes album art and cover images, scales them for Tk
+pygame==2.6.1
+mutagen==1.48.1
+pillow==12.3.0
+
+# ---- Build chain (used only by BUILD_EXE.bat) ----
+# Pinned as well, because a PyInstaller or hooks-contrib bump can change what
+# ends up inside the exe even when the app code has not moved at all.
+pyinstaller==6.22.1
+pyinstaller-hooks-contrib==2026.6
+altgraph==0.17.5
+packaging==26.3
+pefile==2024.8.26
+pywin32-ctypes==0.2.3
+setuptools==84.0.0
+wheel==0.48.0
