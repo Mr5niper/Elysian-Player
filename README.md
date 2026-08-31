@@ -57,6 +57,9 @@ megabytes. Audio runs on miniaudio.
 | `Ctrl+click`     | Add to the selection    |
 | Drag a row       | Reorder the playlist    |
 
+Double-clicking the title bar maximises and restores, as it would on a normal
+window. The maximise button changes to a restore glyph while maximised.
+
 ## Not in 2.0.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here

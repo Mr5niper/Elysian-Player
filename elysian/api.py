@@ -57,6 +57,7 @@ class Api:
         # network before the window has even drawn.
         self._resume_at = 0.0
         self._resume_id = -1
+        self._maximized = False
         self._lock = threading.RLock()
         self._scan_dirty = False
         self._last_scan_bump = 0.0
@@ -227,6 +228,7 @@ class Api:
                 "shuffle": self._shuffle,
                 "repeat": self._repeat,
                 "status": self._footer(),
+                "maximized": self._maximized,
                 "revision": self._revision,
             }
             if self._revision != self._full_revision:
@@ -619,14 +621,27 @@ class Api:
             self._window.minimize()
 
     def win_maximise(self) -> None:
-        if self._window:
-            try:
-                if self._window.state and getattr(self._window.state, "maximized", False):
-                    self._window.restore()
-                else:
-                    self._window.maximize()
-            except Exception:
+        """Toggle between maximised and normal.
+
+        window.state is a dict pywebview uses for sharing values with the
+        frontend, not window geometry, so the old check for a `maximized`
+        attribute on it was always False -- and an empty dict is falsy, so it
+        short-circuited before even looking. The button only ever maximised.
+        The real state is tracked from pywebview's own maximized/restored
+        events, which also catches Win+Up and a title bar double-click.
+        """
+        if not self._window:
+            return
+        try:
+            if self._maximized:
+                self._window.restore()
+                self._maximized = False
+            else:
                 self._window.maximize()
+                self._maximized = True
+            self._bump()
+        except Exception:
+            log.warning("could not toggle the window state", exc_info=True)
 
     def win_close(self) -> None:
         if self._window:
@@ -695,7 +710,7 @@ class Api:
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "win_minimise", "win_maximise", "win_close",
         # host-side entry points, not called from JS but necessarily public
-        "attach", "boot", "ingest", "close", "BRIDGE",
+        "attach", "boot", "ingest", "close", "set_maximized", "BRIDGE",
     })
 
     def _assert_bridge_surface(self) -> None:
@@ -718,6 +733,13 @@ class Api:
 
     def attach(self, window) -> None:
         self._window = window
+
+    def set_maximized(self, flag: bool) -> None:
+        """Called from pywebview's own window events, so the toggle stays
+        correct when the user maximises by some other means."""
+        if self._maximized != bool(flag):
+            self._maximized = bool(flag)
+            self._bump()
 
     def boot(self) -> None:
         self._restore_session()
