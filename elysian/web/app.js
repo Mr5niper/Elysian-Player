@@ -130,7 +130,7 @@ function renderWindow(force) {
       row.className = "row";
       row.dataset.id = t.id;
       row.draggable = true;
-      for (const cls of ["r-num", "r-title", "r-artist", "r-time"]) {
+      for (const cls of ["r-num", "r-title", "r-artist", "r-album", "r-time"]) {
         const d = document.createElement("div");
         d.className = cls;
         row.appendChild(d);
@@ -159,7 +159,8 @@ function writeRow(row, t) {
   if (c[0].textContent !== num) c[0].textContent = num;
   if (c[1].textContent !== t.title) c[1].textContent = t.title;
   if (c[2].textContent !== t.artist) c[2].textContent = t.artist;
-  if (c[3].textContent !== time) c[3].textContent = time;
+  if (c[3].textContent !== t.album) c[3].textContent = t.album;
+  if (c[4].textContent !== time) c[4].textContent = time;
 }
 
 /* Tag reads only for what is on screen. The library may be on a network
