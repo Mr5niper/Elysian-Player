@@ -1,10 +1,6 @@
 # Elysian Player
 
-<!-- Drop a screenshot here. Paste the image into a GitHub issue or the release
-     draft, then copy the generated user-attachments URL in, the same way the
-     other repos do:
-<img width="940" height="580" alt="Elysian Player" src="https://github.com/user-attachments/assets/REPLACE-ME" />
--->
+<img width="2300" height="855" alt="image" src="https://github.com/user-attachments/assets/45da3b84-06b9-4cf7-8a5f-5fc227bcaed5" />
 
 A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
