@@ -16,7 +16,7 @@ let view = null;
    fires a click at all. */
 const prev = {
   playIcon: null, npTitle: null, npArtist: null, art: null,
-  status: null, repeatLabel: null, tNow: null, tTotal: null,
+  status: null, repeatLabel: null, tNow: null, tTotal: null, maximized: null,
   shuffleOn: null, repeatOn: null,
   listSig: null, currentId: null, selSig: null,
   waveW: 0, waveH: 0, waveSig: null,
@@ -456,6 +456,17 @@ const intent = {
 
   playTrack(id) { intent._resetTransport(); api().play_id(id); },
 
+  toggleMaximise() {
+    const maxed = !state.maximized;
+    state.maximized = maxed;
+    predict("maximized", maxed);
+    prev.maximized = maxed;
+    $("max-box").style.display = maxed ? "none" : "";
+    $("max-restore").style.display = maxed ? "" : "none";
+    $("win-max").title = maxed ? "Restore" : "Maximise";
+    api().win_maximise();
+  },
+
   removeSelected() {
     if (!selected.size) return;
     api().remove(Array.from(selected));
@@ -475,8 +486,13 @@ wire("ic-folder", () => api().add_folder());
 wire("btn-load", () => api().load_m3u());
 wire("btn-save", () => api().save_m3u());
 wire("win-min", () => api().win_minimise());
-wire("win-max", () => api().win_maximise());
+wire("win-max", () => intent.toggleMaximise());
 wire("win-close", () => api().win_close());
+
+$("titlebar").addEventListener("dblclick", (e) => {
+  if (e.target.closest(".winbtn")) return;
+  intent.toggleMaximise();
+});
 
 $("filter").addEventListener("input", () => renderList(true));
 
@@ -569,6 +585,17 @@ function applyTick(s) {
   setClass($("repeat"), "repeatOn", "on", repeat !== "none");
   setText($("repeat-label"), "repeatLabel", repeat === "one" ? "Repeat one" : "Repeat");
   setText($("status"), "status", s.status || "");
+
+  // Swap glyph by display, never by replacing nodes: a node replaced between
+  // mousedown and mouseup means the browser fires no click at all.
+  const maxed = settled("maximized", !!s.maximized);
+  state.maximized = maxed;
+  if (prev.maximized !== maxed) {
+    prev.maximized = maxed;
+    $("max-box").style.display = maxed ? "none" : "";
+    $("max-restore").style.display = maxed ? "" : "none";
+    $("win-max").title = maxed ? "Restore" : "Maximise";
+  }
 
   if (!seeking) {
     paint($("seek"), s.duration > 0 ? position / s.duration : 0);
