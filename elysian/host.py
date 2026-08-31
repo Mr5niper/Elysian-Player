@@ -124,6 +124,10 @@ def run() -> int:
             if target >= 0:
                 api.play_id(target)
 
+    # Keep the toggle honest when the window is maximised by other means:
+    # Win+Up, a title bar double-click, or the OS restoring the session.
+    window.events.maximized += lambda: api.set_maximized(True)
+    window.events.restored += lambda: api.set_maximized(False)
     window.events.closing += lambda: api.close()
 
     icon = config.resource_path("icon.ico")
