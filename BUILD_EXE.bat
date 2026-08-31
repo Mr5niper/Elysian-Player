@@ -7,10 +7,11 @@ setlocal enabledelayedexpansion
 ::  Works even when Python is NOT on PATH (uses the "py" launcher).
 ::
 ::  Put this .bat in the SAME folder as:
-::     - Elysian_Player.py   (the app script)
-::     - icon.ico                (window/exe icon)
-::     - version_info.txt        (exe version info)
-::     - requirements.txt        (pinned dependencies)
+::     - run.py              (the entry point)
+::     - elysian\            (the application package)
+::     - icon.ico            (window/exe icon)
+::     - version_info.txt    (exe version info)
+::     - requirements.txt    (pinned dependencies)
 ::  Then just double-click it.
 ::
 ::  This build does NOT use a .spec file. PyInstaller generates one from the
@@ -19,7 +20,8 @@ setlocal enabledelayedexpansion
 :: ==========================================================================
 
 :: ---- EDIT THESE IF YOU RENAME FILES --------------------------------------
-set "SCRIPT_NAME=Elysian_Player.py"
+set "SCRIPT_NAME=run.py"
+set "PACKAGE_DIR=elysian"
 set "EXE_NAME=Elysian Player"
 set "ICON=icon.ico"
 set "VERSION_FILE=version_info.txt"
@@ -65,11 +67,21 @@ echo [INFO] Python %REQUIRED_PYTHON_VERSION% detected via "!PY_CMD!".
 echo =======================================================
 
 :: ==========================================================================
-:: Pre-flight Check: Verify every input file the build needs
+:: Pre-flight Check: Verify every input the build needs
 :: ==========================================================================
 if not exist "%SCRIPT_NAME%" (
     echo [ERROR] "%SCRIPT_NAME%" not found next to this script.
     echo         Edit SCRIPT_NAME at the top of this file if you renamed it.
+    goto :error
+)
+if not exist "%PACKAGE_DIR%\web\index.html" (
+    echo [ERROR] %PACKAGE_DIR%\web\index.html was not found.
+    echo         That folder is the entire user interface.
+    goto :error
+)
+if not exist "%PACKAGE_DIR%\__init__.py" (
+    echo [ERROR] The '%PACKAGE_DIR%' package folder was not found.
+    echo         %SCRIPT_NAME% imports it, so the build needs it alongside.
     goto :error
 )
 if not exist "requirements.txt" (
@@ -79,7 +91,7 @@ if not exist "requirements.txt" (
 )
 if not exist "%ICON%" (
     echo [ERROR] %ICON% not found in the project root.
-    echo         The build embeds it as both the exe icon and the Tk window icon.
+    echo         The build embeds it as both the exe icon and the window icon.
     goto :error
 )
 if not exist "%VERSION_FILE%" (
@@ -87,7 +99,7 @@ if not exist "%VERSION_FILE%" (
     echo         The build reads the Windows file-details version from it.
     goto :error
 )
-echo [INFO] Inputs present: %SCRIPT_NAME%, requirements.txt, %ICON%, %VERSION_FILE%
+echo [INFO] Inputs present: %SCRIPT_NAME%, %PACKAGE_DIR%\, requirements.txt, %ICON%, %VERSION_FILE%
 echo [INFO] Starting build process...
 
 :: ==========================================================================
@@ -157,10 +169,17 @@ echo.
 ::    --noupx        no UPX compression (avoids antivirus false positives)
 ::    --icon         exe icon shown in Explorer
 ::    --add-data     icon.ico again, because resource_path() reads it at
-::                   runtime for the Tk window icon
+::                   runtime for the window icon
 ::    --version-file Windows file-details metadata
-::    --collect-all  pygame / PIL / mutagen -- pulls in their submodules,
-::                   data files and binaries (the SDL DLLs pygame needs)
+::    --add-data     elysian\web holds index.html, style.css and app.js -- the
+::                   entire interface. Without this the window opens blank.
+::    --collect-all  just_playback and miniaudio ship the miniaudio DLL, which
+::                   is the audio backend. If this is missing, the app runs but
+::                   nothing plays.
+::    --exclude-module  pywebview can drive Qt or GTK as well as WinForms, and
+::                   PyInstaller bundles every backend it can find. Excluding
+::                   the unused ones is what keeps this a ~40 MB exe. tkinter
+::                   is excluded too -- v2 used it for dialogs, v3 does not.
 ::
 :: python -m PyInstaller is used rather than bare 'pyinstaller' so the build
 :: cannot accidentally pick up a PyInstaller from outside this venv.
@@ -169,10 +188,23 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --noupx ^
  --name "%EXE_NAME%" ^
  --icon "%ICON%" ^
  --add-data "%ICON%;." ^
+ --add-data "elysian\web;elysian/web" ^
  --version-file "%VERSION_FILE%" ^
- --collect-all pygame ^
- --collect-all PIL ^
- --collect-all mutagen ^
+ --collect-all just_playback ^
+ --collect-all miniaudio ^
+ --collect-submodules webview ^
+ --collect-submodules mutagen ^
+ --hidden-import PIL.Image ^
+ --hidden-import clr_loader ^
+ --exclude-module pygame ^
+ --exclude-module dearpygui ^
+ --exclude-module numpy ^
+ --exclude-module matplotlib ^
+ --exclude-module tkinter ^
+ --exclude-module PySide6 ^
+ --exclude-module PyQt5 ^
+ --exclude-module PyQt6 ^
+ --exclude-module gi ^
  "%SCRIPT_NAME%"
 
 :: Capture the result first, then remove the .spec PyInstaller just generated.
