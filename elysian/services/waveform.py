@@ -6,6 +6,11 @@ decoding a whole track takes a moment.
 """
 import array
 
+from ..logs import get as _get_logger
+
+log = _get_logger("waveform")
+
+
 BUCKETS = 72
 
 
@@ -18,6 +23,7 @@ def peaks_for(path: str, buckets: int = BUCKETS) -> list[float]:
             nchannels=1, sample_rate=8000)
         samples = decoded.samples
     except Exception:
+        log.warning("could not decode %s for a waveform", path, exc_info=True)
         return []
 
     total = len(samples)

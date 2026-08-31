@@ -14,6 +14,11 @@ from webview.dom import DOMEventHandler
 from . import config, single_instance
 from .api import Api
 
+from .logs import get as _get_logger
+
+log = _get_logger("host")
+
+
 WEB_DIR = "elysian/web"
 
 
@@ -40,6 +45,7 @@ def _argv_paths() -> list[str]:
 
 
 def run() -> int:
+    log.info("Elysian Player %s starting", config.APP_VERSION)
     # If a copy is already running, hand it the file and exit rather than
     # opening a second player.
     lock = single_instance.try_acquire()
@@ -51,6 +57,7 @@ def run() -> int:
             return 0
 
     api = Api()
+    api._assert_bridge_surface()
 
     webview.settings["ALLOW_DOWNLOADS"] = False
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
@@ -85,14 +92,15 @@ def run() -> int:
             if paths:
                 api.ingest(paths)
         except Exception:
-            pass
+            log.exception("file drop failed")
 
     def bind(win):
         try:
             doc = win.dom.document
             doc.events.drop += DOMEventHandler(on_drop, False, False)
         except Exception:
-            pass
+            log.error("could not bind the drop handler; dragging files onto "
+                      "the window will not work", exc_info=True)
 
         if lock is not None:
             def incoming(paths):
@@ -106,7 +114,7 @@ def run() -> int:
                     win.restore()
                     win.show()
                 except Exception:
-                    pass
+                    log.debug("could not raise the window", exc_info=True)
             single_instance.serve(lock, incoming)
 
         api.boot()
@@ -135,6 +143,8 @@ def run() -> int:
     except Exception:
         # Never let a decorative failure such as an icon the platform cannot
         # load stop the player from opening.
+        log.warning("startup failed; retrying without the window icon",
+                    exc_info=True)
         start_kwargs.pop("icon", None)
         _start(start_kwargs)
     api.close()
