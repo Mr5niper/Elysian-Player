@@ -82,8 +82,12 @@ but they are no longer constructed at runtime. Nothing else remains.
 The player assumes your library might not be local, and avoids touching files
 until it has to:
 
-* Adding files reads no tags. Tracks appear as filenames immediately, and tags
-  are read only for the rows currently on screen, driven by scrolling.
+* Adding files reads no tags. Tracks appear as filenames immediately, and the
+  rows on screen are read first. Whatever capacity is left over fills in the
+  rest of the list: while you scroll, only the direction you are heading; once
+  you stop, outward from the view in both directions. Rows scrolling into view
+  jump ahead of that prefetch, and prefetch you have scrolled past is
+  discarded rather than spending round trips on rows nobody will look at.
 * Adding a folder streams the directory walk, so tracks start appearing within
   milliseconds instead of after the entire share has been enumerated.
 * Album art is fetched only for the track that is playing.
