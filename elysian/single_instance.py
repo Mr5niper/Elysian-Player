@@ -12,6 +12,11 @@ import sys
 import threading
 import uuid
 
+from .logs import get as _get_logger
+
+log = _get_logger("instance")
+
+
 HOST = "127.0.0.1"
 PORT = 49517
 TOKEN_FILE = os.path.join(
@@ -105,6 +110,8 @@ def serve(sock: socket.socket, on_paths) -> threading.Thread:
                     conn.sendall(b"ok")
                     on_paths(paths)
                 except Exception:
+                    log.warning("bad hand-off from another instance",
+                                exc_info=True)
                     continue
 
     thread = threading.Thread(target=loop, name="elysian-instance", daemon=True)

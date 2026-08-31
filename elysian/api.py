@@ -17,10 +17,13 @@ from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
 from .services.art import ArtProvider
-from .services.discovery import DiscoveryProvider
-from .services.lyrics import LyricsProvider
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.waveform import peaks_for
+
+from .logs import get as _get_logger
+
+log = _get_logger("api")
+
 
 REPEAT_CYCLE = {"none": "all", "all": "one", "one": "none"}
 
@@ -31,8 +34,6 @@ class Api:
         self._playlist = Playlist()
         self._engine = PlaybackEngine()
         self._art = ArtProvider()
-        self._lyrics = LyricsProvider()
-        self._discovery = DiscoveryProvider(config.AUDIO_EXTENSIONS)
         self._scanner = MetadataScanner()
         self._scanner.start()
 
@@ -40,7 +41,6 @@ class Api:
         self._current_id = -1
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
-        self._discovery_on = bool(self._settings["discovery"])
         self._engine.set_volume(self._settings.get("volume", 0.8))
 
         self._shuffle_bag: list[int] = []
@@ -52,6 +52,11 @@ class Api:
         self._peaks_for: str | None = None
         self._closing = False
         self._queued: set[int] = set()
+        # Offset to resume at, applied the first time the restored track is
+        # played. Seeking at startup would mean opening the file over the
+        # network before the window has even drawn.
+        self._resume_at = 0.0
+        self._resume_id = -1
         self._lock = threading.RLock()
         self._scan_dirty = False
         self._last_scan_bump = 0.0
@@ -90,14 +95,14 @@ class Api:
                 try:
                     self._dispatch(cmd)
                 except Exception:
-                    pass
+                    log.exception("command failed: %r", cmd)
                 while True:
                     try:
                         self._dispatch(self._cmd.get_nowait())
                     except queue.Empty:
                         break
                     except Exception:
-                        pass
+                        log.exception("queued command failed")
             try:
                 self._drain_scanner()
                 self._advance_if_finished()
@@ -107,7 +112,9 @@ class Api:
                 self._ensure_peaks(track)
                 self._rebuild_snapshot()
             except Exception:
-                pass
+                # An invariant failure here would otherwise repeat silently
+                # every 40ms forever.
+                log.exception("worker maintenance pass failed")
 
     def _dispatch(self, cmd) -> None:
         name, args = cmd[0], cmd[1:]
@@ -148,6 +155,9 @@ class Api:
         """
         changed = False
         for track_id, info in self._scanner.drain():
+            # Release the queue slot whether or not the track still exists, or
+            # a removed track would hold its id forever.
+            self._queued.discard(track_id)
             track = self._playlist.by_id(track_id)
             if track:
                 apply_metadata(track, info)
@@ -262,14 +272,23 @@ class Api:
             try:
                 url = self._art.data_url(path)
             except Exception:
+                # A track with no artwork is normal and returns None; reaching
+                # here means the extraction itself broke.
+                log.warning("album art extraction failed for %s", path,
+                            exc_info=True)
                 url = None
-            self._art_cache[path] = url
-            while len(self._art_cache) > 48:
-                self._art_cache.pop(next(iter(self._art_cache)), None)
-            if url:
-                self._bump()
+            # Hand the result back to the worker rather than touching shared
+            # state and the revision counter from this thread.
+            self._post("art_ready", path, url)
 
         threading.Thread(target=work, name="elysian-art", daemon=True).start()
+
+    def _do_art_ready(self, path: str, url) -> None:
+        self._art_cache[path] = url
+        while len(self._art_cache) > 48:
+            self._art_cache.pop(next(iter(self._art_cache)), None)
+        if url:
+            self._bump()
 
     def _ensure_peaks(self, track) -> None:
         if track is None or self._peaks_for == track.path:
@@ -281,16 +300,12 @@ class Api:
             try:
                 found = peaks_for(path)
             except Exception:
+                log.warning("waveform failed for %s", path, exc_info=True)
                 found = []
-            if self._peaks_for == path:
-                self._peaks = found
-        threading.Thread(target=work, daemon=True).start()
+            self._post("peaks_ready", path, found)
+        threading.Thread(target=work, name="elysian-peaks", daemon=True).start()
 
-    def _load_peaks(self, path: str) -> None:
-        try:
-            found = peaks_for(path)
-        except Exception:
-            found = []
+    def _do_peaks_ready(self, path: str, found) -> None:
         if self._peaks_for == path:
             self._peaks = found
 
@@ -453,6 +468,12 @@ class Api:
         track = self._playlist.by_id(int(track_id))
         if track is None:
             return False
+        # Pick up where the last session left off, once, for that one track.
+        if int(track_id) == self._resume_id:
+            if start <= 0.0:
+                start = self._resume_at
+            self._resume_id = -1
+            self._resume_at = 0.0
         try:
             self._engine.play(track.path, start)
         except PlaybackError as exc:
@@ -624,9 +645,13 @@ class Api:
             self._rebuild_bag()
         last = self._settings.get("last_path", "")
         if last:
+            self._resume_at = float(
+                self._settings.get("last_position", 0.0) or 0.0)
             for i, track in enumerate(self._playlist.tracks):
                 if os.path.normcase(track.path) == os.path.normcase(last):
                     self._current_id = self._playlist.id_at(i)
+                    if self._resume_at > 1.0:
+                        self._resume_id = self._current_id
                     break
         self._bump()
 
@@ -636,7 +661,6 @@ class Api:
             "volume": self._engine.volume,
             "shuffle": self._shuffle,
             "repeat": self._repeat,
-            "discovery": self._discovery_on,
             "playlist": [t.path for t in self._playlist.tracks],
             "last_path": track.path if track else "",
             "last_position": self._engine.position if self._engine.active else 0.0,
@@ -660,6 +684,37 @@ class Api:
     # public reference to the Window made it descend into window.dom.document,
     # which blocks until the page has loaded -- so the API object was never
     # created and every call from JavaScript failed.
+
+    #: Everything JavaScript is allowed to call. Anything public and not in
+    #: this set is a mistake -- see _assert_bridge_surface.
+    BRIDGE = frozenset({
+        "get_tick", "get_full", "get_peaks", "request_scan",
+        "add_files", "add_folder", "load_m3u", "save_m3u",
+        "remove", "reorder", "open_paths",
+        "play_id", "toggle_play", "stop", "next_track", "previous",
+        "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
+        "win_minimise", "win_maximise", "win_close",
+        # host-side entry points, not called from JS but necessarily public
+        "attach", "boot", "ingest", "close", "BRIDGE",
+    })
+
+    def _assert_bridge_surface(self) -> None:
+        """Fail loudly if a public attribute has crept onto this object.
+
+        pywebview builds window.pywebview.api by walking public attributes and
+        recursing into non-callables. A public reference to the window once
+        made it descend into window.dom.document, which blocks until the page
+        loads, so the API object was never created and every call from the
+        frontend silently failed. This turns that class of mistake into an
+        error at startup instead of a dead interface.
+        """
+        extra = {n for n in dir(self) if not n.startswith("_")} - self.BRIDGE
+        if extra:
+            raise RuntimeError(
+                "Api exposes unexpected public attributes to pywebview: "
+                + ", ".join(sorted(extra))
+                + ". Prefix them with an underscore, or add them to "
+                  "Api.BRIDGE if JavaScript is meant to call them.")
 
     def attach(self, window) -> None:
         self._window = window

@@ -35,7 +35,8 @@ megabytes. Audio runs on miniaudio.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
 * Restores your playlist, current track, volume, shuffle and repeat state on
-  the next launch.
+  the next launch, and resumes the last track from where you stopped the first
+  time you press play.
 
 ## Controls
 
@@ -68,8 +69,8 @@ so nobody upgrades expecting them:
 * Right-click context menu
 * Shortcuts dialog
 
-The lyrics and discovery code still lives in `elysian/services/`, tested but
-not wired to the interface. The rest was removed.
+The lyrics and discovery modules still live in `elysian/services/`, tested,
+but they are no longer constructed at runtime. Nothing else remains.
 
 ## Working With Files On A Network Share
 
@@ -95,6 +96,9 @@ so the executable can live anywhere. Delete that file to reset the app.
 
 A second small file, `.elysian_player_instance`, holds a token used by the
 single-instance check.
+
+Problems are logged to `.elysian_player.log` in the same folder, rotating at
+512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
 
 ## Installation
 
@@ -160,6 +164,7 @@ find; excluding the unused ones is what keeps this around forty megabytes.
 run.py                     entry point
 elysian/
   config.py                constants, settings path
+  logs.py                  rotating log file setup
   api.py                   the bridge exposed to the frontend
   host.py                  window creation, file drop, file association
   single_instance.py       hands a file to an already-running copy
@@ -181,7 +186,9 @@ walking the **public** attributes of that object, and recurses into
 non-callables. Anything that is not a method meant for JavaScript needs a
 leading underscore. A public reference to the window once made it descend into
 `window.dom.document`, which blocks until the page loads, and the API object was
-never created at all.
+never created at all. `Api.BRIDGE` lists everything JavaScript may call, and
+`_assert_bridge_surface()` runs at startup and refuses to launch if anything
+else is public.
 
 ## License
 

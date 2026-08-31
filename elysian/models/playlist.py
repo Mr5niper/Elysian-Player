@@ -50,11 +50,6 @@ class Playlist:
             return self._ids[index]
         return -1
 
-    def at(self, index: int) -> Track | None:
-        if 0 <= index < len(self._tracks):
-            return self._tracks[index]
-        return None
-
     def by_id(self, track_id: int) -> Track | None:
         i = self.index_of(track_id)
         return self._tracks[i] if i >= 0 else None
@@ -68,11 +63,6 @@ class Playlist:
             if os.path.normcase(os.path.abspath(t.path)) == key:
                 return i
         return -1
-
-    def has_path(self, path: str) -> bool:
-        key = os.path.normcase(os.path.abspath(path))
-        return any(os.path.normcase(os.path.abspath(t.path)) == key
-                   for t in self._tracks)
 
     # ---- mutation -----------------------------------------------------
 
@@ -98,14 +88,6 @@ class Playlist:
         self._ids = [i for i, _ in keep]
         self._tracks = [t for _, t in keep]
 
-    def remove_missing(self) -> int:
-        before = len(self._tracks)
-        keep = [(i, t) for i, t in zip(self._ids, self._tracks)
-                if os.path.isfile(t.path)]
-        self._ids = [i for i, _ in keep]
-        self._tracks = [t for _, t in keep]
-        return before - len(self._tracks)
-
     def clear(self) -> None:
         self._tracks.clear()
         self._ids.clear()
@@ -130,33 +112,6 @@ class Playlist:
             dst = len(self._tracks)
         self._tracks.insert(dst, track)
         self._ids.insert(dst, tid)
-
-    def move_after(self, track_ids, anchor_id: int) -> None:
-        """Move a block of tracks to sit just after anchor_id, preserving order."""
-        block = [(i, self.by_id(i)) for i in track_ids]
-        block = [(i, t) for i, t in block if t is not None]
-        if not block:
-            return
-        self.remove_ids([i for i, _ in block])
-        dst = self.index_of(anchor_id)
-        dst = len(self._tracks) if dst < 0 else dst + 1
-        for offset, (i, t) in enumerate(block):
-            self._tracks.insert(dst + offset, t)
-            self._ids.insert(dst + offset, i)
-
-    def sort_by(self, key: str, reverse: bool = False) -> None:
-        keys = {
-            "title": lambda p: p[1].title.lower(),
-            "artist": lambda p: (p[1].artist.lower(), p[1].title.lower()),
-            "album": lambda p: (p[1].album.lower(), p[1].title.lower()),
-            "duration": lambda p: p[1].length,
-        }
-        fn = keys.get(key)
-        if fn is None:
-            return
-        pairs = sorted(zip(self._ids, self._tracks), key=fn, reverse=reverse)
-        self._ids = [i for i, _ in pairs]
-        self._tracks = [t for _, t in pairs]
 
     # ---- M3U ----------------------------------------------------------
 

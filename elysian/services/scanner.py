@@ -12,6 +12,11 @@ from pathlib import Path
 
 from ..models.track import Track
 
+from ..logs import get as _get_logger
+
+log = _get_logger("scanner")
+
+
 
 def read_metadata(path: str) -> dict:
     """Read tags for one file. Never raises."""
@@ -30,7 +35,7 @@ def read_metadata(path: str) -> dict:
             if value:
                 info[field] = str(value[0])
     except Exception:
-        pass
+        log.warning("could not read tags from %s", path, exc_info=True)
     if not info["title"]:
         info["title"] = Path(path).stem
     return info
@@ -88,7 +93,15 @@ class MetadataScanner:
                 track_id, path = self._jobs.get(timeout=0.2)
             except queue.Empty:
                 continue
-            info = read_metadata(path)
+            # A raising read_metadata used to kill this worker outright, and
+            # with four workers a handful of bad files would end all scanning
+            # for the session with no trace.
+            try:
+                info = read_metadata(path)
+            except Exception:
+                log.exception("scanner worker recovered from %s", path)
+                info = {"title": Path(path).stem, "artist": "",
+                        "album": "", "length": 0.0}
             self._results.put((track_id, info))
             with self._lock:
                 self._pending -= 1
