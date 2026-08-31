@@ -1,4 +1,4 @@
-# Pinned build/runtime dependencies for Elysian Player.
+# Pinned build/runtime dependencies for Elysian Player 2.0.0.0.
 #
 # Every version is pinned with == so that what gets tested here is exactly
 # what everyone else builds. BUILD_EXE.bat wipes and recreates .venv on every

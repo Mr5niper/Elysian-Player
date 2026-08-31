@@ -3,100 +3,122 @@
 <!-- Drop a screenshot here. Paste the image into a GitHub issue or the release
      draft, then copy the generated user-attachments URL in, the same way the
      other repos do:
-<img width="980" height="620" alt="Elysian Player" src="https://github.com/user-attachments/assets/REPLACE-ME" />
+<img width="940" height="580" alt="Elysian Player" src="https://github.com/user-attachments/assets/REPLACE-ME" />
 -->
 
-An MP3 player for Windows, written in Python with tkinter and pygame.
-It reads your ID3 tags, shows embedded album art, follows along with `.lrc`
-lyrics, and picks up exactly where you left off the next time you open it.
+A music player for Windows. The interface is drawn with WebView2, which already
+ships with Windows, so the whole thing stays a single executable of about forty
+megabytes. Audio runs on miniaudio.
 
+- **Version**: 2.0.0.0
 - **License**: MIT
-- **OS**: Windows
+- **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
 
 ---
 
-## Core Features
+## Features
 
-* Reads title, artist and duration straight from each file's ID3 tags with
-  mutagen. Anything untagged falls back to the filename.
-* Shows embedded album art. If a track has none, it looks in the track's folder
-  for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png` or
-  `folder.png` instead.
-* Displays synced lyrics from a `.lrc` file sitting next to the MP3, with the
-  current line highlighted as the song plays.
+* Plays MP3, FLAC, WAV and OGG.
+* Reads title, artist, album and duration from tags with mutagen. Untagged
+  files fall back to their filename.
+* Shows embedded album art. If a track has none, the folder it lives in is
+  checked for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png`
+  or `folder.png`.
+* Draws a waveform of the current track.
 * Save and load M3U playlists. Paths are written relative to the playlist file
-  where possible, so a playlist stays valid if you move the whole folder.
+  where possible, so a playlist survives moving the folder it sits in.
+* Drag audio files or folders onto the window to add them.
+* Double-click an audio file in Explorer to play it, once the file type is
+  associated with the executable. It plays the file you opened, whether or not
+  it was already in the playlist.
+* Only one copy runs at a time. Opening another file hands it to the player
+  that is already running rather than starting a second one.
+* Filter the playlist by title, artist, album or filename as you type.
+* Drag rows to reorder. Ctrl-click to select several.
 * Shuffle draws from a bag, so every track plays once before any repeats.
-  Repeat cycles through off, all and one.
-* Discovery mode. When the queue runs dry, it goes looking through nearby
-  folders for an MP3 that is not already in your playlist and adds it.
-* Sleep timer, from 1 to 480 minutes.
-* Mini player mode that shrinks the window down to a compact size.
-* Filter box that narrows the list by title, artist or filename as you type.
-* Sortable columns, drag-and-drop reordering, and a right-click menu with Play,
-  Play Next, Open File Location and Remove.
-* Remove Missing Files sweeps out anything that has been deleted or moved since
-  you added it.
-* Restores your last session on launch: playlist, current track, playback
-  position, volume, shuffle and repeat state, window size and column widths.
+  Repeat cycles off, all, one.
+* Restores your playlist, current track, volume, shuffle and repeat state on
+  the next launch.
 
 ## Controls
 
-| Key(s)                 | Action                       | Category |
-| ---------------------- | ---------------------------- | -------- |
-| `Space`                | Play or pause                | Playback |
-| `Ctrl+Left`            | Previous track               | Playback |
-| `Ctrl+Right`           | Next track                   | Playback |
-| `Left` / `Right`       | Seek back or forward 5s      | Playback |
-| `Up` / `Down`          | Volume up or down 5%         | Audio    |
-| `Ctrl+H`               | Toggle shuffle               | Modes    |
-| `Ctrl+R`               | Cycle repeat off/all/one     | Modes    |
-| `Ctrl+O`               | Add songs                    | File     |
-| `Ctrl+F`               | Add a folder                 | File     |
-| `Ctrl+S`               | Save playlist as M3U         | File     |
-| `Ctrl+L`               | Load an M3U playlist         | File     |
-| `/`                    | Jump to the filter box       | Playlist |
-| `Double-click`         | Play the selected track      | Playlist |
-| `Delete`               | Remove the selected tracks   | Playlist |
-| `Right-click`          | Open the context menu        | Playlist |
-| Drag a row             | Reorder the playlist         | Playlist |
+| Key(s)           | Action                  |
+| ---------------- | ----------------------- |
+| `Space`          | Play or pause           |
+| `Ctrl+Left`      | Previous track          |
+| `Ctrl+Right`     | Next track              |
+| `Left` / `Right` | Seek back or forward 5s |
+| `Up` / `Down`    | Volume up or down 5%    |
+| `Enter`          | Play the selected track |
+| `Delete`         | Remove selected tracks  |
+| `/`              | Jump to the filter box  |
+| `Escape`         | Clear the filter        |
+| `Double-click`   | Play that track         |
+| `Ctrl+click`     | Add to the selection    |
+| Drag a row       | Reorder the playlist    |
 
-The same list is available in the app under **Tools > Shortcuts**.
+## Not in 2.0.0.0
 
-## Album Art and Lyrics
+These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
+so nobody upgrades expecting them:
 
-Album art is read from the ID3 `APIC` frame first. When a track has no embedded
-art, the folder it lives in is checked for a cover image, so a well-organised
-music library usually shows art without any tagging work.
+* Synced `.lrc` lyrics
+* Discovery mode
+* Sleep timer
+* Mini player mode
+* Sortable columns
+* Remove missing files
+* Right-click context menu
+* Shortcuts dialog
 
-Lyrics come from a `.lrc` file with the same name as the MP3, in the same
-folder. `Nightcall.mp3` pairs with `Nightcall.lrc`. Timestamps in the standard
-`[mm:ss.xx]` form are read, and the matching line is shown under the track
-title while it plays. Toggle the display under **Playback > Show Lyrics**.
+The lyrics and discovery code still lives in `elysian/services/`, tested but
+not wired to the interface. The rest was removed.
 
-## Session and Settings
+## Working With Files On A Network Share
 
-Settings are written to `.elysian_player_final.json` in your home folder, not
-into the program folder, so the executable can live anywhere. Delete that file
-to reset the app to a clean state.
+The player assumes your library might not be local, and avoids touching files
+until it has to:
 
-## Installation and Usage
+* Adding files reads no tags. Tracks appear as filenames immediately, and tags
+  are read only for the rows currently on screen, driven by scrolling.
+* Adding a folder streams the directory walk, so tracks start appearing within
+  milliseconds instead of after the entire share has been enumerated.
+* Album art is fetched only for the track that is playing.
+* Startup does not check that every saved path still exists.
+* Every operation that can block runs on a worker thread. The interface only
+  ever reads a precomputed snapshot, so a slow share cannot stall a button.
+
+The playlist renders only its visible window, so a fifty-thousand track list
+opens in about the same time as a two-thousand track one.
+
+## Settings
+
+Written to `.elysian_player.json` in your home folder, not the program folder,
+so the executable can live anywhere. Delete that file to reset the app.
+
+A second small file, `.elysian_player_instance`, holds a token used by the
+single-instance check.
+
+## Installation
 
 ### Run the executable
 
-Download `Elysian Player.exe` from the
-[Releases](../../releases) page and run it. It is a single self-contained file
-and does not need Python installed.
+Download `Elysian Player.exe` from the [Releases](../../releases) page and run
+it. It is a single self-contained file and does not need Python installed.
+
+It does need the **WebView2 runtime**, which is part of Windows 11 and is
+installed alongside Edge on Windows 10. If the window opens blank, that is what
+is missing; Microsoft distributes the Evergreen Runtime installer free.
 
 ### Run from source
 
 This project targets **Python 3.13.12** and nothing else. The versions in
 `requirements.txt` are pinned with `==` and resolved against that interpreter,
 so another version pulls different wheels and is not a configuration that has
-been tested here.
+been tested.
 
-1. Create and activate a virtual environment on 3.13.12:
+1. Create and activate a virtual environment:
    ```sh
    py -3.13 -m venv .venv
    .\.venv\Scripts\activate
@@ -107,8 +129,10 @@ been tested here.
    ```
 3. Run it:
    ```sh
-   python Elysian_Player.py
+   python run.py
    ```
+
+Set `ELYSIAN_DEBUG=1` before running to open DevTools alongside the window.
 
 If you do not have 3.13.12, get it from
 [python.org](https://www.python.org/downloads/release/python-31312/) and enable
@@ -118,36 +142,57 @@ the **py launcher** option during installation.
 
 Double-click `BUILD_EXE.bat`. It confirms Python is exactly 3.13.12 through the
 `py` launcher, wipes and rebuilds `.venv` from scratch, installs the pinned
-dependencies from `requirements.txt`, and produces a one-file
-`dist\Elysian Player.exe`.
+dependencies, and produces `dist\Elysian Player.exe`.
 
 Two things the script does deliberately:
 
 * **Every dependency is pinned with `==`**, including the whole PyInstaller
   chain, and the venv is rebuilt on every run. A build here is the build anyone
-  else gets. The script prints `pip freeze` before building so a misbehaving
-  build can be diffed against `requirements.txt` line by line.
+  else gets. `pip freeze` is printed before building so a misbehaving build can
+  be diffed against `requirements.txt` line by line.
 * **There is no `.spec` file.** PyInstaller generates one from the command-line
   flags in the script, and the script deletes it afterwards. A tracked spec
-  goes stale and silently overrides every flag set in the batch file, so it
-  never gets committed.
+  goes stale and silently overrides every flag set in the batch file.
 
-If the wrong Python version is installed, the script reports what it found and
-opens the download page for 3.13.12.
+The `--exclude-module` flags matter more than they look. pywebview can drive Qt
+and GTK as well as the Windows backend, and PyInstaller bundles every one it can
+find; excluding the unused ones is what keeps this around forty megabytes.
 
-## Known Limitations
+## Layout
 
-* MP3 only. Other audio formats are not read.
-* Adding a large folder blocks the window while every file is tag-scanned.
-* Keyboard shortcuts stay live while the filter box has focus, so a space
-  typed into a search term also toggles playback.
-* Discovery mode searches folders above the current track, which can be slow
-  the first time if your library sits near the root of a large drive.
+```
+run.py                     entry point
+elysian/
+  config.py                constants, settings path
+  api.py                   the bridge exposed to the frontend
+  host.py                  window creation, file drop, file association
+  single_instance.py       hands a file to an already-running copy
+  models/                  Track, Playlist
+  playback/engine.py       miniaudio wrapper
+  services/                tags, album art, waveform, lyrics, discovery
+  web/                     index.html, style.css, app.js -- the interface
+```
+
+Application state lives entirely on the Python side. The frontend polls a small
+snapshot and renders what it is given, so there is one source of truth.
+
+Note for anyone editing the frontend: `ROW_H` in `app.js` and the `.row` height
+in `style.css` must stay equal, or rows drift out of line with the scrollbar.
+Both are 30px.
+
+Note for anyone editing `api.py`: pywebview builds `window.pywebview.api` by
+walking the **public** attributes of that object, and recurses into
+non-callables. Anything that is not a method meant for JavaScript needs a
+leading underscore. A public reference to the window once made it descend into
+`window.dom.document`, which blocks until the page loads, and the API object was
+never created at all.
 
 ## License
 
 MIT. See [LICENSE](LICENSE).
 
-Built with [pygame](https://www.pygame.org/),
+Built with [pywebview](https://pywebview.flowrl.com/),
+[just_playback](https://github.com/cheofusi/just_playback),
+[miniaudio](https://github.com/irmen/pyminiaudio),
 [mutagen](https://mutagen.readthedocs.io/) and
 [Pillow](https://python-pillow.org/).
