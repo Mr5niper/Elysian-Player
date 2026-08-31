@@ -314,6 +314,7 @@ function bindSlider(el, onCommit, onDrag) {
   let down = false;
   el.addEventListener("mousedown", (e) => {
     down = true; const v = pct(e); paint(el, v); onDrag && onDrag(v); e.preventDefault();
+    schedule();          // a drag must track the pointer, not the idle rate
   });
   window.addEventListener("mousemove", (e) => {
     if (!down) return; const v = pct(e); paint(el, v); onDrag && onDrag(v);
@@ -354,6 +355,9 @@ const PENDING_MS = 1500;
 
 function predict(field, value) {
   pending[field] = { value, until: Date.now() + PENDING_MS };
+  // The next poll interval is chosen when a poll ends, so a press made during
+  // a slow idle wait would otherwise sit unconfirmed for up to a second.
+  schedule();
 }
 
 /* Position is continuous, so it cannot be compared for equality. It is held
@@ -362,6 +366,7 @@ let posPredict = null;
 
 function predictPosition(seconds) {
   posPredict = { value: Math.max(0, seconds), until: Date.now() + PENDING_MS };
+  schedule();
 }
 
 function settledPosition(incoming) {
@@ -593,6 +598,46 @@ function applyFull(f) {
 let lastRevision = -1;
 let polling = false;
 let peakTick = 0;
+let pollTimer = 0;
+
+/* How often to ask the backend what is happening.
+
+   Playback itself runs on Python's worker thread and is completely unaffected
+   by any of this -- audio keeps going when the window is hidden. The only
+   thing that slows down is the frontend asking about it, which is wasted work
+   when the seek bar nobody is looking at would not move anyway.
+
+   Hidden falls back to a slow heartbeat rather than stopping outright. If
+   visibilitychange ever failed to fire, stopping would freeze the interface
+   permanently; a heartbeat recovers on its own. */
+const POLL_PLAYING = 200;
+const POLL_IDLE = 1000;
+const POLL_HIDDEN = 2000;
+
+function pollInterval() {
+  // A prediction in flight has to settle promptly, and a drag needs to track
+  // the pointer, so those stay fast whatever else is true.
+  if (seeking || volHeld) return POLL_PLAYING;
+  if (posPredict || Object.keys(pending).length) return POLL_PLAYING;
+  if (document.hidden) return POLL_HIDDEN;
+  return state.playing ? POLL_PLAYING : POLL_IDLE;
+}
+
+function schedule() {
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, pollInterval());
+}
+
+/* Coming back must repaint at once. Waiting up to a second would show a stale
+   position and read as a hang. */
+function wake() {
+  clearTimeout(pollTimer);
+  if (!polling) poll();
+}
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) wake();
+});
+window.addEventListener("focus", wake);
 
 async function poll() {
   if (polling) return;
@@ -620,7 +665,7 @@ async function poll() {
     /* window closing, or a call raced a shutdown */
   } finally {
     polling = false;
-    setTimeout(poll, 200);
+    schedule();
   }
 }
 
