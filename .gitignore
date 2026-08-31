@@ -17,9 +17,10 @@ __pycache__/
 .eggs/
 
 # ---- App-generated runtime files ----
-# Settings and session state are written to the user's home directory
-# (~/.elysian_mp3_player_final.json), not into the repo, so there is nothing
-# to ignore for those. Playlists the user saves are wherever they chose.
+# Settings, session state and the log are written to the user's home directory
+# (~/.elysian_player.json, ~/.elysian_player.log), not into the repo, so there
+# is nothing to ignore for those. Playlists the user saves are wherever they
+# chose.
 *.m3u
 
 # ---- OS / editor cruft ----
