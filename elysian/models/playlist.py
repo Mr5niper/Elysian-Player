@@ -9,6 +9,7 @@ import itertools
 import os
 from pathlib import Path
 
+from .. import paths as pathutil
 from .track import Track
 
 _ids = itertools.count(1)
@@ -58,24 +59,24 @@ class Playlist:
         """Position of a track by file path, or -1. Used when a file is opened
         from Explorer: it may already be in the playlist, in which case nothing
         gets added and there is no new id to play."""
-        key = os.path.normcase(os.path.abspath(path))
+        target = pathutil.key(path)
         for i, t in enumerate(self._tracks):
-            if os.path.normcase(os.path.abspath(t.path)) == key:
+            if pathutil.key(t.path) == target:
                 return i
         return -1
 
     # ---- mutation -----------------------------------------------------
 
-    def add_paths(self, paths) -> list[Track]:
+    def add_paths(self, incoming) -> list[Track]:
         """Append paths that are not already present. Metadata is filled in
         later by the scanner, so this stays fast for large folders."""
-        seen = {os.path.normcase(os.path.abspath(t.path)) for t in self._tracks}
+        seen = pathutil.keys(t.path for t in self._tracks)
         added = []
-        for p in paths:
-            key = os.path.normcase(os.path.abspath(p))
-            if key in seen:
+        for p in incoming:
+            k = pathutil.key(p)
+            if k in seen:
                 continue
-            seen.add(key)
+            seen.add(k)
             track = Track(path=str(p))
             self._tracks.append(track)
             self._ids.append(next(_ids))
