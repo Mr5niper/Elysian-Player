@@ -62,12 +62,19 @@ class Api:
         self._lock = threading.RLock()
         self._scan_dirty = False
         self._last_scan_bump = 0.0
+        # Ids whose metadata changed since the frontend last collected them.
+        # Sending the whole track list every time a tag arrived meant well
+        # over a megabyte crossing the bridge each second on a large playlist,
+        # to communicate a couple of dozen changed rows.
+        self._dirty: set[int] = set()
+        self._meta_revision = 0
 
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
             "shuffle": self._shuffle, "repeat": self._repeat,
             "status": "", "maximized": False, "revision": 0,
+            "meta_revision": 0,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -162,15 +169,20 @@ class Api:
             self._queued.discard(track_id)
             track = self._playlist.by_id(track_id)
             if track:
+                before = track.length
                 apply_metadata(track, info)
+                self._playlist.adjust_length(track.length - before)
+                self._dirty.add(track_id)
                 changed = True
         if changed:
             self._scan_dirty = True
         now = time.monotonic()
-        if self._scan_dirty and now - self._last_scan_bump >= 1.0:
+        if self._scan_dirty and now - self._last_scan_bump >= 0.4:
             self._scan_dirty = False
             self._last_scan_bump = now
-            self._bump()
+            # A metadata revision, not a structural one: the set of rows has
+            # not changed, so the frontend only needs the rows that did.
+            self._meta_revision += 1
 
     def request_scan(self, ids) -> None:
         """Read tags for these tracks only.
@@ -213,6 +225,37 @@ class Api:
             full = dict(self._full)
         return full
 
+    @staticmethod
+    def _track_row(track_id: int, t) -> dict:
+        return {
+            "id": track_id,
+            "title": t.title,
+            "artist": t.artist,
+            "album": t.album,
+            # os.path.basename, not Path().name: this runs once per track per
+            # full send, and Path is ~9x slower -- 120ms versus 11ms for 50k.
+            "name": os.path.basename(t.path),
+            "length": round(t.length, 1),
+            "scanned": t.scanned,
+        }
+
+    def get_meta(self) -> dict:
+        """Only the rows whose metadata changed since the last collection.
+
+        Bounded by how many tracks were scanned, not by playlist size, so this
+        stays a few kilobytes whether the playlist holds fifty tracks or fifty
+        thousand.
+        """
+        with self._lock:
+            rows = []
+            for track_id in self._dirty:
+                track = self._playlist.by_id(track_id)
+                if track is None:
+                    continue
+                rows.append(self._track_row(track_id, track))
+            self._dirty.clear()
+            return {"tracks": rows, "meta_revision": self._meta_revision}
+
     def get_peaks(self) -> list:
         return self._peaks
 
@@ -231,23 +274,14 @@ class Api:
                 "status": self._footer(),
                 "maximized": self._maximized,
                 "revision": self._revision,
+                "meta_revision": self._meta_revision,
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
+                self._dirty.clear()
                 full = {
                     "tracks": [
-                        {
-                            "id": self._playlist.id_at(i),
-                            "title": t.title,
-                            "artist": t.artist,
-                            "album": t.album,
-                            # os.path.basename, not Path().name: this runs
-                            # once per track per snapshot, and Path is ~9x
-                            # slower here -- 120ms versus 11ms for 50k tracks.
-                            "name": os.path.basename(t.path),
-                            "length": round(t.length, 1),
-                            "scanned": t.scanned,
-                        }
+                        self._track_row(self._playlist.id_at(i), t)
                         for i, t in enumerate(self._playlist.tracks)
                     ],
                     "title": track.title if track else "",
@@ -490,7 +524,12 @@ class Api:
         self._current_id = int(track_id)
         self._scan_one(self._current_id)
         if not track.scanned or not track.length:
+            # Writing length directly means the cached total is now wrong.
+            before = track.length
             track.length = self._engine.duration
+            self._playlist.adjust_length(track.length - before)
+            self._dirty.add(self._current_id)
+            self._meta_revision += 1
         if not self._history or self._history[-1] != self._current_id:
             self._history.append(self._current_id)
             del self._history[:-200]
@@ -708,7 +747,7 @@ class Api:
     #: Everything JavaScript is allowed to call. Anything public and not in
     #: this set is a mistake -- see _assert_bridge_surface.
     BRIDGE = frozenset({
-        "get_tick", "get_full", "get_peaks", "request_scan",
+        "get_tick", "get_full", "get_meta", "get_peaks", "request_scan",
         "add_files", "add_folder", "load_m3u", "save_m3u",
         "remove", "reorder", "open_paths",
         "play_id", "toggle_play", "stop", "next_track", "previous",

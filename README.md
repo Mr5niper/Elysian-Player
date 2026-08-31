@@ -185,6 +185,11 @@ elysian/
 Application state lives entirely on the Python side. The frontend polls a small
 snapshot and renders what it is given, so there is one source of truth.
 
+The frontend fetches the whole track list only when the row set changes.
+When a tag scan fills in metadata it fetches just the rows that changed --
+sending the full list for that meant over a megabyte a second on a long
+playlist to communicate a couple of dozen updates.
+
 That poll adapts: 200ms while playing, 1s when paused, and a 2s heartbeat when
 the window is hidden. Playback runs on Python's worker thread and is unaffected
 by any of it, so audio continues normally when hidden; only the asking slows
