@@ -97,7 +97,9 @@ Written to `.elysian_player.json` in your home folder, not the program folder,
 so the executable can live anywhere. Delete that file to reset the app.
 
 A second small file, `.elysian_player_instance`, holds a token used by the
-single-instance check.
+single-instance check. That check talks over a Windows named pipe rather than
+a network socket, so it never triggers a firewall prompt and cannot collide
+with another program over a port number.
 
 Problems are logged to `.elysian_player.log` in the same folder, rotating at
 512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
