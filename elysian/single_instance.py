@@ -283,7 +283,12 @@ def _unix_serve(sock, on_paths) -> threading.Thread:
                         chunks.append(block)
                         if len(chunks) > 64:
                             break
-                    data = json.loads(b"".join(chunks).decode())
+                    raw = b"".join(chunks)
+                    if not raw:
+                        # try_acquire()'s liveness probe connects and closes
+                        # without sending anything. Not an error.
+                        continue
+                    data = json.loads(raw.decode())
                     if data.get("token") != expected:
                         log.warning("rejected a hand-off with a bad token")
                         continue

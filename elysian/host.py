@@ -11,7 +11,10 @@ import sys
 import webview
 from webview.dom import DOMEventHandler
 
+from pathlib import Path
+
 from . import config, single_instance
+from . import paths as pathutil
 from .api import Api
 
 from .logs import get as _get_logger
@@ -25,11 +28,10 @@ WEB_DIR = "elysian/web"
 def _index_path() -> str:
     base = getattr(sys, "_MEIPASS", None)
     if base:
-        candidate = os.path.join(base, WEB_DIR, "index.html")
-        if os.path.isfile(candidate):
-            return candidate
-    here = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(here, "web", "index.html")
+        candidate = Path(base) / WEB_DIR / "index.html"
+        if candidate.is_file():
+            return str(candidate)
+    return str(Path(__file__).resolve().parent / "web" / "index.html")
 
 
 def _argv_paths() -> list[str]:
@@ -38,9 +40,12 @@ def _argv_paths() -> list[str]:
     for arg in sys.argv[1:]:
         if arg.startswith("-"):
             continue
-        if os.path.isfile(arg) and \
-                os.path.splitext(arg)[1].lower() in config.AUDIO_EXTENSIONS:
-            found.append(os.path.abspath(arg))
+        candidate = Path(arg)
+        if candidate.suffix.lower() in config.AUDIO_EXTENSIONS \
+                and candidate.is_file():
+            # absolute, not resolved: keep the case the user sees, and do not
+            # follow symlinks over a share
+            found.append(pathutil.absolute(candidate))
     return found
 
 
@@ -132,7 +137,7 @@ def run() -> int:
 
     icon = config.resource_path("icon.ico")
     start_kwargs = {"func": bind, "args": window}
-    if os.path.isfile(icon):
+    if Path(icon).is_file():
         start_kwargs["icon"] = icon
 
     def _start(kwargs):

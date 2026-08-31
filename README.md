@@ -172,6 +172,7 @@ run.py                     entry point
 elysian/
   config.py                constants, settings path
   logs.py                  rotating log file setup
+  paths.py                 path comparison, in one place
   api.py                   the bridge exposed to the frontend
   host.py                  window creation, file drop, file association
   single_instance.py       hands a file to an already-running copy
@@ -200,6 +201,13 @@ and a click produce the same local update before the command is posted. That
 update is held by `predict`/`settled` until the backend snapshot agrees, or for
 1.5s, whichever comes first; without that hold a poll landing mid-flight snaps
 the control back and the press looks like it did nothing.
+
+Note on paths: whether two strings name the same file is decided in one place,
+`paths.key()`. It is `normcase` plus `abspath`, because `pathlib` has no
+equivalent of `normcase` and `Path.resolve()` touches the filesystem -- which on
+a network share would turn every comparison into a round trip. Two call sites
+deliberately stay on `os.path` for speed and say so in a comment; both are in
+per-track or per-file loops where `pathlib` measured 5 to 9 times slower.
 
 Note for anyone editing `api.py`: pywebview builds `window.pywebview.api` by
 walking the **public** attributes of that object, and recurses into
