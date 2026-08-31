@@ -217,7 +217,7 @@ $("tracks").addEventListener("click", (e) => {
 
 $("tracks").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".row");
-  if (row) api().play_id(Number(row.dataset.id));
+  if (row) intent.playTrack(Number(row.dataset.id));
 });
 
 /* ---------- reordering rows ---------- */
@@ -318,13 +318,13 @@ function bindSlider(el, onCommit, onDrag) {
 }
 
 bindSlider($("seek"),
-  (v) => { seeking = false; api().seek(v * state.duration); },
+  (v) => { seeking = false; intent.seekTo(v * state.duration); },
   (v) => { seeking = true; $("t-now").textContent = fmt(v * state.duration); prev.tNow = null; });
 
 let volTimer = 0;
 let volHeld = false;
 bindSlider($("vol"),
-  (v) => { volHeld = false; api().set_volume(v); },
+  (v) => { volHeld = false; intent.setVolume(v); },
   (v) => {
     volHeld = true;
     state.volume = v;
@@ -332,36 +332,133 @@ bindSlider($("vol"),
     volTimer = setTimeout(() => api().set_volume(v), 50);
   });
 
-/* ---------- controls ---------- */
+/* ---------- controls ----------
+   Every action goes through `intent`, so a keypress and a click produce
+   exactly the same local update before the command is posted. Previously only
+   the click handlers updated optimistically, which made the mouse feel
+   instant and the keyboard feel like it lagged by up to a poll interval. */
+
+/* An optimistic change is only true locally until the backend agrees. A poll
+   landing in between used to overwrite it and snap the control back, so a
+   press looked like it did nothing and then happened twice. Each field is
+   held at its predicted value until the snapshot reports the same thing, or
+   the wait times out. */
+const pending = {};
+const PENDING_MS = 1500;
+
+function predict(field, value) {
+  pending[field] = { value, until: Date.now() + PENDING_MS };
+}
+
+/* Position is continuous, so it cannot be compared for equality. It is held
+   at the predicted value until the backend reports something near it. */
+let posPredict = null;
+
+function predictPosition(seconds) {
+  posPredict = { value: Math.max(0, seconds), until: Date.now() + PENDING_MS };
+}
+
+function settledPosition(incoming) {
+  if (!posPredict) return incoming;
+  if (Math.abs(incoming - posPredict.value) < 1.5 || Date.now() > posPredict.until) {
+    posPredict = null;
+    return incoming;
+  }
+  return posPredict.value;
+}
+
+function settled(field, incoming) {
+  const p = pending[field];
+  if (!p) return incoming;
+  if (p.value === incoming || Date.now() > p.until) {
+    delete pending[field];
+    return incoming;
+  }
+  return p.value;
+}
+
+const intent = {
+  togglePlay() {
+    const playing = !state.playing;
+    predict("playing", playing);
+    state.playing = playing;
+    const d = playing ? "M6 4h4v16H6zM14 4h4v16h-4z" : "M7 4l13 8-13 8z";
+    prev.playIcon = d;
+    $("play-path").setAttribute("d", d);
+    $("play").title = playing ? "Pause" : "Play";
+    api().toggle_play();
+  },
+
+  shuffle() {
+    state.shuffle = !state.shuffle;
+    predict("shuffle", state.shuffle);
+    prev.shuffleOn = state.shuffle;
+    $("shuffle").classList.toggle("on", state.shuffle);
+    api().toggle_shuffle();
+  },
+
+  repeat() {
+    const order = { none: "all", all: "one", one: "none" };
+    state.repeat = order[state.repeat] || "all";
+    predict("repeat", state.repeat);
+    prev.repeatOn = state.repeat !== "none";
+    prev.repeatLabel = state.repeat === "one" ? "Repeat one" : "Repeat";
+    $("repeat").classList.toggle("on", prev.repeatOn);
+    $("repeat-label").textContent = prev.repeatLabel;
+    api().cycle_repeat();
+  },
+
+  setVolume(v) {
+    v = Math.max(0, Math.min(1, v));
+    state.volume = v;
+    paint($("vol"), v);
+    api().set_volume(v);
+  },
+
+  volumeBy(delta) { intent.setVolume(state.volume + delta); },
+
+  seekTo(seconds) {
+    if (state.duration <= 0) return;
+    const v = Math.max(0, Math.min(1, seconds / state.duration));
+    state.position = v * state.duration;
+    predictPosition(state.position);
+    paint($("seek"), v);
+    prev.tNow = null;
+    setText($("t-now"), "tNow", fmt(state.position));
+    api().seek(state.position);
+  },
+
+  seekBy(delta) { intent.seekTo(state.position + delta); },
+
+  // A track change has no local answer for "which track", but the transport
+  // can be reset immediately so the press visibly registers.
+  next() { intent._resetTransport(); api().next_track(); },
+  previous() { intent._resetTransport(); api().previous(); },
+
+  _resetTransport() {
+    predictPosition(0);
+    state.position = 0;
+    paint($("seek"), 0);
+    prev.tNow = null;
+    setText($("t-now"), "tNow", "0:00");
+  },
+
+  playTrack(id) { intent._resetTransport(); api().play_id(id); },
+
+  removeSelected() {
+    if (!selected.size) return;
+    api().remove(Array.from(selected));
+    selected.clear();
+    paintRowStates();
+  },
+};
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
-wire("play", () => {
-  // Flip locally first. Waiting for the next poll made every press feel
-  // like a lag spike.
-  const nowPlaying = !state.playing;
-  state.playing = nowPlaying;
-  const d = nowPlaying ? "M6 4h4v16H6zM14 4h4v16h-4z" : "M7 4l13 8-13 8z";
-  prev.playIcon = d;
-  $("play-path").setAttribute("d", d);
-  api().toggle_play();
-});
-wire("prev", () => api().previous());
-wire("next", () => api().next_track());
-wire("shuffle", () => {
-  state.shuffle = !state.shuffle;
-  prev.shuffleOn = state.shuffle;
-  $("shuffle").classList.toggle("on", state.shuffle);
-  api().toggle_shuffle();
-});
-wire("repeat", () => {
-  const order = { none: "all", all: "one", one: "none" };
-  state.repeat = order[state.repeat] || "all";
-  prev.repeatOn = state.repeat !== "none";
-  prev.repeatLabel = state.repeat === "one" ? "Repeat one" : "Repeat";
-  $("repeat").classList.toggle("on", prev.repeatOn);
-  $("repeat-label").textContent = prev.repeatLabel;
-  api().cycle_repeat();
-});
+wire("play", () => intent.togglePlay());
+wire("prev", () => intent.previous());
+wire("next", () => intent.next());
+wire("shuffle", () => intent.shuffle());
+wire("repeat", () => intent.repeat());
 wire("ic-add", () => api().add_files());
 wire("ic-folder", () => api().add_folder());
 wire("btn-load", () => api().load_m3u());
@@ -372,20 +469,27 @@ wire("win-close", () => api().win_close());
 
 $("filter").addEventListener("input", () => renderList(true));
 
-
 document.addEventListener("keydown", (e) => {
   if (e.target === $("filter")) {
     if (e.key === "Escape") { $("filter").value = ""; $("filter").blur(); renderList(true); }
     return;
   }
   const k = e.key;
-  if (k === " ") { e.preventDefault(); api().toggle_play(); }
-  else if (k === "ArrowLeft") { e.preventDefault(); e.ctrlKey ? api().previous() : api().nudge(-5); }
-  else if (k === "ArrowRight") { e.preventDefault(); e.ctrlKey ? api().next_track() : api().nudge(5); }
-  else if (k === "ArrowUp") { e.preventDefault(); api().set_volume(Math.min(1, state.volume + 0.05)); }
-  else if (k === "ArrowDown") { e.preventDefault(); api().set_volume(Math.max(0, state.volume - 0.05)); }
-  else if (k === "Delete") { if (selected.size) { api().remove(Array.from(selected)); selected.clear(); } }
-  else if (k === "Enter") { if (selected.size) api().play_id(Array.from(selected)[0]); }
+  if (k === " ") { e.preventDefault(); intent.togglePlay(); }
+  else if (k === "ArrowLeft") {
+    e.preventDefault();
+    e.ctrlKey ? intent.previous() : intent.seekBy(-5);
+  }
+  else if (k === "ArrowRight") {
+    e.preventDefault();
+    e.ctrlKey ? intent.next() : intent.seekBy(5);
+  }
+  else if (k === "ArrowUp") { e.preventDefault(); intent.volumeBy(0.05); }
+  else if (k === "ArrowDown") { e.preventDefault(); intent.volumeBy(-0.05); }
+  else if (k === "Delete") { intent.removeSelected(); }
+  else if (k === "Enter") {
+    if (selected.size) intent.playTrack(Array.from(selected)[0]);
+  }
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
 
@@ -426,32 +530,38 @@ window.addEventListener("resize", () => {
 /* ---------- state sync ---------- */
 
 function applyTick(s) {
+  const playing = settled("playing", s.playing);
+  const shuffle = settled("shuffle", s.shuffle);
+  const repeat = settled("repeat", s.repeat);
+
+  const position = settledPosition(s.position);
+
   state.current_id = s.current_id;
-  state.playing = s.playing;
-  state.position = s.position;
+  state.playing = playing;
+  state.position = position;
   state.duration = s.duration;
-  state.shuffle = s.shuffle;
-  state.repeat = s.repeat;
+  state.shuffle = shuffle;
+  state.repeat = repeat;
   if (!volHeld) state.volume = s.volume;
 
   // Set an attribute on the existing path rather than replacing the node.
   // Any innerHTML write here destroys the element mid-click, and the browser
   // then never fires a click event at all.
-  const d = s.playing ? "M6 4h4v16H6zM14 4h4v16h-4z" : "M7 4l13 8-13 8z";
+  const d = playing ? "M6 4h4v16H6zM14 4h4v16h-4z" : "M7 4l13 8-13 8z";
   if (prev.playIcon !== d) {
     prev.playIcon = d;
     $("play-path").setAttribute("d", d);
-    $("play").title = s.playing ? "Pause" : "Play";
+    $("play").title = playing ? "Pause" : "Play";
   }
 
-  setClass($("shuffle"), "shuffleOn", "on", s.shuffle);
-  setClass($("repeat"), "repeatOn", "on", s.repeat !== "none");
-  setText($("repeat-label"), "repeatLabel", s.repeat === "one" ? "Repeat one" : "Repeat");
+  setClass($("shuffle"), "shuffleOn", "on", shuffle);
+  setClass($("repeat"), "repeatOn", "on", repeat !== "none");
+  setText($("repeat-label"), "repeatLabel", repeat === "one" ? "Repeat one" : "Repeat");
   setText($("status"), "status", s.status || "");
 
   if (!seeking) {
-    paint($("seek"), s.duration > 0 ? s.position / s.duration : 0);
-    setText($("t-now"), "tNow", fmt(s.position));
+    paint($("seek"), s.duration > 0 ? position / s.duration : 0);
+    setText($("t-now"), "tNow", fmt(position));
   }
   setText($("t-total"), "tTotal", fmt(s.duration));
   paint($("vol"), state.volume);
