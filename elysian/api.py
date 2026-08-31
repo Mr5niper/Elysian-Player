@@ -66,7 +66,7 @@ class Api:
             "current_id": -1, "playing": False, "paused": False,
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
             "shuffle": self._shuffle, "repeat": self._repeat,
-            "status": "", "revision": 0,
+            "status": "", "maximized": False, "revision": 0,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -639,7 +639,6 @@ class Api:
             else:
                 self._window.maximize()
                 self._maximized = True
-            self._bump()
         except Exception:
             log.warning("could not toggle the window state", exc_info=True)
 
@@ -737,9 +736,10 @@ class Api:
     def set_maximized(self, flag: bool) -> None:
         """Called from pywebview's own window events, so the toggle stays
         correct when the user maximises by some other means."""
-        if self._maximized != bool(flag):
-            self._maximized = bool(flag)
-            self._bump()
+        # No _bump here: `maximized` rides on every tick, and bumping the
+        # revision would make the frontend refetch the whole track list for a
+        # window resize.
+        self._maximized = bool(flag)
 
     def boot(self) -> None:
         self._restore_session()
