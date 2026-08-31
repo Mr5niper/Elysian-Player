@@ -30,7 +30,9 @@ megabytes. Audio runs on miniaudio.
   it was already in the playlist.
 * Only one copy runs at a time. Opening another file hands it to the player
   that is already running rather than starting a second one.
-* Filter the playlist by title, artist, album or filename as you type.
+* Filter the playlist by title, artist, album or filename as you type. The
+  playlist shows track number, title, artist, album and duration; the album
+  column hides itself when the window is narrower than 820px.
 * Drag rows to reorder. Ctrl-click to select several.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
