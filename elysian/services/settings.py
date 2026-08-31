@@ -40,7 +40,7 @@ def save(data: dict) -> None:
     tmp = Path(str(SETTINGS_FILE) + ".tmp")
     try:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        os.replace(tmp, SETTINGS_FILE)
+        tmp.replace(SETTINGS_FILE)
     except Exception:
         log.error("could not write settings", exc_info=True)
         try:
