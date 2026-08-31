@@ -608,6 +608,29 @@ function applyTick(s) {
   drawWave();
 }
 
+/* Patch the rows that changed, in place. No rebuild: the row set is the same,
+   so only the text inside the affected rows needs touching. */
+function applyMeta(m) {
+  if (!m || !m.tracks || !m.tracks.length) return;
+  const byId = new Map(state.tracks.map((t) => [t.id, t]));
+  let touched = false;
+  for (const row of m.tracks) {
+    const t = byId.get(row.id);
+    if (!t) continue;
+    t.title = row.title;
+    t.artist = row.artist;
+    t.album = row.album;
+    t.length = row.length;
+    t.scanned = row.scanned;
+    touched = true;
+  }
+  if (!touched) return;
+  // filtered holds the same objects, so the visible rows just need rewriting.
+  updateRowText();
+  // A filter may now match more or fewer tracks than before.
+  if ($("filter").value.trim()) renderList(false);
+}
+
 function applyFull(f) {
   state.tracks = f.tracks || [];
   setText($("np-title"), "npTitle", f.title || "Nothing playing");
@@ -623,6 +646,7 @@ function applyFull(f) {
 }
 
 let lastRevision = -1;
+let lastMetaRevision = -1;
 let polling = false;
 let peakTick = 0;
 let peaksForId = -1;
@@ -677,8 +701,16 @@ async function poll() {
       if (tick) {
         applyTick(tick);
         if (tick.revision !== lastRevision) {
+          // Structure changed: rows added, removed or reordered.
           lastRevision = tick.revision;
+          lastMetaRevision = tick.meta_revision;
           applyFull(await a.get_full());
+        } else if (tick.meta_revision !== lastMetaRevision) {
+          // Only tags filled in. Fetch just those rows rather than the whole
+          // list, which on a long playlist was over a megabyte a second to
+          // deliver a couple of dozen changes.
+          lastMetaRevision = tick.meta_revision;
+          applyMeta(await a.get_meta());
         }
         // Peaks belong to a track, so only discard them when the track
         // changes. Keying this off the revision meant anything that bumped it

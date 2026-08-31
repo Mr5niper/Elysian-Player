@@ -19,6 +19,26 @@ class Playlist:
     def __init__(self):
         self._tracks: list[Track] = []
         self._ids: list[int] = []
+        # id -> position and id -> track, so lookups are not a linear scan.
+        # _drain_scanner calls by_id once per finished tag read, which made
+        # filling a long playlist cost O(results x tracks).
+        self._pos: dict[int, int] = {}
+        self._by_id: dict[int, Track] = {}
+        self._length_sum: float | None = None
+
+    def _reindex(self) -> None:
+        self._pos = {tid: i for i, tid in enumerate(self._ids)}
+        self._by_id = dict(zip(self._ids, self._tracks))
+        self._length_sum = None
+
+    def invalidate_length(self) -> None:
+        """Call after mutating a Track's length from outside."""
+        self._length_sum = None
+
+    def adjust_length(self, delta: float) -> None:
+        """Apply a known change without rescanning every track."""
+        if self._length_sum is not None:
+            self._length_sum += delta
 
     def __len__(self) -> int:
         return len(self._tracks)
@@ -36,15 +56,16 @@ class Playlist:
 
     @property
     def total_length(self) -> float:
-        return sum(t.length for t in self._tracks)
+        # Recomputed only when something changed. This is read on every
+        # snapshot rebuild, about 25 times a second.
+        if self._length_sum is None:
+            self._length_sum = sum(t.length for t in self._tracks)
+        return self._length_sum
 
     # ---- lookup -------------------------------------------------------
 
     def index_of(self, track_id: int) -> int:
-        try:
-            return self._ids.index(track_id)
-        except ValueError:
-            return -1
+        return self._pos.get(track_id, -1)
 
     def id_at(self, index: int) -> int:
         if 0 <= index < len(self._ids):
@@ -52,8 +73,7 @@ class Playlist:
         return -1
 
     def by_id(self, track_id: int) -> Track | None:
-        i = self.index_of(track_id)
-        return self._tracks[i] if i >= 0 else None
+        return self._by_id.get(track_id)
 
     def index_of_path(self, path: str) -> int:
         """Position of a track by file path, or -1. Used when a file is opened
@@ -78,9 +98,14 @@ class Playlist:
                 continue
             seen.add(k)
             track = Track(path=str(p))
+            tid = next(_ids)
+            self._pos[tid] = len(self._ids)
+            self._by_id[tid] = track
             self._tracks.append(track)
-            self._ids.append(next(_ids))
+            self._ids.append(tid)
             added.append(track)
+        if added:
+            self._length_sum = None
         return added
 
     def remove_ids(self, track_ids) -> None:
@@ -88,10 +113,12 @@ class Playlist:
         keep = [(i, t) for i, t in zip(self._ids, self._tracks) if i not in doomed]
         self._ids = [i for i, _ in keep]
         self._tracks = [t for _, t in keep]
+        self._reindex()
 
     def clear(self) -> None:
         self._tracks.clear()
         self._ids.clear()
+        self._reindex()
 
     def move(self, track_id: int, before_id: int | None) -> None:
         """Move track_id so it sits immediately before before_id.
@@ -107,12 +134,14 @@ class Playlist:
         if before_id is None:
             self._tracks.append(track)
             self._ids.append(tid)
+            self._reindex()
             return
         dst = self.index_of(before_id)
         if dst < 0:
             dst = len(self._tracks)
         self._tracks.insert(dst, track)
         self._ids.insert(dst, tid)
+        self._reindex()
 
     # ---- M3U ----------------------------------------------------------
 
