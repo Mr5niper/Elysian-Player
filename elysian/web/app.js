@@ -75,18 +75,23 @@ function visibleTracks() {
     `${t.title} ${t.artist} ${t.album} ${t.name}`.toLowerCase().includes(needle));
 }
 
-function structureSignature() {
-  const needle = $("filter").value.trim().toLowerCase();
-  return needle + "\u0000" + state.tracks.map((t) => t.id).join(",");
+/* Which rows exist, in order. Derived from the filtered set, not the whole
+   playlist: a tag scan can make a track start matching an active filter, and
+   the row set then changes without any id being added or removed. */
+function structureSignature(rows) {
+  return rows.map((t) => t.id).join(",");
 }
 
 let filtered = [];
 
 function renderList(force) {
-  const sig = structureSignature();
+  // Always refresh the working list. Holding the previous track objects here
+  // meant a later tag scan never reached the rows: the ids do not change, so
+  // artist, album and duration stayed blank.
+  filtered = visibleTracks();
+  const sig = structureSignature(filtered);
   if (force || sig !== prev.listSig) {
     prev.listSig = sig;
-    filtered = visibleTracks();
     $("sizer").style.height = (filtered.length * ROW_H) + "px";
     rowRange = { first: -1, last: -1 };
     rendered.forEach((el) => el.remove());
