@@ -181,6 +181,12 @@ Note for anyone editing the frontend: `ROW_H` in `app.js` and the `.row` height
 in `style.css` must stay equal, or rows drift out of line with the scrollbar.
 Both are 30px.
 
+Every user action goes through the `intent` object in `app.js`, so a keypress
+and a click produce the same local update before the command is posted. That
+update is held by `predict`/`settled` until the backend snapshot agrees, or for
+1.5s, whichever comes first; without that hold a poll landing mid-flight snaps
+the control back and the press looks like it did nothing.
+
 Note for anyone editing `api.py`: pywebview builds `window.pywebview.api` by
 walking the **public** attributes of that object, and recurses into
 non-callables. Anything that is not a method meant for JavaScript needs a
