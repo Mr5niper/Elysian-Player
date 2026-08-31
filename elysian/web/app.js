@@ -625,6 +625,7 @@ function applyFull(f) {
 let lastRevision = -1;
 let polling = false;
 let peakTick = 0;
+let peaksForId = -1;
 let pollTimer = 0;
 
 /* How often to ask the backend what is happening.
@@ -678,9 +679,19 @@ async function poll() {
         if (tick.revision !== lastRevision) {
           lastRevision = tick.revision;
           applyFull(await a.get_full());
+        }
+        // Peaks belong to a track, so only discard them when the track
+        // changes. Keying this off the revision meant anything that bumped it
+        // -- a finished tag scan, a window state change -- blanked the
+        // waveform until the peaks were fetched again a few ticks later.
+        if (tick.current_id !== peaksForId) {
+          peaksForId = tick.current_id;
           state.peaks = [];
           prev.waveSig = null;
-          peakTick = 0;
+          // Fetch on the very next poll rather than waiting out the usual
+          // interval, so a track change blanks the waveform for one tick
+          // instead of four.
+          peakTick = 3;
         }
         if (view === "now" && !state.peaks.length && ++peakTick % 4 === 0) {
           const p = await a.get_peaks();
