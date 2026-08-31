@@ -92,6 +92,7 @@ function renderList(force) {
   const sig = structureSignature(filtered);
   if (force || sig !== prev.listSig) {
     prev.listSig = sig;
+    resetScanScheduling();
     $("sizer").style.height = (filtered.length * ROW_H) + "px";
     rowRange = { first: -1, last: -1 };
     rendered.forEach((el) => el.remove());
@@ -168,19 +169,213 @@ function writeRow(row, t) {
   if (c[4].textContent !== time) c[4].textContent = time;
 }
 
-/* Tag reads only for what is on screen. The library may be on a network
-   share, where every read is a round trip. */
+/* ---------- tag scheduling ----------
+   Tags are read over what may be a network share, so only the rows on screen
+   are fetched eagerly. That leaves the reader idle between screenfuls, which
+   is wasted time: the rest of the list is filled with the leftover capacity.
+
+   Priorities, so prefetching never delays something you are looking at:
+     visible   rows currently rendered
+     ahead     rows just past the edge you are scrolling toward
+     prefetch  the rest, sweeping outward from the view, once scrolling stops
+
+   The queue is topped up only when it runs low, rather than having the whole
+   playlist dumped into it. */
+
+/* Two water marks, because the two kinds of prefetch compete. The idle sweep
+   fills the queue while you sit still; when you then start scrolling, work
+   ahead of you must still be able to get in even though the queue is full.
+   It outranks the sweep in the reader, so it is only the gate that needs
+   raising. */
+const SCAN_LOW_WATER = 40;
+const AHEAD_WATER = 140;
+/* Background chunks stay small: a long scroll makes queued sweep work
+   useless, and this bounds how many reads are wasted on rows nobody will
+   look at. */
+const SCAN_CHUNK = 32;
+const AHEAD_CHUNK = 64;
+const SCROLL_IDLE_MS = 180;
+const SCAN_PUMP_MS = 250;
+
+/* Outstanding work is tracked locally rather than read from the tick. The
+   poll drops to once a second when paused, which is far too slow to keep a
+   reader fed or to notice the scroll direction before it expires. */
+let scanOutstanding = 0;
+
+let scanRequested = new Map();   // id -> priority it was asked for at
+let scrollDir = 0;              // -1 up, +1 down, 0 settled
+let scrollIdleTimer = 0;
+let sweepUp = -1;
+let sweepDown = -1;
 let scanTimer = 0;
+let prefetchAnchor = -1;        // where the view was when prefetch was planned
+
+function markScrolling(dir) {
+  scrollDir = dir;
+  /* If the view has run well past what was queued, that work is for rows
+     nobody is going to look at. On a share each one costs a round trip, so
+     throw it away and re-plan from here. */
+  if (prefetchAnchor >= 0 &&
+      Math.abs(rowRange.first - prefetchAnchor) > (rowRange.last - rowRange.first + 1) * 2) {
+    const a = api();
+    // Guarded: this runs inside the scroll handler, so anything that throws
+    // here would stop the list scrolling at all.
+    if (a && typeof a.drop_prefetch === "function") {
+      try { a.drop_prefetch(); } catch (e) { /* not fatal */ }
+      scanOutstanding = 0;
+      forgetPrefetchRequests();
+      sweepUp = rowRange.first - 1;
+      sweepDown = rowRange.last + 1;
+      prefetchAnchor = rowRange.first;
+    }
+  }
+  clearTimeout(scrollIdleTimer);
+  scrollIdleTimer = setTimeout(() => {
+    scrollDir = 0;
+    // Re-anchor the outward sweep wherever the view came to rest.
+    sweepUp = rowRange.first - 1;
+    sweepDown = rowRange.last + 1;
+  }, SCROLL_IDLE_MS);
+}
+
+/* Returns rows worth asking for at this priority. A row already queued for
+   prefetch is returned again when it becomes visible, so it can be upgraded
+   and jump the queue -- otherwise it stays stuck behind the whole background
+   sweep, which is what made scrolling ahead of the fill feel like waiting. */
+function take(indices, priority) {
+  const ids = [];
+  for (const i of indices) {
+    const t = filtered[i];
+    if (!t || t.scanned) continue;
+    const asked = scanRequested.get(t.id);
+    if (asked !== undefined && asked <= priority) continue;
+    ids.push(t.id);
+    scanRequested.set(t.id, priority);
+  }
+  return ids;
+}
+
+/* Forget every prefetch request so it can be made again later. Paired with
+   drop_prefetch, which throws the same work out of the reader's queue. */
+function forgetPrefetchRequests() {
+  for (const [id, prio] of Array.from(scanRequested)) {
+    if (prio > 0) scanRequested.delete(id);
+  }
+}
+
+/* Nothing on screen may wait for anything else. Throws away all queued
+   prefetch and gives the whole reader to the visible rows. */
+/* True if something on screen is blank and has not already been asked for at
+   top priority. Used to avoid resetting the queue while it is already busy
+   with exactly the right rows -- doing that every 250ms threw away the work
+   in flight and started it over. */
+function visibleNeedsRequeue() {
+  for (const i of visibleIndices()) {
+    const t = filtered[i];
+    if (t && !t.scanned && scanRequested.get(t.id) !== 0) return true;
+  }
+  return false;
+}
+
+function fillVisibleNow(a) {
+  if (!visibleNeedsRequeue()) return 0;
+  const wanted = visibleIndices();
+
+  /* Empty the reader's queue outright. Scrolling past a screen leaves its
+     rows queued, and those were asked for at visible priority too -- after a
+     long scroll the screen you actually stopped on sits behind hundreds of
+     them. Nothing that is not on screen right now has any claim. */
+  if (typeof a.reset_scan_queue === "function") {
+    try { a.reset_scan_queue(); } catch (e) { /* not fatal */ }
+  }
+  scanRequested = new Map();
+  const ids = take(wanted, 0);
+  if (!ids.length) return 0;
+  scanOutstanding = ids.length;
+  a.request_scan(ids);
+  schedule();
+  return ids.length;
+}
+
+function visibleIndices() {
+  const idx = [];
+  for (let i = rowRange.first; i <= rowRange.last; i++) idx.push(i);
+  return idx;
+}
+
+/* Rows on screen. Always first, always immediately. */
 function requestScanVisible() {
   clearTimeout(scanTimer);
   scanTimer = setTimeout(() => {
-    const ids = [];
-    rendered.forEach((el, id) => {
-      const t = filtered.find((x) => x.id === id);
-      if (t && !t.scanned) ids.push(id);
-    });
-    if (ids.length) { const a = api(); if (a) a.request_scan(ids); }
-  }, 100);
+    const a = api();
+    if (!a) return;
+    fillVisibleNow(a);
+  }, 30);
+}
+
+/* Spend whatever the reader is not using. Driven from the poll loop, which
+   carries how much work is still queued. */
+function send(a, ids, kind) {
+  if (!ids.length) return 0;
+  scanOutstanding += ids.length;
+  if (kind === "visible") a.request_scan(ids);
+  else if (kind === "ahead") a.request_ahead(ids);
+  else a.request_prefetch(ids);
+  return ids.length;
+}
+
+function topUpScan() {
+  const a = api();
+  if (!a || !filtered.length) return;
+
+  // Absolute rule: while anything on screen is blank, the reader does
+  // nothing else. No prefetch of any kind is queued until it is complete.
+  if (visibleMissing()) { fillVisibleNow(a); return; }
+
+  if (scrollDir !== 0) {
+    if (scanOutstanding >= AHEAD_WATER) return;
+    // Moving: work only the edge being scrolled toward.
+    const idx = [];
+    if (scrollDir > 0) {
+      let i = Math.max(rowRange.last + 1, sweepDown);
+      for (; i < filtered.length && idx.length < AHEAD_CHUNK; i++) idx.push(i);
+      sweepDown = i;
+    } else {
+      let i = Math.min(rowRange.first - 1, sweepUp);
+      for (; i >= 0 && idx.length < AHEAD_CHUNK; i--) idx.push(i);
+      sweepUp = i;
+    }
+    prefetchAnchor = rowRange.first;
+    send(a, take(idx, 1), "ahead");
+    return;
+  }
+
+  if (scanOutstanding >= SCAN_LOW_WATER) return;
+
+  // Settled: sweep outward both ways at once, nearest rows first.
+  if (sweepDown < 0 && sweepUp < 0) {
+    sweepUp = rowRange.first - 1;
+    sweepDown = rowRange.last + 1;
+  }
+  const idx = [];
+  while (idx.length < SCAN_CHUNK &&
+         (sweepDown < filtered.length || sweepUp >= 0)) {
+    if (sweepDown < filtered.length) idx.push(sweepDown++);
+    if (idx.length >= SCAN_CHUNK) break;
+    if (sweepUp >= 0) idx.push(sweepUp--);
+  }
+  prefetchAnchor = rowRange.first;
+  send(a, take(idx, 2), "prefetch");
+}
+
+setInterval(topUpScan, SCAN_PUMP_MS);
+
+function resetScanScheduling() {
+  scanRequested = new Map();
+  scanOutstanding = 0;
+  prefetchAnchor = -1;
+  sweepUp = -1;
+  sweepDown = -1;
 }
 
 function updateRowText() {
@@ -206,7 +401,13 @@ function paintRowStates() {
 }
 
 let scrollPending = false;
+let lastScrollTop = 0;
 $("tracks").addEventListener("scroll", () => {
+  const top = $("tracks").scrollTop;
+  if (top !== lastScrollTop) {
+    markScrolling(top > lastScrollTop ? 1 : -1);
+    lastScrollTop = top;
+  }
   if (scrollPending) return;
   scrollPending = true;
   requestAnimationFrame(() => { scrollPending = false; renderWindow(false); });
@@ -622,6 +823,7 @@ function applyMeta(m) {
     t.album = row.album;
     t.length = row.length;
     t.scanned = row.scanned;
+    if (scanRequested.has(row.id) && scanOutstanding > 0) scanOutstanding--;
     touched = true;
   }
   if (!touched) return;
@@ -665,6 +867,19 @@ let pollTimer = 0;
 const POLL_PLAYING = 200;
 const POLL_IDLE = 1000;
 const POLL_HIDDEN = 2000;
+// While rows on screen are still blank, updates have to be collected
+// promptly. Metadata arrives on the poll, so at the idle rate a tag read in
+// 200ms could sit undelivered for a further second, leaving the row empty
+// long after the work was finished.
+const POLL_FILLING = 100;
+
+function visibleMissing() {
+  for (let i = rowRange.first; i <= rowRange.last; i++) {
+    const t = filtered[i];
+    if (t && !t.scanned) return true;
+  }
+  return false;
+}
 
 function pollInterval() {
   // A prediction in flight has to settle promptly, and a drag needs to track
@@ -672,6 +887,9 @@ function pollInterval() {
   if (seeking || volHeld) return POLL_PLAYING;
   if (posPredict || Object.keys(pending).length) return POLL_PLAYING;
   if (document.hidden) return POLL_HIDDEN;
+  // Something on screen is still blank: collect updates quickly.
+  if (visibleMissing()) return POLL_FILLING;
+  if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }
 
@@ -725,6 +943,9 @@ async function poll() {
           // instead of four.
           peakTick = 3;
         }
+        // Resync: if the reader says it has nothing left, it has nothing
+        // left, whatever the local counter thinks.
+        if ((tick.scan_pending || 0) === 0) scanOutstanding = 0;
         if (view === "now" && !state.peaks.length && ++peakTick % 4 === 0) {
           const p = await a.get_peaks();
           if (p && p.length) { state.peaks = p; prev.waveSig = null; drawWave(); }

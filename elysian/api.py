@@ -52,7 +52,7 @@ class Api:
         self._peaks: list[float] = []
         self._peaks_for: str | None = None
         self._closing = False
-        self._queued: set[int] = set()
+        self._queued: dict[int, int] = {}
         # Offset to resume at, applied the first time the restored track is
         # played. Seeking at startup would mean opening the file over the
         # network before the window has even drawn.
@@ -74,7 +74,7 @@ class Api:
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
             "shuffle": self._shuffle, "repeat": self._repeat,
             "status": "", "maximized": False, "revision": 0,
-            "meta_revision": 0,
+            "meta_revision": 0, "scan_pending": 0,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -166,7 +166,7 @@ class Api:
         for track_id, info in self._scanner.drain():
             # Release the queue slot whether or not the track still exists, or
             # a removed track would hold its id forever.
-            self._queued.discard(track_id)
+            self._queued.pop(track_id, None)
             track = self._playlist.by_id(track_id)
             if track:
                 before = track.length
@@ -184,28 +184,65 @@ class Api:
             # not changed, so the frontend only needs the rows that did.
             self._meta_revision += 1
 
-    def request_scan(self, ids) -> None:
-        """Read tags for these tracks only.
+    def request_scan(self, ids, priority: int = MetadataScanner.VISIBLE) -> int:
+        """Queue tag reads for these tracks.
 
-        Called by the frontend for the rows currently on screen. Files may live
-        on a network share, where every tag read is a round trip, so nothing is
-        opened until something actually needs to display it.
+        Files may live on a network share where every read is a round trip, so
+        nothing is opened until something needs it. The frontend asks for the
+        rows on screen at VISIBLE, and fills otherwise-idle time with
+        prefetching at a lower priority; the queue is ordered so a row
+        scrolling into view never waits behind that prefetch.
         """
+        queued = 0
+        priority = int(priority)
         for raw in (ids or []):
             track_id = int(raw)
-            if track_id in self._queued:
+            # A row already queued for prefetch must be able to jump to the
+            # front when it scrolls into view. Without this it stays stuck
+            # behind the whole background sweep.
+            existing = self._queued.get(track_id)
+            if existing is not None and existing <= priority:
                 continue
             track = self._playlist.by_id(track_id)
             if track is None or track.scanned:
                 continue
-            self._queued.add(track_id)
-            self._scanner.submit(track_id, track.path)
+            self._queued[track_id] = priority
+            self._scanner.submit(track_id, track.path, priority)
+            queued += 1
+        return queued
+
+    def reset_scan_queue(self) -> int:
+        """Discard everything queued, at any priority.
+
+        The frontend calls this whenever the visible rows change: work queued
+        for a screen you have scrolled past is not displayed, so it must not
+        be in front of the screen you are looking at now.
+        """
+        dropped = self._scanner.drop_all()
+        for track_id in dropped:
+            self._queued.pop(track_id, None)
+        return len(dropped)
+
+    def drop_prefetch(self) -> int:
+        """Forget queued prefetch that the view has scrolled away from."""
+        dropped = self._scanner.drop_prefetch()
+        for track_id in dropped:
+            self._queued.pop(track_id, None)
+        return len(dropped)
+
+    def request_prefetch(self, ids) -> int:
+        """Prefetch, at a priority that yields to anything on screen."""
+        return self.request_scan(ids, MetadataScanner.BACKGROUND)
+
+    def request_ahead(self, ids) -> int:
+        """Prefetch in the direction of travel while scrolling."""
+        return self.request_scan(ids, MetadataScanner.AHEAD)
 
     def _scan_one(self, track_id: int) -> None:
         track = self._playlist.by_id(track_id)
         if track is not None and not track.scanned and track_id not in self._queued:
-            self._queued.add(track_id)
-            self._scanner.submit(track_id, track.path)
+            self._queued[track_id] = MetadataScanner.VISIBLE
+            self._scanner.submit(track_id, track.path, MetadataScanner.VISIBLE)
 
     # ---- state ---------------------------------------------------------
 
@@ -275,6 +312,9 @@ class Api:
                 "maximized": self._maximized,
                 "revision": self._revision,
                 "meta_revision": self._meta_revision,
+                # Lets the frontend keep the queue topped up without ever
+                # dumping a whole playlist into it.
+                "scan_pending": self._scanner.pending,
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
@@ -747,7 +787,9 @@ class Api:
     #: Everything JavaScript is allowed to call. Anything public and not in
     #: this set is a mistake -- see _assert_bridge_surface.
     BRIDGE = frozenset({
-        "get_tick", "get_full", "get_meta", "get_peaks", "request_scan",
+        "get_tick", "get_full", "get_meta", "get_peaks",
+        "request_scan", "request_ahead", "request_prefetch",
+        "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
         "remove", "reorder", "open_paths",
         "play_id", "toggle_play", "stop", "next_track", "previous",
