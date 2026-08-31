@@ -1,5 +1,4 @@
 """Application-wide constants."""
-import os
 import sys
 from pathlib import Path
 
@@ -30,5 +29,5 @@ def resource_path(rel: str) -> str:
     """Resolve a bundled resource, working both in dev and under PyInstaller."""
     base = getattr(sys, "_MEIPASS", None)
     if base is None:
-        base = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    return os.path.join(base, rel)
+        base = Path(__file__).parent.parent
+    return str(Path(base) / rel)
