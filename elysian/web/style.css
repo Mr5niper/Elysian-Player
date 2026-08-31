@@ -1,0 +1,277 @@
+:root {
+  --bg: #131316;
+  --panel: #1c1418;
+  --panel-2: #241d22;
+  --line: #2a2228;
+  --text: #e8e8ec;
+  --muted: #8b8b96;
+  --accent: #c0392f;
+  --accent-hi: #e04b3c;
+  --accent-dim: #8e2b24;
+  --accent-wash: #3a1418;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  overflow: hidden;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+  user-select: none;
+  cursor: default;
+}
+
+#app {
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(900px 420px at 78% -12%, rgba(192, 57, 47, 0.20), transparent 62%),
+    radial-gradient(600px 380px at 6% 108%, rgba(192, 57, 47, 0.09), transparent 60%),
+    var(--bg);
+}
+
+/* ---- title bar ---- */
+#titlebar {
+  height: 32px;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+#titlebar .spacer { flex: 1; height: 100%; }
+.winbtn {
+  width: 40px; height: 32px;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--muted);
+  cursor: default;
+}
+.winbtn:hover { background: rgba(255,255,255,0.07); color: var(--text); }
+.winbtn.close:hover { background: #c0392f; color: #fff; }
+.winbtn svg { width: 12px; height: 12px; }
+
+/* ---- body ---- */
+#body { flex: 1; display: flex; min-height: 0; padding: 0 14px 0 6px; gap: 6px; }
+
+#sidebar { width: 132px; flex-shrink: 0; padding-top: 6px; }
+.navitem {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; margin-bottom: 2px;
+  border-radius: 7px;
+  color: var(--muted);
+  font-size: 13px;
+}
+.navitem svg { width: 16px; height: 16px; stroke: var(--accent); flex-shrink: 0; }
+.navitem:hover { background: rgba(255,255,255,0.04); color: var(--text); }
+.navitem.active { background: var(--accent-wash); color: #f0f0f4; }
+.navitem.active svg { stroke: var(--accent-hi); }
+
+#main {
+  flex: 1; min-width: 0;
+  background: linear-gradient(135deg, rgba(192,57,47,0.13), rgba(28,20,24,0.55) 42%), var(--panel);
+  border-radius: 14px;
+  margin: 6px 0 0;
+  padding: 16px 20px;
+  display: flex; flex-direction: column;
+  min-height: 0;
+}
+
+.panelhead {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 14px; flex-shrink: 0;
+}
+.panelhead h1 { font-size: 15px; font-weight: 500; }
+.headicons { display: flex; gap: 14px; color: var(--muted); }
+.headicons svg { width: 16px; height: 16px; }
+.headicons svg:hover { stroke: var(--text); }
+
+/* ---- views ---- */
+.view { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.view.hidden { display: none; }
+
+/* ---- now playing ---- */
+#view-now { justify-content: center; }
+#nowplaying { display: flex; gap: 20px; align-items: center; }
+#artwrap { flex-shrink: 0; text-align: center; width: 126px; }
+#art {
+  width: 126px; height: 126px;
+  border-radius: 9px;
+  background: var(--panel-2) center/cover no-repeat;
+  display: flex; align-items: center; justify-content: center;
+}
+#art svg { width: 42px; height: 42px; stroke: var(--accent-dim); }
+#np-title {
+  font-size: 14px; font-weight: 600; margin-top: 11px;
+  letter-spacing: 0.6px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+#np-artist {
+  font-size: 11px; color: var(--muted); letter-spacing: 1.2px;
+  margin-top: 2px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+#wave { flex: 1; height: 92px; min-width: 0; }
+
+/* ---- playlist ---- */
+#listtools { display: flex; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
+#filter {
+  flex: 1; background: rgba(0,0,0,0.28);
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 7px 11px; color: var(--text); font-size: 12px;
+  font-family: inherit; outline: none; user-select: text;
+}
+#filter:focus { border-color: var(--accent); }
+#filter::placeholder { color: #6a6a74; }
+.tbtn {
+  background: rgba(255,255,255,0.05); border: none;
+  border-radius: 7px; padding: 7px 13px;
+  color: var(--text); font-size: 12px; font-family: inherit;
+  cursor: default; white-space: nowrap;
+}
+.tbtn:hover { background: rgba(255,255,255,0.11); }
+
+#tracks { flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden; position: relative; }
+#sizer { position: relative; width: 100%; }
+#tracks::-webkit-scrollbar { width: 9px; }
+#tracks::-webkit-scrollbar-track { background: transparent; }
+#tracks::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
+#tracks::-webkit-scrollbar-thumb:hover { background: #4a3a42; }
+
+.row {
+  /* Only the visible window of rows exists in the DOM, positioned absolutely
+     inside a spacer sized to the full list. Height must stay fixed and match
+     ROW_H in app.js. */
+  position: absolute;
+  left: 0; right: 0;
+  height: 30px;
+  display: grid;
+  grid-template-columns: 30px 1fr 150px 46px;
+  align-items: center;
+  gap: 10px;
+  padding: 0 10px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  line-height: 1.35;
+}
+.row:hover { background: rgba(255,255,255,0.05); }
+.row.selected { background: rgba(192,57,47,0.18); }
+.row.playing { background: var(--accent-wash); }
+.row.playing .r-title { color: var(--accent-hi); font-weight: 500; }
+.row.dragover { box-shadow: inset 0 2px 0 0 var(--accent-hi); }
+.r-num { color: var(--muted); font-size: 11px; text-align: center; }
+.r-title, .r-artist { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.r-artist { color: var(--muted); }
+.r-time { color: var(--muted); font-size: 11px; text-align: right; }
+
+#empty {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  color: var(--muted); gap: 10px; text-align: center;
+}
+#empty svg { width: 34px; height: 34px; stroke: #4a3a42; }
+
+/* ---- transport ---- */
+#transport {
+  flex-shrink: 0;
+  border-top: 1px solid var(--line);
+  margin: 14px 20px 0;
+  padding: 13px 6px 16px;
+}
+#trow1 {
+  display: flex; align-items: center;
+  justify-content: space-between; margin-bottom: 13px;
+}
+#tleft, #tright { width: 190px; display: flex; align-items: center; min-width: 0; }
+#tright { justify-content: flex-end; gap: 8px; }
+#tcenter { display: flex; align-items: center; gap: 15px; }
+
+.tctl {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--panel-2); border: none;
+  display: flex; align-items: center; justify-content: center;
+  color: #c8c8d0; cursor: default;
+}
+.tctl:hover { background: #322830; color: #fff; }
+.tctl svg { width: 14px; height: 14px; }
+
+#play {
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent); border: none;
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; cursor: default;
+}
+#play:hover { background: var(--accent-hi); }
+#play svg { width: 18px; height: 18px; }
+
+.toggle {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 7px;
+  border: 1px solid transparent; background: none;
+  color: #a8a8b2; font-size: 12px; font-family: inherit;
+  cursor: default; white-space: nowrap;
+}
+.toggle svg { width: 14px; height: 14px; }
+.toggle:hover { background: rgba(255,255,255,0.05); }
+.toggle.on { border-color: var(--accent); color: var(--accent-hi); }
+
+#trow2 { display: flex; align-items: center; gap: 13px; }
+.time { font-size: 11px; color: var(--muted); width: 36px; flex-shrink: 0; }
+.time.right { text-align: right; }
+
+.slider { position: relative; height: 14px; display: flex; align-items: center; }
+.slider .track { position: absolute; left: 0; right: 0; height: 4px; background: #2e2429; border-radius: 2px; }
+.slider .fill { position: absolute; left: 0; height: 4px; background: var(--accent); border-radius: 2px; }
+.slider .knob {
+  position: absolute; width: 11px; height: 11px;
+  border-radius: 50%; background: #fff; margin-left: -5.5px;
+}
+#seek { flex: 1; min-width: 0; }
+#vol { width: 96px; flex-shrink: 0; }
+#volicon { width: 17px; height: 17px; stroke: var(--accent); flex-shrink: 0; margin-left: 6px; }
+
+#status {
+  font-size: 11px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+#drophint {
+  position: fixed; inset: 0;
+  background: rgba(19,19,22,0.9);
+  border: 2px dashed var(--accent);
+  display: none; align-items: center; justify-content: center;
+  font-size: 16px; color: var(--accent-hi);
+  z-index: 50;
+}
+#drophint.show { display: flex; }
+
+
+/* ---- press feedback ----
+   A Windows control reacts on mouse-down, not on release. Without an :active
+   state the app feels laggy even when the click is being handled instantly. */
+.tctl:active, #play:active, .tbtn:active, .toggle:active,
+.navitem:active, .winbtn:active, .headicons svg:active {
+  transform: translateY(0.5px);
+}
+#play:active { background: #a3302a; }
+.tctl:active { background: #3d3038; }
+.tbtn:active { background: rgba(255,255,255,0.16); }
+.toggle:active { background: rgba(255,255,255,0.10); }
+.navitem:active { background: rgba(255,255,255,0.09); }
+.row:active { background: rgba(192,57,47,0.24); }
+
+.tctl, #play, .tbtn, .toggle, .navitem, .winbtn, .row, .headicons svg {
+  transition: background-color 90ms ease-out, color 90ms ease-out,
+              border-color 90ms ease-out;
+}
+#play, .tctl { transition: background-color 90ms ease-out, transform 40ms ease-out; }
+
+.headicons svg, .navitem, .winbtn, .tctl, #play, .tbtn, .toggle, .row {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Rows still waiting on a tag read from the network. */
+.row .r-artist:empty::after { content: ""; }

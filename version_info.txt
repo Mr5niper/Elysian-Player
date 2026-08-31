@@ -1,8 +1,8 @@
 # file_version and product_version must be four integers
 VSVersionInfo(
   ffi=FixedFileInfo(
-    filevers=(1, 0, 0, 0),
-    prodvers=(1, 0, 0, 0),
+    filevers=(2, 0, 0, 0),
+    prodvers=(2, 0, 0, 0),
     mask=0x3f,
     flags=0x0,
     OS=0x4,
@@ -18,11 +18,11 @@ VSVersionInfo(
           [
             StringStruct('CompanyName', 'Mr5niper5oft'),
             StringStruct('FileDescription', 'Elysian Player'),
-            StringStruct('FileVersion', '1.0.0.0'),
+            StringStruct('FileVersion', '2.0.0.0'),
             StringStruct('InternalName', 'Elysian'),
             StringStruct('OriginalFilename', 'Elysian Player.exe'),
             StringStruct('ProductName', 'Elysian Player'),
-            StringStruct('ProductVersion', '1.0.0.0'),
+            StringStruct('ProductVersion', '2.0.0.0'),
           ]
         )
       ]
