@@ -181,6 +181,13 @@ elysian/
 Application state lives entirely on the Python side. The frontend polls a small
 snapshot and renders what it is given, so there is one source of truth.
 
+That poll adapts: 200ms while playing, 1s when paused, and a 2s heartbeat when
+the window is hidden. Playback runs on Python's worker thread and is unaffected
+by any of it, so audio continues normally when hidden; only the asking slows
+down. Returning to the window polls immediately rather than waiting out the
+interval, and a press or a drag pulls the rate back up so it cannot sit
+unconfirmed.
+
 Note for anyone editing the frontend: `ROW_H` in `app.js` and the `.row` height
 in `style.css` must stay equal, or rows drift out of line with the scrollbar.
 Both are 30px.
