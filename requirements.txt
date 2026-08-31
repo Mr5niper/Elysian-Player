@@ -5,19 +5,24 @@
 # run, so nothing outside this file can leak into a build.
 #
 # Targets Python 3.13.12 on Windows (enforced by BUILD_EXE.bat).
-# tkinter is not listed because it ships with CPython.
 
-# ---- Runtime dependencies (imported by Elysian_Player.py) ----
-# pygame   - audio playback via pygame.mixer.music
-# mutagen  - MP3 duration, ID3 TIT2/TPE1 tags, embedded APIC album art
-# pillow   - decodes album art and cover images, scales them for Tk
-pygame==2.6.1
+# ---- Runtime dependencies ----
+# pywebview     - the window. Draws the UI with WebView2, which is already part
+#                 of Windows, so the interface costs about half a megabyte
+#                 rather than shipping a browser engine.
+# just_playback - audio on miniaudio. Replaced pygame.mixer, which could not
+#                 seek without restarting the stream and reported position
+#                 from a wall clock that drifted out of sync.
+# miniaudio     - used directly to decode waveform peaks
+# mutagen       - tags and duration for mp3, flac, wav and ogg
+# pillow        - decodes embedded album art into a data URL for the frontend
+pywebview==6.2.1
+just_playback==0.1.8
+miniaudio==1.71
 mutagen==1.48.1
 pillow==12.3.0
 
 # ---- Build chain (used only by BUILD_EXE.bat) ----
-# Pinned as well, because a PyInstaller or hooks-contrib bump can change what
-# ends up inside the exe even when the app code has not moved at all.
 pyinstaller==6.22.1
 pyinstaller-hooks-contrib==2026.6
 altgraph==0.17.5

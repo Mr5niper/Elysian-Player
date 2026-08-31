@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Elysian Player</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+
+  <div id="titlebar" class="pywebview-drag-region">
+    <div class="spacer pywebview-drag-region"></div>
+    <div class="winbtn" id="win-min" title="Minimise">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    </div>
+    <div class="winbtn" id="win-max" title="Maximise">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+    </div>
+    <div class="winbtn close" id="win-close" title="Close">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="6" y1="6" x2="18" y2="18"/><line x1="18" y1="6" x2="6" y2="18"/></svg>
+    </div>
+  </div>
+
+  <div id="body">
+    <div id="sidebar">
+      <div class="navitem" data-view="playlists">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="15" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="11" y2="18"/><circle cx="19" cy="16" r="3"/><line x1="22" y1="16" x2="22" y2="7"/></svg>
+        Playlists
+      </div>
+      <div class="navitem active" data-view="now">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+        Now Playing
+      </div>
+    </div>
+
+    <div id="main">
+      <div class="panelhead">
+        <h1 id="panel-title">Now playing</h1>
+        <div class="headicons">
+          <svg id="ic-add" title="Add files" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          <svg id="ic-folder" title="Add folder" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+        </div>
+      </div>
+
+      <div id="view-now" class="view">
+      <div id="nowplaying">
+        <div id="artwrap">
+          <div id="art">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          </div>
+          <div id="np-title">Nothing playing</div>
+          <div id="np-artist"></div>
+        </div>
+        <canvas id="wave"></canvas>
+      </div>
+      </div>
+
+      <div id="view-list" class="view hidden">
+        <div id="listtools">
+          <input id="filter" type="text" placeholder="Filter" spellcheck="false">
+          <button class="tbtn" id="btn-load">Load M3U</button>
+          <button class="tbtn" id="btn-save">Save M3U</button>
+        </div>
+        <div id="tracks"><div id="sizer"></div></div>
+        <div id="empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          <div>Drop music here, or use the + above</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="transport">
+    <div id="trow1">
+      <div id="tleft"><span id="status"></span></div>
+      <div id="tcenter">
+        <button class="tctl" id="prev" title="Previous">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M7 6v12H5V6zm12 0v12L9.5 12z"/></svg>
+        </button>
+        <button id="play" title="Play">
+          <svg id="play-icon" viewBox="0 0 24 24" fill="currentColor"><path id="play-path" d="M7 4l13 8-13 8z"/></svg>
+        </button>
+        <button class="tctl" id="next" title="Next">
+          <svg viewBox="0 0 24 24" fill="currentColor"><path d="M17 6v12h2V6zM5 6v12l9.5-6z"/></svg>
+        </button>
+      </div>
+      <div id="tright">
+        <button class="toggle" id="shuffle">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></svg>
+          Shuffle
+        </button>
+        <button class="toggle" id="repeat">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></svg>
+          <span id="repeat-label">Repeat</span>
+        </button>
+      </div>
+    </div>
+
+    <div id="trow2">
+      <span class="time" id="t-now">0:00</span>
+      <div class="slider" id="seek">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+      <span class="time right" id="t-total">0:00</span>
+      <svg id="volicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+      <div class="slider" id="vol">
+        <div class="track"></div><div class="fill"></div><div class="knob"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="drophint">Drop to add to playlist</div>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
