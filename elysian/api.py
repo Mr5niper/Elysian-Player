@@ -12,15 +12,19 @@ import time
 from pathlib import Path
 
 from . import config
+from . import paths as pathutil
 from .models.playlist import Playlist
 from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
 from .services.art import ArtProvider
-from .services.discovery import DiscoveryProvider
-from .services.lyrics import LyricsProvider
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.waveform import peaks_for
+
+from .logs import get as _get_logger
+
+log = _get_logger("api")
+
 
 REPEAT_CYCLE = {"none": "all", "all": "one", "one": "none"}
 
@@ -31,8 +35,6 @@ class Api:
         self._playlist = Playlist()
         self._engine = PlaybackEngine()
         self._art = ArtProvider()
-        self._lyrics = LyricsProvider()
-        self._discovery = DiscoveryProvider(config.AUDIO_EXTENSIONS)
         self._scanner = MetadataScanner()
         self._scanner.start()
 
@@ -40,7 +42,6 @@ class Api:
         self._current_id = -1
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
-        self._discovery_on = bool(self._settings["discovery"])
         self._engine.set_volume(self._settings.get("volume", 0.8))
 
         self._shuffle_bag: list[int] = []
@@ -51,16 +52,29 @@ class Api:
         self._peaks: list[float] = []
         self._peaks_for: str | None = None
         self._closing = False
-        self._queued: set[int] = set()
+        self._queued: dict[int, int] = {}
+        # Offset to resume at, applied the first time the restored track is
+        # played. Seeking at startup would mean opening the file over the
+        # network before the window has even drawn.
+        self._resume_at = 0.0
+        self._resume_id = -1
+        self._maximized = False
         self._lock = threading.RLock()
         self._scan_dirty = False
         self._last_scan_bump = 0.0
+        # Ids whose metadata changed since the frontend last collected them.
+        # Sending the whole track list every time a tag arrived meant well
+        # over a megabyte crossing the bridge each second on a large playlist,
+        # to communicate a couple of dozen changed rows.
+        self._dirty: set[int] = set()
+        self._meta_revision = 0
 
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
             "shuffle": self._shuffle, "repeat": self._repeat,
-            "status": "", "revision": 0,
+            "status": "", "maximized": False, "revision": 0,
+            "meta_revision": 0, "scan_pending": 0,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -90,14 +104,14 @@ class Api:
                 try:
                     self._dispatch(cmd)
                 except Exception:
-                    pass
+                    log.exception("command failed: %r", cmd)
                 while True:
                     try:
                         self._dispatch(self._cmd.get_nowait())
                     except queue.Empty:
                         break
                     except Exception:
-                        pass
+                        log.exception("queued command failed")
             try:
                 self._drain_scanner()
                 self._advance_if_finished()
@@ -107,7 +121,9 @@ class Api:
                 self._ensure_peaks(track)
                 self._rebuild_snapshot()
             except Exception:
-                pass
+                # An invariant failure here would otherwise repeat silently
+                # every 40ms forever.
+                log.exception("worker maintenance pass failed")
 
     def _dispatch(self, cmd) -> None:
         name, args = cmd[0], cmd[1:]
@@ -148,48 +164,94 @@ class Api:
         """
         changed = False
         for track_id, info in self._scanner.drain():
+            # Release the queue slot whether or not the track still exists, or
+            # a removed track would hold its id forever.
+            self._queued.pop(track_id, None)
             track = self._playlist.by_id(track_id)
             if track:
+                before = track.length
                 apply_metadata(track, info)
+                self._playlist.adjust_length(track.length - before)
+                self._dirty.add(track_id)
                 changed = True
         if changed:
             self._scan_dirty = True
         now = time.monotonic()
-        if self._scan_dirty and now - self._last_scan_bump >= 1.0:
+        if self._scan_dirty and now - self._last_scan_bump >= 0.4:
             self._scan_dirty = False
             self._last_scan_bump = now
-            self._bump()
+            # A metadata revision, not a structural one: the set of rows has
+            # not changed, so the frontend only needs the rows that did.
+            self._meta_revision += 1
 
-    def request_scan(self, ids) -> None:
-        """Read tags for these tracks only.
+    def request_scan(self, ids, priority: int = MetadataScanner.VISIBLE) -> int:
+        """Queue tag reads for these tracks.
 
-        Called by the frontend for the rows currently on screen. Files may live
-        on a network share, where every tag read is a round trip, so nothing is
-        opened until something actually needs to display it.
+        Files may live on a network share where every read is a round trip, so
+        nothing is opened until something needs it. The frontend asks for the
+        rows on screen at VISIBLE, and fills otherwise-idle time with
+        prefetching at a lower priority; the queue is ordered so a row
+        scrolling into view never waits behind that prefetch.
         """
+        queued = 0
+        priority = int(priority)
         for raw in (ids or []):
             track_id = int(raw)
-            if track_id in self._queued:
+            # A row already queued for prefetch must be able to jump to the
+            # front when it scrolls into view. Without this it stays stuck
+            # behind the whole background sweep.
+            existing = self._queued.get(track_id)
+            if existing is not None and existing <= priority:
                 continue
             track = self._playlist.by_id(track_id)
             if track is None or track.scanned:
                 continue
-            self._queued.add(track_id)
-            self._scanner.submit(track_id, track.path)
+            self._queued[track_id] = priority
+            self._scanner.submit(track_id, track.path, priority)
+            queued += 1
+        return queued
+
+    def reset_scan_queue(self) -> int:
+        """Discard everything queued, at any priority.
+
+        The frontend calls this whenever the visible rows change: work queued
+        for a screen you have scrolled past is not displayed, so it must not
+        be in front of the screen you are looking at now.
+        """
+        dropped = self._scanner.drop_all()
+        for track_id in dropped:
+            self._queued.pop(track_id, None)
+        return len(dropped)
+
+    def drop_prefetch(self) -> int:
+        """Forget queued prefetch that the view has scrolled away from."""
+        dropped = self._scanner.drop_prefetch()
+        for track_id in dropped:
+            self._queued.pop(track_id, None)
+        return len(dropped)
+
+    def request_prefetch(self, ids) -> int:
+        """Prefetch, at a priority that yields to anything on screen."""
+        return self.request_scan(ids, MetadataScanner.BACKGROUND)
+
+    def request_ahead(self, ids) -> int:
+        """Prefetch in the direction of travel while scrolling."""
+        return self.request_scan(ids, MetadataScanner.AHEAD)
 
     def _scan_one(self, track_id: int) -> None:
         track = self._playlist.by_id(track_id)
         if track is not None and not track.scanned and track_id not in self._queued:
-            self._queued.add(track_id)
-            self._scanner.submit(track_id, track.path)
+            self._queued[track_id] = MetadataScanner.VISIBLE
+            self._scanner.submit(track_id, track.path, MetadataScanner.VISIBLE)
 
     # ---- state ---------------------------------------------------------
 
     def get_tick(self) -> dict:
         """Pure read. Never touches the disk or the network.
 
-        Everything that can block -- loading a track, reading tags, extracting
-        album art -- happens on the worker thread and lands in _snapshot. A
+        Everything that can block, such as loading a track, reading tags or
+        extracting album art, happens on the worker thread and lands in
+        _snapshot. A
         bridge call that opens a file on a network share freezes the whole
         interface, which is what made the app feel dead.
         """
@@ -200,6 +262,38 @@ class Api:
         with self._snap_lock:
             full = dict(self._full)
         return full
+
+    @staticmethod
+    def _track_row(track_id: int, t) -> dict:
+        return {
+            "id": track_id,
+            "title": t.title,
+            "artist": t.artist,
+            "album": t.album,
+            # os.path.basename, not Path().name: this runs once per track per
+            # full send, and Path is about 9x slower here: 120ms against
+            # 11ms for fifty thousand tracks.
+            "name": os.path.basename(t.path),
+            "length": round(t.length, 1),
+            "scanned": t.scanned,
+        }
+
+    def get_meta(self) -> dict:
+        """Only the rows whose metadata changed since the last collection.
+
+        Bounded by how many tracks were scanned, not by playlist size, so this
+        stays a few kilobytes whether the playlist holds fifty tracks or fifty
+        thousand.
+        """
+        with self._lock:
+            rows = []
+            for track_id in self._dirty:
+                track = self._playlist.by_id(track_id)
+                if track is None:
+                    continue
+                rows.append(self._track_row(track_id, track))
+            self._dirty.clear()
+            return {"tracks": rows, "meta_revision": self._meta_revision}
 
     def get_peaks(self) -> list:
         return self._peaks
@@ -217,21 +311,19 @@ class Api:
                 "shuffle": self._shuffle,
                 "repeat": self._repeat,
                 "status": self._footer(),
+                "maximized": self._maximized,
                 "revision": self._revision,
+                "meta_revision": self._meta_revision,
+                # Lets the frontend keep the queue topped up without ever
+                # dumping a whole playlist into it.
+                "scan_pending": self._scanner.pending,
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
+                self._dirty.clear()
                 full = {
                     "tracks": [
-                        {
-                            "id": self._playlist.id_at(i),
-                            "title": t.title,
-                            "artist": t.artist,
-                            "album": t.album,
-                            "name": os.path.basename(t.path),
-                            "length": round(t.length, 1),
-                            "scanned": t.scanned,
-                        }
+                        self._track_row(self._playlist.id_at(i), t)
                         for i, t in enumerate(self._playlist.tracks)
                     ],
                     "title": track.title if track else "",
@@ -262,14 +354,23 @@ class Api:
             try:
                 url = self._art.data_url(path)
             except Exception:
+                # A track with no artwork is normal and returns None; reaching
+                # here means the extraction itself broke.
+                log.warning("album art extraction failed for %s", path,
+                            exc_info=True)
                 url = None
-            self._art_cache[path] = url
-            while len(self._art_cache) > 48:
-                self._art_cache.pop(next(iter(self._art_cache)), None)
-            if url:
-                self._bump()
+            # Hand the result back to the worker rather than touching shared
+            # state and the revision counter from this thread.
+            self._post("art_ready", path, url)
 
         threading.Thread(target=work, name="elysian-art", daemon=True).start()
+
+    def _do_art_ready(self, path: str, url) -> None:
+        self._art_cache[path] = url
+        while len(self._art_cache) > 48:
+            self._art_cache.pop(next(iter(self._art_cache)), None)
+        if url:
+            self._bump()
 
     def _ensure_peaks(self, track) -> None:
         if track is None or self._peaks_for == track.path:
@@ -281,16 +382,12 @@ class Api:
             try:
                 found = peaks_for(path)
             except Exception:
+                log.warning("waveform failed for %s", path, exc_info=True)
                 found = []
-            if self._peaks_for == path:
-                self._peaks = found
-        threading.Thread(target=work, daemon=True).start()
+            self._post("peaks_ready", path, found)
+        threading.Thread(target=work, name="elysian-peaks", daemon=True).start()
 
-    def _load_peaks(self, path: str) -> None:
-        try:
-            found = peaks_for(path)
-        except Exception:
-            found = []
+    def _do_peaks_ready(self, path: str, found) -> None:
         if self._peaks_for == path:
             self._peaks = found
 
@@ -317,6 +414,8 @@ class Api:
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         subdirs.append(entry.path)
+                    # splitext, not Path().suffix: runs per file while
+                    # walking a share, and is ~5x faster.
                     elif os.path.splitext(entry.name)[1].lower() \
                             in config.AUDIO_EXTENSIONS:
                         yield entry.path
@@ -453,6 +552,12 @@ class Api:
         track = self._playlist.by_id(int(track_id))
         if track is None:
             return False
+        # Pick up where the last session left off, once, for that one track.
+        if int(track_id) == self._resume_id:
+            if start <= 0.0:
+                start = self._resume_at
+            self._resume_id = -1
+            self._resume_at = 0.0
         try:
             self._engine.play(track.path, start)
         except PlaybackError as exc:
@@ -461,7 +566,12 @@ class Api:
         self._current_id = int(track_id)
         self._scan_one(self._current_id)
         if not track.scanned or not track.length:
+            # Writing length directly means the cached total is now wrong.
+            before = track.length
             track.length = self._engine.duration
+            self._playlist.adjust_length(track.length - before)
+            self._dirty.add(self._current_id)
+            self._meta_revision += 1
         if not self._history or self._history[-1] != self._current_id:
             self._history.append(self._current_id)
             del self._history[:-200]
@@ -598,14 +708,26 @@ class Api:
             self._window.minimize()
 
     def win_maximise(self) -> None:
-        if self._window:
-            try:
-                if self._window.state and getattr(self._window.state, "maximized", False):
-                    self._window.restore()
-                else:
-                    self._window.maximize()
-            except Exception:
+        """Toggle between maximised and normal.
+
+        window.state is a dict pywebview uses for sharing values with the
+        frontend, not window geometry, so the old check for a `maximized`
+        attribute on it was always False, and an empty dict is falsy, so it
+        short-circuited before even looking. The button only ever maximised.
+        The real state is tracked from pywebview's own maximized/restored
+        events, which also catches Win+Up and a title bar double-click.
+        """
+        if not self._window:
+            return
+        try:
+            if self._maximized:
+                self._window.restore()
+                self._maximized = False
+            else:
                 self._window.maximize()
+                self._maximized = True
+        except Exception:
+            log.warning("could not toggle the window state", exc_info=True)
 
     def win_close(self) -> None:
         if self._window:
@@ -624,9 +746,13 @@ class Api:
             self._rebuild_bag()
         last = self._settings.get("last_path", "")
         if last:
+            self._resume_at = float(
+                self._settings.get("last_position", 0.0) or 0.0)
             for i, track in enumerate(self._playlist.tracks):
-                if os.path.normcase(track.path) == os.path.normcase(last):
+                if pathutil.same(track.path, last):
                     self._current_id = self._playlist.id_at(i)
+                    if self._resume_at > 1.0:
+                        self._resume_id = self._current_id
                     break
         self._bump()
 
@@ -636,12 +762,18 @@ class Api:
             "volume": self._engine.volume,
             "shuffle": self._shuffle,
             "repeat": self._repeat,
-            "discovery": self._discovery_on,
             "playlist": [t.path for t in self._playlist.tracks],
             "last_path": track.path if track else "",
             "last_position": self._engine.position if self._engine.active else 0.0,
         })
         settings_store.save(self._settings)
+
+    #: Queued commands that change what gets written to the settings file.
+    #: Anything else still queued at exit is transport, and running it on the
+    #: way out would only start work nobody is waiting for.
+    #: Underscored because pywebview walks every public attribute of this
+    #: object when it builds the JS API.
+    _PERSISTED_COMMANDS = frozenset({"remove", "reorder"})
 
     def _shutdown(self) -> None:
         if self._closing:
@@ -649,20 +781,88 @@ class Api:
         self._closing = True
         if self._worker.is_alive():
             self._worker.join(timeout=0.8)
+        self._flush_persisted()
+        try:
+            self._drain_scanner()
+        except Exception:
+            log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
         self._engine.stop()
+
+    def _flush_persisted(self) -> None:
+        """Apply queued changes the worker never got to.
+
+        Setting the closing flag stops the worker loop on its next pass, so a
+        reorder or a removal made a moment before closing was still sitting in
+        the queue and the session was then saved without it.
+
+        Only called from _shutdown, and only for commands that affect what is
+        saved.
+        """
+        while True:
+            try:
+                cmd = self._cmd.get_nowait()
+            except queue.Empty:
+                return
+            if cmd[0] not in self._PERSISTED_COMMANDS:
+                continue
+            try:
+                self._dispatch(cmd)
+            except Exception:
+                log.exception("could not apply %r while closing", cmd[0])
 
 
     # ---- entry points used by the host, kept off the JS bridge ----------
     # Every public attribute of this object is walked by pywebview when it
     # builds window.pywebview.api, and it recurses into non-callables. A
     # public reference to the Window made it descend into window.dom.document,
-    # which blocks until the page has loaded -- so the API object was never
+    # which blocks until the page has loaded, so the API object was never
     # created and every call from JavaScript failed.
+
+    #: Everything JavaScript is allowed to call. Anything public and not in
+    #: this set is a mistake. See _assert_bridge_surface.
+    BRIDGE = frozenset({
+        "get_tick", "get_full", "get_meta", "get_peaks",
+        "request_scan", "request_ahead", "request_prefetch",
+        "drop_prefetch", "reset_scan_queue",
+        "add_files", "add_folder", "load_m3u", "save_m3u",
+        "remove", "reorder", "open_paths",
+        "play_id", "toggle_play", "stop", "next_track", "previous",
+        "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
+        "win_minimise", "win_maximise", "win_close",
+        # host-side entry points, not called from JS but necessarily public
+        "attach", "boot", "ingest", "close", "set_maximized", "BRIDGE",
+    })
+
+    def _assert_bridge_surface(self) -> None:
+        """Fail loudly if a public attribute has crept onto this object.
+
+        pywebview builds window.pywebview.api by walking public attributes and
+        recursing into non-callables. A public reference to the window once
+        made it descend into window.dom.document, which blocks until the page
+        loads, so the API object was never created and every call from the
+        frontend silently failed. This turns that class of mistake into an
+        error at startup instead of a dead interface.
+        """
+        extra = {n for n in dir(self) if not n.startswith("_")} - self.BRIDGE
+        if extra:
+            raise RuntimeError(
+                "Api exposes unexpected public attributes to pywebview: "
+                + ", ".join(sorted(extra))
+                + ". Prefix them with an underscore, or add them to "
+                  "Api.BRIDGE if JavaScript is meant to call them.")
 
     def attach(self, window) -> None:
         self._window = window
+
+    def set_maximized(self, flag: bool) -> None:
+        """Called from pywebview's own window events, so the toggle stays
+        correct when the user maximises by some other means."""
+        # No _bump here: `maximized` rides on every tick, and bumping the
+        # revision would make the frontend refetch the whole track list for a
+        # window resize.
+        self._maximized = bool(flag)
 
     def boot(self) -> None:
         self._restore_session()

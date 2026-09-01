@@ -7,6 +7,8 @@ files examined, and is only ever called from a worker thread.
 """
 import os
 import random
+
+from .. import paths as pathutil
 from pathlib import Path
 
 MAX_DEPTH = 3
@@ -35,6 +37,7 @@ def _walk(folder: Path, extensions, budget: int, depth: int = 0):
             return
         try:
             if entry.is_file():
+                # splitext, not Path().suffix: runs per file, ~5x faster
                 if os.path.splitext(entry.name)[1].lower() in extensions:
                     budget -= 1
                     yield entry.path
@@ -70,7 +73,7 @@ class DiscoveryProvider:
 
         Safe to call from a worker thread; touches nothing shared.
         """
-        excluded = {os.path.normcase(os.path.abspath(p)) for p in exclude}
+        excluded = pathutil.keys(exclude)
         candidates = []
         for root in self.search_roots(seed_path):
             key = str(root)
@@ -78,7 +81,7 @@ class DiscoveryProvider:
                 self._cache[key] = list(
                     _walk(root, self.extensions, MAX_FILES))
             for path in self._cache[key]:
-                if os.path.normcase(os.path.abspath(path)) not in excluded:
+                if pathutil.key(path) not in excluded:
                     candidates.append(path)
             if candidates:
                 break

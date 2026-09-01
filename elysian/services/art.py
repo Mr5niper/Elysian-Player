@@ -1,93 +1,23 @@
 """Album art extraction.
 
-Returns textures as array('f') of RGBA floats, which is what DearPyGui's
-add_static_texture wants. The v1 cache grew without bound; this one is an LRU
-capped at ART_CACHE_LIMIT entries.
+Returns art as a base64 data URL for the web frontend. The float-array
+texture path that DearPyGui needed is gone along with that interface.
 """
-from array import array
 from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 
 from ..config import ART_CACHE_LIMIT, ART_SIZE, COVER_NAMES
+from ..logs import get as _get_logger
 
-Texture = tuple[int, int, array]
-
-
-def _to_texture(img, size: int) -> Texture:
-    from PIL import Image
-
-    img = img.convert("RGBA")
-    img.thumbnail((size, size), Image.LANCZOS)
-    canvas = Image.new("RGBA", (size, size), (0, 0, 0, 0))
-    canvas.paste(img, ((size - img.width) // 2, (size - img.height) // 2))
-    data = array("f", [b / 255.0 for b in canvas.tobytes()])
-    return size, size, data
+log = _get_logger("art")
 
 
 class ArtProvider:
     def __init__(self, size: int = ART_SIZE, limit: int = ART_CACHE_LIMIT):
         self.size = size
         self.limit = limit
-        self._cache: OrderedDict[str, Texture | None] = OrderedDict()
         self._urls: OrderedDict[str, str | None] = OrderedDict()
-
-    def get(self, audio_path: str) -> Texture | None:
-        if audio_path in self._cache:
-            self._cache.move_to_end(audio_path)
-            return self._cache[audio_path]
-        texture = self._extract(audio_path)
-        self._cache[audio_path] = texture
-        while len(self._cache) > self.limit:
-            self._cache.popitem(last=False)
-        return texture
-
-    def _extract(self, audio_path: str) -> Texture | None:
-        from PIL import Image
-
-        raw = self._embedded_bytes(audio_path)
-        if raw:
-            try:
-                return _to_texture(Image.open(BytesIO(raw)), self.size)
-            except Exception:
-                pass
-        folder = Path(audio_path).parent
-        for name in COVER_NAMES:
-            candidate = folder / name
-            try:
-                if candidate.is_file():
-                    return _to_texture(Image.open(candidate), self.size)
-            except Exception:
-                continue
-        return None
-
-    @staticmethod
-    def _embedded_bytes(audio_path: str) -> bytes | None:
-        suffix = Path(audio_path).suffix.lower()
-        try:
-            if suffix == ".mp3":
-                from mutagen.id3 import ID3, APIC
-
-                tags = ID3(audio_path)
-                for frame in tags.values():
-                    if isinstance(frame, APIC) and frame.data:
-                        return frame.data
-            elif suffix == ".flac":
-                from mutagen.flac import FLAC
-
-                flac = FLAC(audio_path)
-                if flac.pictures:
-                    return flac.pictures[0].data
-            else:
-                from mutagen import File
-
-                meta = File(audio_path)
-                pictures = getattr(meta, "pictures", None)
-                if pictures:
-                    return pictures[0].data
-        except Exception:
-            return None
-        return None
 
     def data_url(self, audio_path: str) -> str | None:
         """Return embedded art as a base64 data URL for the web frontend."""
@@ -135,6 +65,31 @@ class ArtProvider:
         except Exception:
             return None
 
+    @staticmethod
+    def _embedded_bytes(audio_path: str) -> bytes | None:
+        suffix = Path(audio_path).suffix.lower()
+        try:
+            if suffix == ".mp3":
+                from mutagen.id3 import ID3, APIC
+
+                for frame in ID3(audio_path).values():
+                    if isinstance(frame, APIC) and frame.data:
+                        return frame.data
+            elif suffix == ".flac":
+                from mutagen.flac import FLAC
+
+                pictures = FLAC(audio_path).pictures
+                if pictures:
+                    return pictures[0].data
+            else:
+                from mutagen import File
+
+                pictures = getattr(File(audio_path), "pictures", None)
+                if pictures:
+                    return pictures[0].data
+        except Exception:
+            log.debug("no embedded art in %s", audio_path, exc_info=True)
+        return None
+
     def clear(self) -> None:
-        self._cache.clear()
         self._urls.clear()

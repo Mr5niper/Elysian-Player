@@ -1,12 +1,12 @@
 # Elysian Player
 
-<img width="2300" height="855" alt="image" src="https://github.com/user-attachments/assets/45da3b84-06b9-4cf7-8a5f-5fc227bcaed5" />
+<img width="2350" height="855" alt="image" src="https://github.com/user-attachments/assets/fc55accb-bb0f-44a5-80f8-d5db7b7a4574" />
 
 A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.0.0.0
+- **Version**: 2.1.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -30,12 +30,17 @@ megabytes. Audio runs on miniaudio.
   it was already in the playlist.
 * Only one copy runs at a time. Opening another file hands it to the player
   that is already running rather than starting a second one.
-* Filter the playlist by title, artist, album or filename as you type.
-* Drag rows to reorder. Ctrl-click to select several.
+* Filter the playlist by title, artist, album or filename as you type. The
+  playlist shows track number, title, artist, album and duration; the album
+  column hides itself when the window is narrower than 820px.
+* Drag rows to reorder. Selection works as it does in Explorer: ctrl-click
+  toggles one row, shift-click takes the whole run from the last row you
+  clicked, and ctrl+shift-click adds that run to what is already selected.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
 * Restores your playlist, current track, volume, shuffle and repeat state on
-  the next launch.
+  the next launch, and resumes the last track from where you stopped the first
+  time you press play.
 
 ## Controls
 
@@ -51,10 +56,15 @@ megabytes. Audio runs on miniaudio.
 | `/`              | Jump to the filter box  |
 | `Escape`         | Clear the filter        |
 | `Double-click`   | Play that track         |
-| `Ctrl+click`     | Add to the selection    |
+| `Ctrl+click`     | Toggle one row          |
+| `Shift+click`    | Select a run of rows    |
+| `Ctrl+Shift+click` | Add a run to the selection |
 | Drag a row       | Reorder the playlist    |
 
-## Not in 2.0.0.0
+Double-clicking the title bar maximises and restores, as it would on a normal
+window. The maximise button changes to a restore glyph while maximised.
+
+## Not in 2.1.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:
@@ -68,16 +78,20 @@ so nobody upgrades expecting them:
 * Right-click context menu
 * Shortcuts dialog
 
-The lyrics and discovery code still lives in `elysian/services/`, tested but
-not wired to the interface. The rest was removed.
+The lyrics and discovery modules still live in `elysian/services/`, tested,
+but they are no longer constructed at runtime. Nothing else remains.
 
 ## Working With Files On A Network Share
 
 The player assumes your library might not be local, and avoids touching files
 until it has to:
 
-* Adding files reads no tags. Tracks appear as filenames immediately, and tags
-  are read only for the rows currently on screen, driven by scrolling.
+* Adding files reads no tags. Tracks appear as filenames immediately, and the
+  rows on screen are read first. Whatever capacity is left over fills in the
+  rest of the list: while you scroll, only the direction you are heading; once
+  you stop, outward from the view in both directions. Rows scrolling into view
+  jump ahead of that prefetch, and prefetch you have scrolled past is
+  discarded rather than spending round trips on rows nobody will look at.
 * Adding a folder streams the directory walk, so tracks start appearing within
   milliseconds instead of after the entire share has been enumerated.
 * Album art is fetched only for the track that is playing.
@@ -94,7 +108,12 @@ Written to `.elysian_player.json` in your home folder, not the program folder,
 so the executable can live anywhere. Delete that file to reset the app.
 
 A second small file, `.elysian_player_instance`, holds a token used by the
-single-instance check.
+single-instance check. That check talks over a Windows named pipe rather than
+a network socket, so it never triggers a firewall prompt and cannot collide
+with another program over a port number.
+
+Problems are logged to `.elysian_player.log` in the same folder, rotating at
+512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
 
 ## Installation
 
@@ -160,28 +179,57 @@ find; excluding the unused ones is what keeps this around forty megabytes.
 run.py                     entry point
 elysian/
   config.py                constants, settings path
+  logs.py                  rotating log file setup
+  paths.py                 path comparison, in one place
   api.py                   the bridge exposed to the frontend
   host.py                  window creation, file drop, file association
   single_instance.py       hands a file to an already-running copy
   models/                  Track, Playlist
   playback/engine.py       miniaudio wrapper
   services/                tags, album art, waveform, lyrics, discovery
-  web/                     index.html, style.css, app.js -- the interface
+  web/                     index.html, style.css, app.js: the interface
 ```
 
 Application state lives entirely on the Python side. The frontend polls a small
 snapshot and renders what it is given, so there is one source of truth.
 
+The frontend fetches the whole track list only when the row set changes.
+When a tag scan fills in metadata it fetches just the rows that changed --
+sending the full list for that meant over a megabyte a second on a long
+playlist to communicate a couple of dozen updates.
+
+That poll adapts: 200ms while playing, 1s when paused, and a 2s heartbeat when
+the window is hidden. Playback runs on Python's worker thread and is unaffected
+by any of it, so audio continues normally when hidden; only the asking slows
+down. Returning to the window polls immediately rather than waiting out the
+interval, and a press or a drag pulls the rate back up so it cannot sit
+unconfirmed.
+
 Note for anyone editing the frontend: `ROW_H` in `app.js` and the `.row` height
 in `style.css` must stay equal, or rows drift out of line with the scrollbar.
 Both are 30px.
+
+Every user action goes through the `intent` object in `app.js`, so a keypress
+and a click produce the same local update before the command is posted. That
+update is held by `predict`/`settled` until the backend snapshot agrees, or for
+1.5s, whichever comes first; without that hold a poll landing mid-flight snaps
+the control back and the press looks like it did nothing.
+
+Note on paths: whether two strings name the same file is decided in one place,
+`paths.key()`. It is `normcase` plus `abspath`, because `pathlib` has no
+equivalent of `normcase`, and `Path.resolve()` touches the filesystem, which on
+a network share would turn every comparison into a round trip. Two call sites
+deliberately stay on `os.path` for speed and say so in a comment; both are in
+per-track or per-file loops where `pathlib` measured 5 to 9 times slower.
 
 Note for anyone editing `api.py`: pywebview builds `window.pywebview.api` by
 walking the **public** attributes of that object, and recurses into
 non-callables. Anything that is not a method meant for JavaScript needs a
 leading underscore. A public reference to the window once made it descend into
 `window.dom.document`, which blocks until the page loads, and the API object was
-never created at all.
+never created at all. `Api.BRIDGE` lists everything JavaScript may call, and
+`_assert_bridge_surface()` runs at startup and refuses to launch if anything
+else is public.
 
 ## License
 

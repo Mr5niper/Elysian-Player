@@ -14,6 +14,11 @@ This replaces the pygame.mixer engine and removes four v1 defects outright:
 """
 
 
+from ..logs import get as _get_logger
+
+log = _get_logger("playback")
+
+
 class PlaybackError(RuntimeError):
     pass
 
@@ -113,7 +118,7 @@ class PlaybackEngine:
             try:
                 self._backend.stop()
             except Exception:
-                pass
+                log.debug("stop() raised", exc_info=True)
         self._path = None
 
     def seek(self, seconds: float) -> None:
@@ -123,7 +128,7 @@ class PlaybackEngine:
         try:
             self._backend.seek(target)
         except Exception:
-            pass
+            log.warning("seek to %.2fs failed", target, exc_info=True)
 
     def nudge(self, delta: float) -> None:
         if self.active:
@@ -135,7 +140,7 @@ class PlaybackEngine:
             try:
                 self._backend.set_volume(self._volume)
             except Exception:
-                pass
+                log.debug("set_volume() raised", exc_info=True)
 
     def finished(self) -> bool:
         """True once a loaded track has run to its end."""
