@@ -110,10 +110,9 @@ def run() -> int:
 
         if lock is not None:
             def incoming(paths):
-                if paths:
-                    target = api.open_paths(paths)
-                    if target >= 0:
-                        api.play_id(target)
+                # Api owns add-and-play on its worker thread; no id comes
+                # back and none is needed.
+                api.open_paths(paths)
                 # Launching with no file should still surface the window
                 # rather than appear to do nothing.
                 try:
@@ -126,9 +125,9 @@ def run() -> int:
         api.boot()
         opened = _argv_paths()
         if opened:
-            target = api.open_paths(opened)
-            if target >= 0:
-                api.play_id(target)
+            # Queued behind the restore_session command boot just posted, so
+            # the session is in place before the opened file plays.
+            api.open_paths(opened)
 
     # Keep the toggle honest when the window is maximised by other means:
     # Win+Up, a title bar double-click, or the OS restoring the session.
