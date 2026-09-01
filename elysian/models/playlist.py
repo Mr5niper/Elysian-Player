@@ -139,6 +139,12 @@ class Playlist:
         dst = self.index_of(before_id)
         if dst < 0:
             dst = len(self._tracks)
+        elif dst > src:
+            # index_of reads a dict of positions that still holds pre-removal
+            # indices, so after the pop above everything past src is reported
+            # one too high. Without this a track dragged downward lands past
+            # its target instead of before it.
+            dst -= 1
         self._tracks.insert(dst, track)
         self._ids.insert(dst, tid)
         self._reindex()
