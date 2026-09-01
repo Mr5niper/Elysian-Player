@@ -413,12 +413,52 @@ $("tracks").addEventListener("scroll", () => {
   requestAnimationFrame(() => { scrollPending = false; renderWindow(false); });
 });
 
+/* Selection follows Explorer: a plain click replaces the selection and sets
+   the anchor, ctrl toggles one row and moves the anchor, shift takes the run
+   from the anchor to the clicked row, and ctrl+shift adds that run to what is
+   already selected. The anchor deliberately does not move on a shift click,
+   so the run can be widened and narrowed from the same starting point.
+
+   Ranges are worked out from the filtered list, not from the rendered rows:
+   only the visible window exists in the DOM, so the rows in between may not
+   be there. */
+let selectionAnchor = null;
+
+function rangeIds(fromId, toId) {
+  let a = -1, b = -1;
+  for (let i = 0; i < filtered.length; i++) {
+    if (filtered[i].id === fromId) a = i;
+    if (filtered[i].id === toId) b = i;
+  }
+  if (a < 0 || b < 0) return null;
+  if (a > b) { const t = a; a = b; b = t; }
+  const ids = [];
+  for (let i = a; i <= b; i++) ids.push(filtered[i].id);
+  return ids;
+}
+
 $("tracks").addEventListener("click", (e) => {
   const row = e.target.closest(".row");
   if (!row) return;
   const id = Number(row.dataset.id);
-  if (e.ctrlKey) { selected.has(id) ? selected.delete(id) : selected.add(id); }
-  else { selected = new Set([id]); }
+
+  if (e.shiftKey) {
+    const run = selectionAnchor === null ? null : rangeIds(selectionAnchor, id);
+    if (run) {
+      if (!e.ctrlKey) selected = new Set();
+      run.forEach((x) => selected.add(x));
+    } else {
+      // No usable anchor, so behave like a plain click.
+      selected = new Set([id]);
+      selectionAnchor = id;
+    }
+  } else if (e.ctrlKey) {
+    selected.has(id) ? selected.delete(id) : selected.add(id);
+    selectionAnchor = id;
+  } else {
+    selected = new Set([id]);
+    selectionAnchor = id;
+  }
   paintRowStates();
 });
 
