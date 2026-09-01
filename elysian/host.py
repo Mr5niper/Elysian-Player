@@ -1,7 +1,8 @@
 """Window host.
 
 Creates the frameless pywebview window, wires the DOM drop event (which is how
-real file paths reach Python -- the browser alone only exposes filenames), and
+real file paths reach Python, since the browser alone exposes only
+filenames), and
 handles a path passed on the command line so double-clicking an audio file in
 Explorer opens it here.
 """
@@ -87,7 +88,7 @@ def run() -> int:
         """pywebview attaches pywebviewFullPath to each dropped file.
 
         Only the drop is handled here. Highlighting during the drag is done
-        entirely in JavaScript -- routing every dragover across the bridge to
+        entirely in JavaScript. Routing every dragover across the bridge to
         toggle a CSS class made the overlay strobe.
         """
         try:

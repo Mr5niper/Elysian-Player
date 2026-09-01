@@ -2,7 +2,7 @@
 
 Tracks carry a stable integer id that never changes for the lifetime of the
 entry. The view addresses rows by id, never by position, which is what makes
-reordering correct while a filter is active -- the v1 bug where dropping a row
+reordering correct while a filter is active. In v1, dropping a row
 onto its visible neighbour moved it somewhere else entirely.
 """
 import itertools

@@ -7,7 +7,7 @@ paths over and exit.
 
 On Windows that channel is a named pipe. A loopback TCP socket does the same
 job, but listening on a port makes Windows Firewall prompt on first launch --
-an alarming thing for a music player to do -- and a hard-coded port number can
+an alarming thing for a music player to do, and a hard-coded port number can
 be taken by anything else on the machine. A pipe has a name rather than a
 number, needs no firewall permission, and cannot collide.
 

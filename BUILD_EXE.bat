@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ==========================================================================
-::  Elysian Player 2.0.0.0  --  EXE Builder
+::  Elysian Player 2.1.0.0 EXE Builder
 ::  Strictly requires Python 3.13.12
 ::  Works even when Python is NOT on PATH (uses the "py" launcher).
 ::
@@ -137,7 +137,7 @@ if not defined VIRTUAL_ENV (
 :: 3. Install the pinned dependencies
 :: ==========================================================================
 :: pip itself is upgraded, but setuptools and wheel are deliberately NOT
-:: upgraded here -- they are pinned in requirements.txt, and upgrading them
+:: upgraded here. They are pinned in requirements.txt, and upgrading them
 :: first would just get them downgraded back a moment later.
 echo [STEP 3/4] Upgrading pip and installing pinned dependencies...
 python -m pip install --upgrade pip >nul
@@ -171,15 +171,15 @@ echo.
 ::    --add-data     icon.ico again, because resource_path() reads it at
 ::                   runtime for the window icon
 ::    --version-file Windows file-details metadata
-::    --add-data     elysian\web holds index.html, style.css and app.js -- the
-::                   entire interface. Without this the window opens blank.
+::    --add-data     elysian\web holds index.html, style.css and app.js. That
+::                   is the entire interface; without it the window opens blank.
 ::    --collect-all  just_playback and miniaudio ship the miniaudio DLL, which
 ::                   is the audio backend. If this is missing, the app runs but
 ::                   nothing plays.
 ::    --exclude-module  pywebview can drive Qt or GTK as well as WinForms, and
 ::                   PyInstaller bundles every backend it can find. Excluding
 ::                   the unused ones is what keeps this a ~40 MB exe. tkinter
-::                   is excluded too -- v2 used it for dialogs, v3 does not.
+::                   is excluded too, since it is no longer used for dialogs.
 ::
 :: python -m PyInstaller is used rather than bare 'pyinstaller' so the build
 :: cannot accidentally pick up a PyInstaller from outside this venv.
@@ -209,7 +209,7 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --noupx ^
 
 :: Capture the result first, then remove the .spec PyInstaller just generated.
 :: It is rebuilt from the flags above on every run, so it must never be left
-:: sitting in the folder or committed -- a stale one invites someone to run
+:: sitting in the folder or committed. A stale one invites someone to run
 :: "pyinstaller <spec>" and silently ignore every flag set here.
 set "BUILD_RC=!errorlevel!"
 if exist "%EXE_NAME%.spec" del "%EXE_NAME%.spec" >nul 2>&1

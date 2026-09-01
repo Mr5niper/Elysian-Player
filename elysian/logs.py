@@ -1,7 +1,7 @@
 """Logging setup.
 
 Writes to a rotating file next to the settings, so a user can send a log
-without needing a console build. Failures stay non-fatal -- the point is that
+without needing a console build. Failures stay non-fatal; the point is that
 they leave evidence instead of vanishing.
 """
 import logging
