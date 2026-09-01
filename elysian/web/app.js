@@ -49,7 +49,7 @@ function setView(name) {
   view = name;
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
-  $("panel-title").textContent = name === "now" ? "Now playing" : "Playlists";
+  $("panel-title").textContent = name === "now" ? "Now playing" : "Playlist";
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
