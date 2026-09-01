@@ -766,15 +766,49 @@ class Api:
         })
         settings_store.save(self._settings)
 
+    #: Queued commands that change what gets written to the settings file.
+    #: Anything else still queued at exit is transport, and running it on the
+    #: way out would only start work nobody is waiting for.
+    #: Underscored because pywebview walks every public attribute of this
+    #: object when it builds the JS API.
+    _PERSISTED_COMMANDS = frozenset({"remove", "reorder"})
+
     def _shutdown(self) -> None:
         if self._closing:
             return
         self._closing = True
         if self._worker.is_alive():
             self._worker.join(timeout=0.8)
+        self._flush_persisted()
+        try:
+            self._drain_scanner()
+        except Exception:
+            log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
         self._engine.stop()
+
+    def _flush_persisted(self) -> None:
+        """Apply queued changes the worker never got to.
+
+        Setting the closing flag stops the worker loop on its next pass, so a
+        reorder or a removal made a moment before closing was still sitting in
+        the queue and the session was then saved without it.
+
+        Only called from _shutdown, and only for commands that affect what is
+        saved.
+        """
+        while True:
+            try:
+                cmd = self._cmd.get_nowait()
+            except queue.Empty:
+                return
+            if cmd[0] not in self._PERSISTED_COMMANDS:
+                continue
+            try:
+                self._dispatch(cmd)
+            except Exception:
+                log.exception("could not apply %r while closing", cmd[0])
 
 
     # ---- entry points used by the host, kept off the JS bridge ----------
