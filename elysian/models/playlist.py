@@ -157,10 +157,19 @@ class Playlist:
         for t in self._tracks:
             lines.append(f"#EXTINF:{int(t.length)},{t.display}")
             p = Path(t.path)
+            # relpath, not Path.relative_to: relative_to only works when the
+            # track sits beneath the playlist folder, so a playlist saved next
+            # to the music rather than above it came out fully absolute.
+            # relpath walks up with ".." and matches the README promise of
+            # "relative where possible".
             try:
-                lines.append(str(p.relative_to(base)).replace("\\", "/"))
+                rel = os.path.relpath(t.path, base)
             except ValueError:
+                # A different drive letter or share root has no relative form
+                # on Windows; keep those absolute.
                 lines.append(str(p))
+                continue
+            lines.append(rel.replace("\\", "/"))
         Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     def load_m3u(self, path: str, extensions) -> list[Track]:

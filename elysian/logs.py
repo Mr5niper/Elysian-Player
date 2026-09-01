@@ -30,21 +30,33 @@ def setup() -> logging.Logger:
         "%(asctime)s %(levelname)-8s %(threadName)-18s %(name)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S")
 
+    # Under --windowed there is no console, so this only does anything when
+    # running from source. Added first so a failure to open the log file
+    # below still leaves evidence somewhere.
+    stream = None
+    if sys.stderr is not None:
+        stream = logging.StreamHandler(sys.stderr)
+        stream.setFormatter(fmt)
+        root.addHandler(stream)
+
     try:
+        # delay=True postpones opening the file until the first record, which
+        # also postpones any failure past this try block. Probe the location
+        # once here, so an unwritable path is one warning at startup rather
+        # than a "--- Logging error ---" stack trace on every record.
+        with open(LOG_FILE, "a", encoding="utf-8"):
+            pass
         handler = logging.handlers.RotatingFileHandler(
             LOG_FILE, maxBytes=MAX_BYTES, backupCount=BACKUPS,
             encoding="utf-8", delay=True)
         handler.setFormatter(fmt)
         root.addHandler(handler)
     except OSError:
-        pass
-
-    # Under --windowed there is no console, so this only does anything when
-    # running from source.
-    if sys.stderr is not None:
-        stream = logging.StreamHandler(sys.stderr)
-        stream.setFormatter(fmt)
-        root.addHandler(stream)
+        # Logging setup must never stop the player from launching, but a
+        # silently missing log file makes every later failure invisible.
+        if stream is not None:
+            root.warning("could not open log file %s", LOG_FILE,
+                         exc_info=True)
 
     if not root.handlers:
         root.addHandler(logging.NullHandler())
