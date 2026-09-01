@@ -172,7 +172,18 @@ class Playlist:
             lines.append(rel.replace("\\", "/"))
         Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8")
 
-    def load_m3u(self, path: str, extensions) -> list[Track]:
+    def read_m3u_paths(self, path: str, extensions) -> list[str]:
+        """Parse a playlist file into audio paths without mutating anything.
+
+        Kept separate from load_m3u so the caller can do this file I/O
+        outside any lock and apply the result separately.
+
+        No Path.resolve() here: paths.py's rule is abspath, never resolve(),
+        because resolve() touches the filesystem to follow symlinks and every
+        entry would become an extra round trip on a network share. Relative
+        entries are joined textually against the playlist folder and only
+        tested for existence.
+        """
         base = Path(path).parent
         found = []
         text = Path(path).read_text(encoding="utf-8", errors="ignore")
@@ -182,13 +193,16 @@ class Playlist:
                 continue
             p = Path(s)
             if not p.is_file():
-                candidate = (base / s)
-                try:
-                    candidate = candidate.resolve()
-                except OSError:
-                    continue
+                candidate = base / s
                 if candidate.is_file():
                     p = candidate
             if p.is_file() and p.suffix.lower() in extensions:
-                found.append(str(p))
-        return self.add_paths(found)
+                # Stored absolute (pure string work) so an entry that only
+                # resolved relative to the playlist folder does not later
+                # depend on the process working directory.
+                found.append(pathutil.absolute(p))
+        return found
+
+    def load_m3u(self, path: str, extensions) -> list[Track]:
+        """Parse a playlist file and add any new tracks from it."""
+        return self.add_paths(self.read_m3u_paths(path, extensions))
