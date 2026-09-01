@@ -42,6 +42,8 @@ class ArtProvider:
             try:
                 img = Image.open(BytesIO(raw))
             except Exception:
+                log.debug("embedded artwork could not be decoded for %s",
+                          audio_path, exc_info=True)
                 img = None
         if img is None:
             folder = Path(audio_path).parent
@@ -52,6 +54,8 @@ class ArtProvider:
                         img = Image.open(candidate)
                         break
                 except Exception:
+                    log.debug("cover file %s could not be opened",
+                              candidate, exc_info=True)
                     continue
         if img is None:
             return None
@@ -63,6 +67,8 @@ class ArtProvider:
             data = base64.b64encode(buf.getvalue()).decode("ascii")
             return "data:image/jpeg;base64," + data
         except Exception:
+            log.debug("artwork conversion failed for %s",
+                      audio_path, exc_info=True)
             return None
 
     @staticmethod
