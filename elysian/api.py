@@ -53,6 +53,8 @@ class Api:
         self._peaks_for: str | None = None
         self._closing = False
         self._queued: dict[int, int] = {}
+        # Running count for the folder-scan status line, owned by the worker.
+        self._folder_added = 0
         # Offset to resume at, applied the first time the restored track is
         # played. Seeking at startup would mean opening the file over the
         # network before the window has even drawn.
@@ -424,37 +426,52 @@ class Api:
             stack.extend(reversed(subdirs))
 
     def _ingest_folder_async(self, root: str) -> None:
-        """Walk a folder on a worker thread, adding tracks in batches.
+        """Walk a folder on a helper thread, adding tracks in batches.
 
         The playlist grows while you watch instead of after the whole share
-        has been enumerated.
+        has been enumerated. The helper thread only discovers paths and posts
+        them; the worker thread applies every mutation, so playlist state,
+        the revision counter and the status line keep a single owner.
         """
         def work():
-            batch, total = [], 0
+            batch = []
             for path in self._walk_folder(root):
                 batch.append(path)
                 if len(batch) >= 150:
-                    total += self._add_batch(batch)
+                    self._post("add_batch", batch)
                     batch = []
-                    self._set_status(f"Scanning folder... {total} found", 30.0)
             if batch:
-                total += self._add_batch(batch)
-            if total:
-                self._set_status(f"Added {total} track{'s' if total != 1 else ''}")
-            else:
-                self._set_status("No audio files found")
+                self._post("add_batch", batch)
+            self._post("folder_scan_done")
 
-        self._set_status("Scanning folder...", 30.0)
+        self._post("status", "Scanning folder...", 30.0)
         threading.Thread(target=work, name="elysian-folder", daemon=True).start()
 
-    def _add_batch(self, paths) -> int:
+    def _do_add_batch(self, paths) -> None:
+        # _lock still matters here: _ingest and open_paths add tracks from the
+        # bridge and drop threads, so playlist mutation is not worker-only yet.
         with self._lock:
             added = self._playlist.add_paths(paths)
             if added:
                 self._rebuild_bag()
         if added:
             self._bump()
-        return len(added)
+            # Dropping several folders at once merges their counts. That is
+            # rare, and "Added N tracks" for the lot is still the truth.
+            self._folder_added += len(added)
+            self._set_status(f"Scanning folder... {self._folder_added} found",
+                             30.0)
+
+    def _do_folder_scan_done(self) -> None:
+        total = self._folder_added
+        self._folder_added = 0
+        if total:
+            self._set_status(f"Added {total} track{'s' if total != 1 else ''}")
+        else:
+            self._set_status("No audio files found")
+
+    def _do_status(self, text: str, seconds: float = 4.0) -> None:
+        self._set_status(text, seconds)
 
     def _ingest(self, paths) -> int:
         audio, folders = [], []
@@ -498,6 +515,13 @@ class Api:
         return self._ingest(paths or [])
 
     def load_m3u(self) -> int:
+        """Pick a playlist file; the worker does the reading.
+
+        The playlist may sit on a network share, and reading it on the bridge
+        call would freeze the interface exactly the way this app is built not
+        to. Returns 1 if a file was chosen, 0 if the dialog was cancelled; the
+        outcome arrives through the status line like every other slow result.
+        """
         import webview
 
         result = self._window.create_file_dialog(
@@ -505,12 +529,21 @@ class Api:
             file_types=("Playlists (*.m3u;*.m3u8)", "All files (*.*)"))
         if not result:
             return 0
-        added = self._playlist.load_m3u(result[0], config.AUDIO_EXTENSIONS)
+        self._post("load_m3u", result[0])
+        return 1
+
+    def _do_load_m3u(self, path: str) -> None:
+        try:
+            with self._lock:
+                added = self._playlist.load_m3u(path, config.AUDIO_EXTENSIONS)
+        except OSError:
+            log.error("could not load playlist %s", path, exc_info=True)
+            self._set_status("Could not load playlist")
+            return
         if added:
             self._rebuild_bag()
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
-        return len(added)
 
     def save_m3u(self) -> bool:
         import webview
@@ -627,15 +660,15 @@ class Api:
     def _do_nudge(self, delta: float) -> None:
         self._engine.nudge(float(delta))
 
-    def set_volume(self, value: float) -> None:
+    def _do_set_volume(self, value: float) -> None:
         self._engine.set_volume(float(value))
 
-    def toggle_shuffle(self) -> None:
+    def _do_toggle_shuffle(self) -> None:
         self._shuffle = not self._shuffle
         self._rebuild_bag()
         self._bump()
 
-    def cycle_repeat(self) -> None:
+    def _do_cycle_repeat(self) -> None:
         self._repeat = REPEAT_CYCLE[self._repeat]
         self._bump()
 
@@ -695,6 +728,15 @@ class Api:
     def nudge(self, delta: float) -> None:
         self._post("nudge", float(delta))
 
+    def set_volume(self, value: float) -> None:
+        self._post("set_volume", float(value))
+
+    def toggle_shuffle(self) -> None:
+        self._post("toggle_shuffle")
+
+    def cycle_repeat(self) -> None:
+        self._post("cycle_repeat")
+
     def remove(self, ids) -> None:
         self._post("remove", [int(i) for i in (ids or [])])
 
@@ -738,8 +780,7 @@ class Api:
     def _restore_session(self) -> None:
         # Deliberately no os.path.isfile() here. On a network share that is
         # one round trip per saved path before the window has even drawn.
-        # Missing files surface when something tries to play them, or via
-        # Tools > Remove missing.
+        # Missing files surface only when something later tries to open them.
         paths = self._settings.get("playlist", [])
         if paths:
             self._playlist.add_paths(paths)
@@ -769,11 +810,18 @@ class Api:
         settings_store.save(self._settings)
 
     #: Queued commands that change what gets written to the settings file.
+    #: Volume, shuffle and repeat are queue-owned now, so a change made a
+    #: moment before closing would otherwise be lost from the saved session.
+    #: load_m3u is deliberately absent: applying it here would read a file,
+    #: possibly over a dead network share, with the window already gone.
     #: Anything else still queued at exit is transport, and running it on the
     #: way out would only start work nobody is waiting for.
     #: Underscored because pywebview walks every public attribute of this
     #: object when it builds the JS API.
-    _PERSISTED_COMMANDS = frozenset({"remove", "reorder"})
+    _PERSISTED_COMMANDS = frozenset({
+        "remove", "reorder", "add_batch",
+        "set_volume", "toggle_shuffle", "cycle_repeat",
+    })
 
     def _shutdown(self) -> None:
         if self._closing:
