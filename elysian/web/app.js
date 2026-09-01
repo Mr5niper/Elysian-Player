@@ -756,7 +756,20 @@ document.addEventListener("keydown", (e) => {
   else if (k === "ArrowDown") { e.preventDefault(); intent.volumeBy(-0.05); }
   else if (k === "Delete") { intent.removeSelected(); }
   else if (k === "Enter") {
-    if (selected.size) intent.playTrack(Array.from(selected)[0]);
+    /* Enter is also the default activation key for whatever control has
+       keyboard focus. Tabbing to Shuffle and pressing Enter used to both
+       toggle shuffle and restart the selected row from here, because the
+       button's own click and this shortcut fired on the same keydown.
+       Play-selected is a playlist shortcut, so it only applies when focus
+       is not sitting on a control. Space stays global on purpose: a click
+       leaves the clicked button focused, and Space after clicking Shuffle
+       should still mean play/pause, not shuffle again. */
+    const t = e.target;
+    const tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+    const onControl = tag === "button" || tag === "input" ||
+        tag === "select" || tag === "textarea" ||
+        !!(t && t.closest && t.closest(".slider, .winbtn"));
+    if (!onControl && selected.size) intent.playTrack(Array.from(selected)[0]);
   }
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
