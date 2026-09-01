@@ -240,7 +240,7 @@ function markScrolling(dir) {
 
 /* Returns rows worth asking for at this priority. A row already queued for
    prefetch is returned again when it becomes visible, so it can be upgraded
-   and jump the queue -- otherwise it stays stuck behind the whole background
+   and jump the queue. Otherwise it stays stuck behind the whole background
    sweep, which is what made scrolling ahead of the fill feel like waiting. */
 function take(indices, priority) {
   const ids = [];
@@ -267,7 +267,7 @@ function forgetPrefetchRequests() {
    prefetch and gives the whole reader to the visible rows. */
 /* True if something on screen is blank and has not already been asked for at
    top priority. Used to avoid resetting the queue while it is already busy
-   with exactly the right rows -- doing that every 250ms threw away the work
+   with exactly the right rows. Doing that every 250ms threw away the work
    in flight and started it over. */
 function visibleNeedsRequeue() {
   for (const i of visibleIndices()) {
@@ -282,7 +282,7 @@ function fillVisibleNow(a) {
   const wanted = visibleIndices();
 
   /* Empty the reader's queue outright. Scrolling past a screen leaves its
-     rows queued, and those were asked for at visible priority too -- after a
+     rows queued, and those were asked for at visible priority too, so after a
      long scroll the screen you actually stopped on sits behind hundreds of
      them. Nothing that is not on screen right now has any claim. */
   if (typeof a.reset_scan_queue === "function") {
@@ -897,7 +897,7 @@ let pollTimer = 0;
 /* How often to ask the backend what is happening.
 
    Playback itself runs on Python's worker thread and is completely unaffected
-   by any of this -- audio keeps going when the window is hidden. The only
+   by any of this, and audio keeps going when the window is hidden. The only
    thing that slows down is the frontend asking about it, which is wasted work
    when the seek bar nobody is looking at would not move anyway.
 
@@ -972,7 +972,7 @@ async function poll() {
         }
         // Peaks belong to a track, so only discard them when the track
         // changes. Keying this off the revision meant anything that bumped it
-        // -- a finished tag scan, a window state change -- blanked the
+        // such as a finished tag scan or a window state change, blanked the
         // waveform until the peaks were fetched again a few ticks later.
         if (tick.current_id !== peaksForId) {
           peaksForId = tick.current_id;

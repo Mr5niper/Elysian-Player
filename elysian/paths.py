@@ -3,7 +3,8 @@
 Two rules the rest of the package follows.
 
 **Comparison goes through `key()`.** Deciding whether two strings name the same
-file is Windows-specific -- case-insensitive, backslash-normalised -- and
+file is Windows-specific, being case-insensitive and backslash-normalised,
+and
 `pathlib` has no equivalent of `os.path.normcase`. That logic was previously
 copied into six places, which is exactly the sort of thing that drifts apart.
 
@@ -23,7 +24,7 @@ def key(path) -> str:
     """Canonical form for comparing two paths for identity.
 
     Case-folded and absolute on Windows, absolute elsewhere. Not for display,
-    and not a guarantee the file exists -- no filesystem access happens here.
+    and not a guarantee the file exists. No filesystem access happens here.
     """
     return os.path.normcase(os.path.abspath(str(path)))
 

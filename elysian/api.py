@@ -249,8 +249,9 @@ class Api:
     def get_tick(self) -> dict:
         """Pure read. Never touches the disk or the network.
 
-        Everything that can block -- loading a track, reading tags, extracting
-        album art -- happens on the worker thread and lands in _snapshot. A
+        Everything that can block, such as loading a track, reading tags or
+        extracting album art, happens on the worker thread and lands in
+        _snapshot. A
         bridge call that opens a file on a network share freezes the whole
         interface, which is what made the app feel dead.
         """
@@ -270,7 +271,8 @@ class Api:
             "artist": t.artist,
             "album": t.album,
             # os.path.basename, not Path().name: this runs once per track per
-            # full send, and Path is ~9x slower -- 120ms versus 11ms for 50k.
+            # full send, and Path is about 9x slower here: 120ms against
+            # 11ms for fifty thousand tracks.
             "name": os.path.basename(t.path),
             "length": round(t.length, 1),
             "scanned": t.scanned,
@@ -710,7 +712,7 @@ class Api:
 
         window.state is a dict pywebview uses for sharing values with the
         frontend, not window geometry, so the old check for a `maximized`
-        attribute on it was always False -- and an empty dict is falsy, so it
+        attribute on it was always False, and an empty dict is falsy, so it
         short-circuited before even looking. The button only ever maximised.
         The real state is tracked from pywebview's own maximized/restored
         events, which also catches Win+Up and a title bar double-click.
@@ -815,11 +817,11 @@ class Api:
     # Every public attribute of this object is walked by pywebview when it
     # builds window.pywebview.api, and it recurses into non-callables. A
     # public reference to the Window made it descend into window.dom.document,
-    # which blocks until the page has loaded -- so the API object was never
+    # which blocks until the page has loaded, so the API object was never
     # created and every call from JavaScript failed.
 
     #: Everything JavaScript is allowed to call. Anything public and not in
-    #: this set is a mistake -- see _assert_bridge_surface.
+    #: this set is a mistake. See _assert_bridge_surface.
     BRIDGE = frozenset({
         "get_tick", "get_full", "get_meta", "get_peaks",
         "request_scan", "request_ahead", "request_prefetch",

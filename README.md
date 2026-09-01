@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.0.0.0
+- **Version**: 2.1.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -33,7 +33,9 @@ megabytes. Audio runs on miniaudio.
 * Filter the playlist by title, artist, album or filename as you type. The
   playlist shows track number, title, artist, album and duration; the album
   column hides itself when the window is narrower than 820px.
-* Drag rows to reorder. Ctrl-click to select several.
+* Drag rows to reorder. Selection works as it does in Explorer: ctrl-click
+  toggles one row, shift-click takes the whole run from the last row you
+  clicked, and ctrl+shift-click adds that run to what is already selected.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
 * Restores your playlist, current track, volume, shuffle and repeat state on
@@ -54,13 +56,15 @@ megabytes. Audio runs on miniaudio.
 | `/`              | Jump to the filter box  |
 | `Escape`         | Clear the filter        |
 | `Double-click`   | Play that track         |
-| `Ctrl+click`     | Add to the selection    |
+| `Ctrl+click`     | Toggle one row          |
+| `Shift+click`    | Select a run of rows    |
+| `Ctrl+Shift+click` | Add a run to the selection |
 | Drag a row       | Reorder the playlist    |
 
 Double-clicking the title bar maximises and restores, as it would on a normal
 window. The maximise button changes to a restore glyph while maximised.
 
-## Not in 2.0.0.0
+## Not in 2.1.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:
@@ -183,7 +187,7 @@ elysian/
   models/                  Track, Playlist
   playback/engine.py       miniaudio wrapper
   services/                tags, album art, waveform, lyrics, discovery
-  web/                     index.html, style.css, app.js -- the interface
+  web/                     index.html, style.css, app.js: the interface
 ```
 
 Application state lives entirely on the Python side. The frontend polls a small
@@ -213,7 +217,7 @@ the control back and the press looks like it did nothing.
 
 Note on paths: whether two strings name the same file is decided in one place,
 `paths.key()`. It is `normcase` plus `abspath`, because `pathlib` has no
-equivalent of `normcase` and `Path.resolve()` touches the filesystem -- which on
+equivalent of `normcase`, and `Path.resolve()` touches the filesystem, which on
 a network share would turn every comparison into a round trip. Two call sites
 deliberately stay on `os.path` for speed and say so in a comment; both are in
 per-track or per-file loops where `pathlib` measured 5 to 9 times slower.
