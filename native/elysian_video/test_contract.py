@@ -170,6 +170,29 @@ def main() -> int:
     assert lib.lib.ely_get_last_error(q) == planted, \
         "success must not clear last_error"
     print("last_error persists across success, as the contract locks")
+
+    # NULL player: last_error yields the empty string, never a crash
+    assert lib.lib.ely_get_last_error(None) == "", \
+        "last_error(NULL) must be the empty string"
+    print("last_error(NULL) is the empty string")
+
+    # STOPPED keeps the file loaded, so duration stays available
+    assert lib.lib.ely_play(q) == 0
+    assert lib.lib.ely_stop(q) == 0
+    assert lib.lib.ely_get_state(q) == 4                # STOPPED
+    assert lib.lib.ely_get_duration(q) > 0, \
+        "duration must remain available in STOPPED"
+    assert lib.lib.ely_get_position(q) == 0.0
+    print("duration survives STOPPED; position is zero there")
+
+    # audio classification through the raw ABI, not just the wrapper
+    assert lib.lib.ely_load(q, str(aud)) == 0
+    ainfo = ElyMediaInfo()
+    ainfo.struct_size = ctypes.sizeof(ElyMediaInfo)
+    assert lib.lib.ely_get_media_info(q, ctypes.byref(ainfo)) == 0
+    assert ainfo.kind == MEDIA_AUDIO and ainfo.has_audio \
+        and not ainfo.has_video and ainfo.width == 0
+    print("raw ABI classifies audio files correctly")
     lib.lib.ely_destroy_player(q)
 
     # Layer C: the shell-facing wrapper over the same library
@@ -189,6 +212,9 @@ def main() -> int:
     assert abs(eng.volume - 0.4) < 0.001
     eng.stop()
     assert not eng.active and eng.position == 0.0
+    # stop from a merely loaded (not active) state is legal per contract
+    eng.stop()
+    assert eng.duration > 0, "media must remain loaded after stop"
     aud_eng = VideoPlaybackEngine(lib_path)
     aud_eng.load(str(aud))
     assert aud_eng.kind == MEDIA_AUDIO and not aud_eng.has_video

@@ -44,9 +44,16 @@ class VideoPlaybackEngine:
     # -- lifecycle -----------------------------------------------------------
 
     def close(self) -> None:
+        # Deliberate lifecycle hygiene: unload releases media and pipeline
+        # state through the contract's own path before the handle dies, so
+        # a future real engine tears down decoders in its defined order
+        # rather than relying on destroy to imply it.
         if self._lib and self._handle:
+            self._lib.lib.ely_unload(self._handle)
             self._lib.lib.ely_destroy_player(self._handle)
             self._handle = None
+            self._path = None
+            self._info = None
 
     # -- loading and transport ------------------------------------------------
 
@@ -87,7 +94,10 @@ class VideoPlaybackEngine:
             self.pause()
 
     def stop(self) -> None:
-        if self.available and self.active:
+        # Legal from any loaded state, not just active: the contract has
+        # only EMPTY reject stop. _path deliberately stays set afterwards,
+        # because stop keeps the media loaded; do not "clean it up".
+        if self.available and self._path is not None:
             self._lib.check(self._lib.lib.ely_stop(self._handle),
                             self._handle)
 

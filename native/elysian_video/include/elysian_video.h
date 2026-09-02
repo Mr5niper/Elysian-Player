@@ -105,6 +105,14 @@ ELY_API void ely_destroy_player(ElyPlayer* p);
 ELY_API int ely_load(ElyPlayer* p, const wchar_t* path);
 ELY_API int ely_unload(ElyPlayer* p);
 
+/* play: LOADED starts from current position, PAUSED resumes, STOPPED and
+ * ENDED restart from zero, PLAYING is an idempotent success that does not
+ * rewind, EMPTY fails BAD_STATE.
+ * stop: keeps the media loaded, resets position to zero, state STOPPED;
+ * only EMPTY rejects it.
+ * seek: clamps to [0, duration]; paused stays paused at the target, playing
+ * keeps playing, and seeking an ENDED player to before the end lands it
+ * PAUSED, never silently playing. */
 ELY_API int ely_play(ElyPlayer* p);
 ELY_API int ely_pause(ElyPlayer* p);
 ELY_API int ely_resume(ElyPlayer* p);
@@ -114,6 +122,8 @@ ELY_API int ely_seek(ElyPlayer* p, double seconds);
 ELY_API int ely_set_volume(ElyPlayer* p, float volume);   /* clamped 0..1 */
 ELY_API float ely_get_volume(ElyPlayer* p);
 
+/* position is zero in EMPTY and STOPPED; duration remains available in any
+ * loaded state, STOPPED included, and is zero only in EMPTY. */
 ELY_API double ely_get_position(ElyPlayer* p);
 ELY_API double ely_get_duration(ElyPlayer* p);
 
@@ -133,8 +143,8 @@ ELY_API int ely_resize_video(ElyPlayer* p, int width, int height);
 
 /* Describes the most recent FAILURE on this handle. Success never clears
  * it; the next failing call replaces it. Empty string until the first
- * failure. Never NULL for a valid player; the pointer is valid until the
- * next failing call on the same player. */
+ * failure. Never NULL: a NULL player yields the empty string, and for a
+ * valid player the pointer is valid until the next failing call on it. */
 ELY_API const wchar_t* ely_get_last_error(ElyPlayer* p);
 
 #ifdef __cplusplus
