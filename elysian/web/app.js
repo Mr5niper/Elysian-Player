@@ -4,6 +4,7 @@ const api = () => window.pywebview && window.pywebview.api;
 let state = {
   tracks: [], current_id: -1, playing: false, position: 0, duration: 0,
   volume: 0.8, muted: false, shuffle: false, repeat: "none", peaks: [],
+  media_type: "none", has_video: false,
 };
 let selected = new Set();
 let seeking = false;
@@ -166,8 +167,9 @@ function writeRow(row, t) {
   const playing = t.id === state.current_id;
   const num = playing ? "\u25B6" : String(row.dataset.pos);
   const time = t.length ? fmt(t.length) : "";
+  const title = t.has_video ? `\u{1F3AC} ${t.title}` : t.title;
   if (c[0].textContent !== num) c[0].textContent = num;
-  if (c[1].textContent !== t.title) c[1].textContent = t.title;
+  if (c[1].textContent !== title) c[1].textContent = title;
   if (c[2].textContent !== t.artist) c[2].textContent = t.artist;
   if (c[3].textContent !== t.album) c[3].textContent = t.album;
   if (c[4].textContent !== time) c[4].textContent = time;
@@ -906,7 +908,15 @@ function applyTick(s) {
   state.duration = s.duration;
   state.shuffle = shuffle;
   state.repeat = repeat;
+  state.media_type = s.media_type || "none";
+  state.has_video = !!s.has_video;
   if (!volHeld) state.volume = s.volume;
+
+  /* Now Playing switches between its two panes on the snapshot's word.
+     Class toggles are cheap and idempotent, so no prev-tracking needed. */
+  const videoMode = state.media_type === "video" || state.has_video;
+  $("audio-pane").classList.toggle("hidden", videoMode);
+  $("video-pane").classList.toggle("hidden", !videoMode);
 
   // Set an attribute on the existing path rather than replacing the node.
   // Any innerHTML write here destroys the element mid-click, and the browser
@@ -942,7 +952,7 @@ function applyTick(s) {
   paint($("vol"), state.volume);
 
   paintRowStates();
-  drawWave();
+  if (!videoMode) drawWave();
 }
 
 /* Patch the rows that changed, in place. No rebuild: the row set is the same,
@@ -959,6 +969,8 @@ function applyMeta(m) {
     t.artist = row.artist;
     t.album = row.album;
     t.length = row.length;
+    t.media_type = row.media_type || t.media_type;
+    t.has_video = !!row.has_video;
     t.scanned = row.scanned;
     if (row.id === state.current_id) currentTouched = true;
     if (scanRequested.has(row.id) && scanOutstanding > 0) scanOutstanding--;
@@ -975,6 +987,8 @@ function applyMeta(m) {
     if (current) {
       setText($("np-title"), "npTitle", current.title || "Nothing playing");
       setText($("np-artist"), "npArtist", current.artist || "");
+      setText($("video-title"), "videoTitle", current.title || "Nothing playing");
+      setText($("video-artist"), "videoArtist", current.artist || "");
     }
   }
   // filtered holds the same objects, so the visible rows just need rewriting.
@@ -987,6 +1001,8 @@ function applyFull(f) {
   state.tracks = f.tracks || [];
   setText($("np-title"), "npTitle", f.title || "Nothing playing");
   setText($("np-artist"), "npArtist", f.artist || "");
+  setText($("video-title"), "videoTitle", f.title || "Nothing playing");
+  setText($("video-artist"), "videoArtist", f.artist || "");
 
   if (prev.art !== f.art) {
     prev.art = f.art;

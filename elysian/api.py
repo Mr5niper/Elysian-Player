@@ -15,7 +15,8 @@ from . import config
 from . import paths as pathutil
 from .models.playlist import Playlist
 from .models.track import format_time
-from .playback.engine import PlaybackEngine, PlaybackError
+from .playback.engine import PlaybackError
+from .playback.media_controller import MediaController
 from .services import settings as settings_store
 from .services.art import ArtProvider
 from .services.scanner import MetadataScanner, apply_metadata
@@ -33,7 +34,7 @@ class Api:
     def __init__(self):
         self._window = None
         self._playlist = Playlist()
-        self._engine = PlaybackEngine()
+        self._engine = MediaController()
         self._art = ArtProvider()
         self._scanner = MetadataScanner()
         self._scanner.start()
@@ -85,6 +86,7 @@ class Api:
             "shuffle": self._shuffle, "repeat": self._repeat,
             "status": "", "maximized": False, "revision": 0,
             "meta_revision": 0, "scan_pending": 0,
+            "media_type": "none", "has_video": False,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -127,8 +129,15 @@ class Api:
                 self._advance_if_finished()
                 with self._lock:
                     track = self._playlist.by_id(self._current_id)
-                self._ensure_art(track)
-                self._ensure_peaks(track)
+                if track is not None and track.has_video:
+                    # Video has no album art or waveform; holding the peaks
+                    # empty keeps the audio pane clean if the user flips back.
+                    if self._peaks:
+                        self._peaks = []
+                    self._peaks_for = None
+                else:
+                    self._ensure_art(track)
+                    self._ensure_peaks(track)
                 self._rebuild_snapshot()
             except Exception:
                 # An invariant failure here would otherwise repeat silently
@@ -289,6 +298,10 @@ class Api:
             "title": t.title,
             "artist": t.artist,
             "album": t.album,
+            "media_type": t.media_type,
+            "has_video": t.has_video,
+            "width": t.width,
+            "height": t.height,
             # os.path.basename, not Path().name: this runs once per track per
             # full send, and Path is about 9x slower here: 120ms against
             # 11ms for fifty thousand tracks.
@@ -320,6 +333,8 @@ class Api:
     def _rebuild_snapshot(self) -> None:
         with self._lock:
             track = self._playlist.by_id(self._current_id)
+            media_type = track.media_type if track else "none"
+            has_video = bool(track.has_video) if track else False
             tick = {
                 "current_id": self._current_id,
                 "playing": self._engine.playing,
@@ -338,6 +353,8 @@ class Api:
                 # Lets the frontend keep the queue topped up without ever
                 # dumping a whole playlist into it.
                 "scan_pending": self._scanner.pending,
+                "media_type": media_type,
+                "has_video": has_video,
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
@@ -366,6 +383,8 @@ class Api:
         takes long enough that a play or next press would sit in the queue
         behind it.
         """
+        if track is not None and track.has_video:
+            return
         if track is None or track.path in self._art_cache:
             return
         path = track.path
@@ -415,7 +434,7 @@ class Api:
     # ---- adding --------------------------------------------------------
 
     def _walk_folder(self, root: str):
-        """Yield audio paths as they are discovered.
+        """Yield media paths as they are discovered.
 
         os.scandir with a stack, not Path.rglob, and no sort of the whole
         result. rglob materialised the entire tree before returning a single
@@ -438,7 +457,7 @@ class Api:
                     # splitext, not Path().suffix: runs per file while
                     # walking a share, and is ~5x faster.
                     elif os.path.splitext(entry.name)[1].lower() \
-                            in config.AUDIO_EXTENSIONS:
+                            in config.MEDIA_EXTENSIONS:
                         yield entry.path
                 except OSError:
                     continue
@@ -501,13 +520,13 @@ class Api:
         if total:
             self._set_status(f"Added {total} track{'s' if total != 1 else ''}")
         else:
-            self._set_status("No audio files found")
+            self._set_status("No media files found")
 
     def _do_status(self, text: str, seconds: float = 4.0) -> None:
         self._set_status(text, seconds)
 
     def _split_paths(self, paths):
-        """Sort raw paths into audio files and folders.
+        """Sort raw paths into media files and folders.
 
         is_dir() is a stat per path, a round trip each on a network share, so
         this only ever runs on the worker thread.
@@ -517,7 +536,7 @@ class Api:
             p = Path(raw)
             if p.is_dir():
                 folders.append(str(p))
-            elif p.suffix.lower() in config.AUDIO_EXTENSIONS:
+            elif p.suffix.lower() in config.MEDIA_EXTENSIONS:
                 audio.append(str(p))
         return audio, folders
 
@@ -542,7 +561,7 @@ class Api:
         if audio:
             self._do_add_audio_paths(audio)
         elif not folders:
-            self._set_status("No audio files found")
+            self._set_status("No media files found")
 
     def _do_add_audio_paths(self, paths) -> None:
         # _lock guards readers that iterate playlist state from the bridge
@@ -564,7 +583,8 @@ class Api:
 
         result = self._window.create_file_dialog(
             webview.OPEN_DIALOG, allow_multiple=True,
-            file_types=("Audio (*.mp3;*.flac;*.wav;*.ogg)", "All files (*.*)"))
+            file_types=("Media (*.mp3;*.flac;*.wav;*.ogg;*.mp4;*.m4v;*.mov)",
+                        "All files (*.*)"))
         return self._ingest(result or [])
 
     def add_folder(self) -> int:
@@ -598,7 +618,7 @@ class Api:
         try:
             # Parsing reads the file and stats candidates, so it happens
             # outside _lock; only the mutation needs it.
-            found = self._playlist.read_m3u_paths(path, config.AUDIO_EXTENSIONS)
+            found = self._playlist.read_m3u_paths(path, config.MEDIA_EXTENSIONS)
         except OSError:
             log.error("could not load playlist %s", path, exc_info=True)
             self._set_status("Could not load playlist")
@@ -713,6 +733,11 @@ class Api:
             with self._lock:
                 before = track.length
                 track.length = self._engine.duration
+                if self._engine.has_video:
+                    track.media_type = "video"
+                    track.has_video = True
+                    track.width = self._engine.width
+                    track.height = self._engine.height
                 self._playlist.adjust_length(track.length - before)
                 self._dirty.add(self._current_id)
                 self._meta_revision += 1
@@ -1162,7 +1187,7 @@ class Api:
             self._ingest_folder_async(folder)
         if not audio:
             if not folders:
-                self._set_status("No audio files found")
+                self._set_status("No media files found")
             return
         self._do_add_audio_paths(audio)
         with self._lock:

@@ -3,7 +3,7 @@
 Creates the frameless pywebview window, wires the DOM drop event (which is how
 real file paths reach Python, since the browser alone exposes only
 filenames), and
-handles a path passed on the command line so double-clicking an audio file in
+handles a path passed on the command line so double-clicking a media file in
 Explorer opens it here.
 """
 import os
@@ -36,13 +36,13 @@ def _index_path() -> str:
 
 
 def _argv_paths() -> list[str]:
-    """Audio files handed to us by Explorer via file association."""
+    """Media files handed to us by Explorer via file association."""
     found = []
     for arg in sys.argv[1:]:
         if arg.startswith("-"):
             continue
         candidate = Path(arg)
-        if candidate.suffix.lower() in config.AUDIO_EXTENSIONS \
+        if candidate.suffix.lower() in config.MEDIA_EXTENSIONS \
                 and candidate.is_file():
             # absolute, not resolved: keep the case the user sees, and do not
             # follow symlinks over a share
