@@ -5,7 +5,9 @@
 #include "h264_decode.h"
 #include "audio_out.h"
 #include "video_out.h"
+#include "queue.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
 
@@ -37,34 +39,213 @@ ElyPlayer* player_create(void) {
     p->video_dec = new (std::nothrow) H264Decoder();
     p->audio_out = new (std::nothrow) AudioOut();
     p->video_out = new (std::nothrow) VideoOut();
+    p->audio_q = new (std::nothrow) PacketQueue();
+    p->video_q = new (std::nothrow) PacketQueue();
     if (!p->clock || !p->demux || !p->audio_dec || !p->video_dec ||
-        !p->audio_out || !p->video_out) {
+        !p->audio_out || !p->video_out || !p->audio_q || !p->video_q) {
         player_destroy(p);
         return NULL;
     }
-    memset(p->video_out, 0, sizeof(VideoOut));
+    /* no memset over VideoOut: it holds non-trivial members now */
+    memset(p->audio_q, 0, sizeof(PacketQueue));
+    memset(p->video_q, 0, sizeof(PacketQueue));
+    if (!queue_init(p->audio_q, 64) || !queue_init(p->video_q, 64)) {
+        player_destroy(p);
+        return NULL;
+    }
+    p->demux_buf.reserve(1 << 20);
+    p->demux_eof = 0;
+    p->audio_ready = p->video_ready = 0;
+    p->audio_eof = p->video_eof = 0;
     clock_reset(p->clock, 0.0);
-    audio_out_open(p->audio_out);
     return p;
 }
 
 void player_destroy(ElyPlayer* p) {
     if (!p) return;
+    player_reset_pipeline(p);          /* frees queued packet payloads */
     if (p->demux) mp4_close(p->demux);
     if (p->audio_out) audio_out_close(p->audio_out);
+    if (p->audio_dec) aac_free(p->audio_dec);
+    if (p->video_dec) h264_free(p->video_dec);
+    if (p->audio_q) queue_free(p->audio_q);
+    if (p->video_q) queue_free(p->video_q);
     delete p->clock;
     delete p->demux;
     delete p->audio_dec;
     delete p->video_dec;
     delete p->audio_out;
     delete p->video_out;
+    delete p->audio_q;
+    delete p->video_q;
     delete p;
+}
+
+void player_reset_pipeline(ElyPlayer* p) {
+    if (!p) return;
+    /* The plan's version zeroed the queue counters and leaked every queued
+     * payload; ownership says whoever pops frees, and reset pops it all. */
+    Packet pkt;
+    while (p->audio_q && queue_pop(p->audio_q, &pkt)) free(pkt.data);
+    while (p->video_q && queue_pop(p->video_q, &pkt)) free(pkt.data);
+    p->demux_eof = 0;
+    p->audio_eof = 0;
+    p->video_eof = 0;
+    p->audio_ready = 0;
+    p->video_ready = 0;
+    if (p->audio_out) audio_out_flush(p->audio_out);
+    if (p->video_out) video_out_clear(p->video_out);
+    if (p->audio_dec) aac_flush(p->audio_dec);
+    if (p->video_dec) h264_flush(p->video_dec);
+}
+
+int player_prepare_pipeline(ElyPlayer* p) {
+    if (!p || !p->demux) return 0;
+    if (p->demux->has_audio && !p->audio_ready) {
+        if (!aac_init(p->audio_dec,
+                      p->demux->audio.codec_config.data(),
+                      p->demux->audio.codec_config.size(),
+                      p->demux->sample_rate, p->demux->channels))
+            return 0;
+        if (!audio_out_open(p->audio_out, p->demux->sample_rate,
+                            p->demux->channels))
+            return 0;
+        audio_out_set_volume(p->audio_out, p->volume);
+        p->audio_ready = 1;
+    }
+    if (p->demux->has_video && !p->video_ready) {
+        if (!h264_init(p->video_dec,
+                       p->demux->video.codec_config.data(),
+                       p->demux->video.codec_config.size(),
+                       p->demux->width, p->demux->height))
+            return 0;
+        p->video_ready = 1;
+    }
+    return 1;
+}
+
+int player_fill_queues(ElyPlayer* p, int max_packets) {
+    if (!p || !p->demux || p->demux_eof) return 0;
+    if (p->demux_buf.size() < (1 << 20))
+        p->demux_buf.resize(1 << 20);
+
+    int filled = 0;
+    while (filled < max_packets) {
+        PacketQueue* target;
+        {
+            /* peek which track comes next so a full target queue stops the
+               fill instead of dropping the sample */
+            Mp4Sample s;
+            int kind = 0;
+            /* read without buffer first to route, then with buffer */
+            /* mp4_next_sample advances the cursor, so route by trying the
+               push after the read and un-reading is not possible; instead
+               check both queue capacities up front */
+            if (p->audio_q->count >= p->audio_q->cap &&
+                p->video_q->count >= p->video_q->cap)
+                break;
+            if (!mp4_next_sample(p->demux, &s, &kind,
+                                 p->demux_buf.data(), p->demux_buf.size())) {
+                p->demux_eof = 1;
+                break;
+            }
+            Packet pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.size = s.size;
+            pkt.data = (unsigned char*)malloc(s.size ? s.size : 1);
+            if (!pkt.data) break;
+            memcpy(pkt.data, p->demux_buf.data(), s.size);
+            pkt.pts = s.dts;
+            pkt.duration = s.duration;
+            pkt.stream_kind = kind;
+            pkt.keyframe = s.keyframe;
+            target = (kind == ELY_MEDIA_AUDIO) ? p->audio_q : p->video_q;
+            if (!queue_push(target, pkt)) {
+                free(pkt.data);
+                break;      /* target full; the pump drains before refill */
+            }
+        }
+        filled++;
+    }
+    return filled;
+}
+
+int player_pipeline_drained(const ElyPlayer* p) {
+    if (!p) return 0;
+    return p->demux_eof
+        && p->audio_q->count == 0
+        && p->video_q->count == 0
+        && (!p->demux->has_audio || p->audio_eof)
+        && (!p->demux->has_video || p->video_eof);
+}
+
+/* Stepped pipeline pump, paced by the playback clock: decode only what is
+ * due within a small horizon so the engine plays through media in real
+ * time, bounded per call so ABI getters stay non-blocking. Once the clock
+ * reaches the duration the horizon opens to drain the tail, still under
+ * the bound; if one call cannot finish the tail, the next one does. */
+int player_pump(ElyPlayer* p) {
+    if (!p || p->state != ELY_STATE_PLAYING) return 0;
+    if (!player_prepare_pipeline(p)) return -1;
+
+    double now = clock_position(p->clock, p->info.duration, 0);
+    double horizon = now + 0.5;
+    if (p->info.duration > 0.0 && now >= p->info.duration)
+        horizon = 1e30;                     /* drain the tail */
+
+    int work = 0;
+    int guard = 2048;
+    while (guard-- > 0) {
+        if (!p->demux_eof &&
+            p->audio_q->count + p->video_q->count < 32)
+            player_fill_queues(p, 16);
+
+        int did = 0;
+        if (p->audio_q->count > 0 &&
+            p->audio_q->items[p->audio_q->head].pts <= horizon) {
+            Packet pkt;
+            queue_pop(p->audio_q, &pkt);
+            PcmFrame pcm;
+            if (aac_decode_packet(p->audio_dec, &pkt, &pcm))
+                audio_out_write(p->audio_out, &pcm);
+            free(pkt.data);
+            did = 1;
+            work++;
+        }
+        if (p->video_q->count > 0 &&
+            p->video_q->items[p->video_q->head].pts <= horizon) {
+            Packet pkt;
+            queue_pop(p->video_q, &pkt);
+            VideoFrame frame;
+            if (h264_decode_packet(p->video_dec, &pkt, &frame))
+                video_out_present(p->video_out, &frame);
+            free(pkt.data);
+            did = 1;
+            work++;
+        }
+        if (!did) {
+            if (p->demux_eof) {
+                if (p->audio_q->count == 0) p->audio_eof = 1;
+                if (p->video_q->count == 0) p->video_eof = 1;
+            }
+            break;
+        }
+    }
+    return work;
 }
 
 void player_settle(ElyPlayer* p) {
     if (!p || p->state != ELY_STATE_PLAYING) return;
-    double pos = clock_position(p->clock, p->info.duration, 0);
-    if (p->info.duration > 0.0 && pos >= p->info.duration) {
+    player_pump(p);
+    /* Audio is master only when a real device clock exists; the synthetic
+     * sink reports none and the playback clock stays authoritative, which
+     * is what keeps wall-time position semantics intact until WASAPI. */
+    double device = audio_out_position(p->audio_out);
+    double pos = device >= 0.0
+        ? device
+        : clock_position(p->clock, p->info.duration, 0);
+    if (p->info.duration > 0.0 && pos >= p->info.duration &&
+        player_pipeline_drained(p)) {
         clock_pause(p->clock);
         clock_seek(p->clock, p->info.duration);
         p->state = ELY_STATE_ENDED;

@@ -1,18 +1,8 @@
 #pragma once
-#include <stddef.h>
+#include "frame.h"
 
-/* Bounded ring for the milestone 2 pipeline (demux -> decode -> output).
- * Single-owner per end; the pipeline threads that will use it are engine
- * internals and never visible through the ABI. Packet data is owned by the
- * producer until popped, then by the consumer. */
-struct Packet {
-    unsigned char* data;
-    size_t size;
-    double pts;
-    int stream_kind;    /* 1 audio, 2 video, matching ElyMediaKind */
-    int keyframe;
-};
-
+/* Bounded ring for the stepped pipeline (demux -> decode -> output).
+ * Packet.data ownership: see frame.h. */
 struct PacketQueue {
     Packet* items;
     int cap;
