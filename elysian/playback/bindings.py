@@ -1,0 +1,171 @@
+"""Low-level ctypes bindings for the owned media engine (elysian_video).
+
+Layer B of the video architecture: loads the library, declares the ABI, maps
+result codes to exceptions, and nothing else. No shell logic, no state. The
+shell-facing adapter lives in video_engine.py.
+
+The library is found, in order: an explicit path argument, the
+ELYSIAN_VIDEO_DLL environment variable, then default names next to the
+frozen executable / repo root (elysian_video.dll on Windows,
+libelysian_video.so elsewhere, the latter existing purely so the contract
+can be tested off-Windows).
+"""
+import ctypes
+import os
+import sys
+from pathlib import Path
+
+#: The ABI generation this binding understands. ely_abi_version() must match.
+ABI_VERSION = 1
+
+RESULT_NAMES = {
+    0: "OK",
+    1: "GENERIC",
+    2: "BAD_ARG",
+    3: "NOT_FOUND",
+    4: "UNSUPPORTED",
+    5: "BAD_CONTAINER",
+    6: "BAD_STREAM",
+    7: "DECODE",
+    8: "AUDIO_DEVICE",
+    9: "VIDEO_TARGET",
+    10: "SEEK",
+    11: "BAD_STATE",
+}
+
+STATE_NAMES = {
+    0: "EMPTY", 1: "LOADED", 2: "PLAYING", 3: "PAUSED",
+    4: "STOPPED", 5: "ENDED", 6: "ERROR",
+}
+
+MEDIA_UNKNOWN, MEDIA_AUDIO, MEDIA_VIDEO = 0, 1, 2
+
+
+class VideoEngineError(Exception):
+    """A failing engine call. .code is the ElyResult, .name its label."""
+
+    def __init__(self, code: int, message: str):
+        self.code = code
+        self.name = RESULT_NAMES.get(code, str(code))
+        super().__init__(f"[{self.name}] {message}" if message else
+                         f"[{self.name}]")
+
+
+class ElyMediaInfo(ctypes.Structure):
+    _fields_ = [
+        ("struct_size", ctypes.c_int),
+        ("has_audio", ctypes.c_int),
+        ("has_video", ctypes.c_int),
+        ("width", ctypes.c_int),
+        ("height", ctypes.c_int),
+        ("duration", ctypes.c_double),
+        ("frame_rate", ctypes.c_double),
+        ("audio_sample_rate", ctypes.c_int),
+        ("audio_channels", ctypes.c_int),
+        ("kind", ctypes.c_int),
+    ]
+
+
+def _default_candidates() -> list:
+    names = (["elysian_video.dll"] if os.name == "nt"
+             else ["libelysian_video.so", "elysian_video.so"])
+    roots = []
+    if getattr(sys, "frozen", False):
+        roots.append(Path(sys.executable).parent)
+    here = Path(__file__).resolve()
+    roots.append(here.parents[2])                       # repo root
+    roots.append(here.parents[2] / "native" / "elysian_video")
+    return [root / name for root in roots for name in names]
+
+
+def find_library(explicit: str | None = None) -> str | None:
+    if explicit:
+        return explicit if Path(explicit).is_file() else None
+    env = os.environ.get("ELYSIAN_VIDEO_DLL", "")
+    if env and Path(env).is_file():
+        return env
+    for candidate in _default_candidates():
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+class NativeLib:
+    """Owns the loaded library and the raw call surface.
+
+    Raises OSError if the library cannot be loaded and VideoEngineError if
+    its ABI version is not one this binding understands.
+    """
+
+    def __init__(self, lib_path: str):
+        loader = ctypes.WinDLL if os.name == "nt" else ctypes.CDLL
+        self.path = lib_path
+        self.lib = loader(lib_path)
+        self._declare()
+        got = self.lib.ely_abi_version()
+        if got != ABI_VERSION:
+            raise VideoEngineError(
+                1, f"engine ABI v{got}, bindings expect v{ABI_VERSION}")
+
+    def _declare(self) -> None:
+        L = self.lib
+        L.ely_abi_version.argtypes = []
+        L.ely_abi_version.restype = ctypes.c_int
+
+        L.ely_create_player.argtypes = []
+        L.ely_create_player.restype = ctypes.c_void_p
+        L.ely_destroy_player.argtypes = [ctypes.c_void_p]
+        L.ely_destroy_player.restype = None
+
+        L.ely_load.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p]
+        L.ely_load.restype = ctypes.c_int
+        L.ely_unload.argtypes = [ctypes.c_void_p]
+        L.ely_unload.restype = ctypes.c_int
+
+        for name in ("ely_play", "ely_pause", "ely_resume", "ely_stop"):
+            fn = getattr(L, name)
+            fn.argtypes = [ctypes.c_void_p]
+            fn.restype = ctypes.c_int
+
+        L.ely_seek.argtypes = [ctypes.c_void_p, ctypes.c_double]
+        L.ely_seek.restype = ctypes.c_int
+
+        L.ely_set_volume.argtypes = [ctypes.c_void_p, ctypes.c_float]
+        L.ely_set_volume.restype = ctypes.c_int
+        L.ely_get_volume.argtypes = [ctypes.c_void_p]
+        L.ely_get_volume.restype = ctypes.c_float
+
+        L.ely_get_position.argtypes = [ctypes.c_void_p]
+        L.ely_get_position.restype = ctypes.c_double
+        L.ely_get_duration.argtypes = [ctypes.c_void_p]
+        L.ely_get_duration.restype = ctypes.c_double
+
+        for name in ("ely_is_playing", "ely_is_paused", "ely_is_active",
+                     "ely_is_finished", "ely_get_state"):
+            fn = getattr(L, name)
+            fn.argtypes = [ctypes.c_void_p]
+            fn.restype = ctypes.c_int
+
+        L.ely_get_media_info.argtypes = [ctypes.c_void_p,
+                                         ctypes.POINTER(ElyMediaInfo)]
+        L.ely_get_media_info.restype = ctypes.c_int
+
+        L.ely_set_video_hwnd.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        L.ely_set_video_hwnd.restype = ctypes.c_int
+        L.ely_resize_video.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                       ctypes.c_int]
+        L.ely_resize_video.restype = ctypes.c_int
+
+        L.ely_get_last_error.argtypes = [ctypes.c_void_p]
+        L.ely_get_last_error.restype = ctypes.c_wchar_p
+
+    # -- helpers the wrapper builds on --------------------------------------
+
+    def check(self, code: int, handle) -> None:
+        """Raise VideoEngineError for a nonzero ElyResult."""
+        if code == 0:
+            return
+        message = ""
+        if handle:
+            message = self.lib.ely_get_last_error(handle) or ""
+        raise VideoEngineError(code, message)
