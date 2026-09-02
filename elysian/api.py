@@ -901,6 +901,13 @@ class Api:
                     self._current_id = self._playlist.id_at(i)
                     if self._resume_at > 1.0:
                         self._resume_id = self._current_id
+                    # The restored track is shown in Now Playing immediately,
+                    # so queue its tags now. Without this it sat on its
+                    # filename until it was played again or scrolled into
+                    # view, since only _do_play_id scanned the current track.
+                    # _scan_one only submits to the background queue, so
+                    # startup still opens no files.
+                    self._scan_one(self._current_id)
                     break
         self._bump()
 
