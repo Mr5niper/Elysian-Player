@@ -227,6 +227,11 @@ class Api:
         dropped = self._scanner.drop_all()
         for track_id in dropped:
             self._queued.pop(track_id, None)
+        # The playing track feeds the Now Playing card no matter which view
+        # is on screen, so its scan must survive this reset: with the card
+        # showing and no playlist rows visible, nothing else would ever
+        # re-request it. _scan_one no-ops if it was already read.
+        self._scan_one(self._current_id)
         return len(dropped)
 
     def drop_prefetch(self) -> int:
