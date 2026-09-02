@@ -227,9 +227,10 @@ walking the **public** attributes of that object, and recurses into
 non-callables. Anything that is not a method meant for JavaScript needs a
 leading underscore. A public reference to the window once made it descend into
 `window.dom.document`, which blocks until the page loads, and the API object was
-never created at all. `Api.BRIDGE` lists everything JavaScript may call, and
+never created at all. `Api.JS_BRIDGE` lists everything JavaScript may call,
+`Api.HOST_PUBLIC` lists the host-side entry points that must stay public, and
 `_assert_bridge_surface()` runs at startup and refuses to launch if anything
-else is public.
+else is public, or if either set names something that is not a method.
 
 ## License
 
