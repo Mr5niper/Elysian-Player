@@ -52,9 +52,12 @@ class LyricsProvider:
         entries: list[tuple[float, str]] = []
         lrc = Path(audio_path).with_suffix(".lrc")
         try:
-            if lrc.is_file():
-                entries = parse_lrc_text(
-                    lrc.read_text(encoding="utf-8", errors="ignore"))
+            # Read and catch rather than is_file() then read: the common
+            # no-sidecar case costs one filesystem round trip instead of
+            # two, which matters on a network share, and the miss is cached
+            # below either way.
+            entries = parse_lrc_text(
+                lrc.read_text(encoding="utf-8", errors="ignore"))
         except OSError:
             entries = []
         self._cache[audio_path] = entries

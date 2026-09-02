@@ -18,8 +18,17 @@ def peaks_for(path: str, buckets: int = BUCKETS) -> list[float]:
     try:
         import miniaudio
 
-        decoded = miniaudio.decode_file(
-            path, output_format=miniaudio.SampleFormat.SIGNED16,
+        # Read with Python and decode from memory. miniaudio.decode_file()
+        # hands the filename to C fopen(), which on Windows interprets the
+        # bytes in the ANSI code page while Python encoded them as UTF-8 -
+        # so any non-ASCII filename ("09-Renholdër.mp3") fails to open and
+        # that track silently loses its waveform. Python's open() handles
+        # Windows unicode paths correctly, and one sequential read is also
+        # the friendliest access pattern for a network share.
+        with open(path, "rb") as fh:
+            data = fh.read()
+        decoded = miniaudio.decode(
+            data, output_format=miniaudio.SampleFormat.SIGNED16,
             nchannels=1, sample_rate=8000)
         samples = decoded.samples
     except Exception:

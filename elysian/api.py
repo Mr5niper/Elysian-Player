@@ -1,8 +1,8 @@
 """The object exposed to JavaScript as pywebview.api.
 
 Every method here is callable from the frontend. All application state lives on
-the Python side; the frontend polls get_state() and renders whatever it is
-given, so there is exactly one source of truth.
+the Python side; the frontend polls get_tick()/get_full() and renders whatever
+it is given, so there is exactly one source of truth.
 """
 import os
 import queue
@@ -53,6 +53,8 @@ class Api:
         self._peaks_for: str | None = None
         self._closing = False
         self._queued: dict[int, int] = {}
+        # Running count for the folder-scan status line, owned by the worker.
+        self._folder_added = 0
         # Offset to resume at, applied the first time the restored track is
         # played. Seeking at startup would mean opening the file over the
         # network before the window has even drawn.
@@ -163,17 +165,21 @@ class Api:
         duration of a scan. Batched to at most once a second instead.
         """
         changed = False
-        for track_id, info in self._scanner.drain():
-            # Release the queue slot whether or not the track still exists, or
-            # a removed track would hold its id forever.
-            self._queued.pop(track_id, None)
-            track = self._playlist.by_id(track_id)
-            if track:
-                before = track.length
-                apply_metadata(track, info)
-                self._playlist.adjust_length(track.length - before)
-                self._dirty.add(track_id)
-                changed = True
+        # Under _lock: get_meta iterates _dirty from the bridge thread while
+        # holding it, and a set that changes size mid-iteration raises there.
+        # Everything inside is in-memory, so the hold is microseconds.
+        with self._lock:
+            for track_id, info in self._scanner.drain():
+                # Release the queue slot whether or not the track still
+                # exists, or a removed track would hold its id forever.
+                self._queued.pop(track_id, None)
+                track = self._playlist.by_id(track_id)
+                if track:
+                    before = track.length
+                    apply_metadata(track, info)
+                    self._playlist.adjust_length(track.length - before)
+                    self._dirty.add(track_id)
+                    changed = True
         if changed:
             self._scan_dirty = True
         now = time.monotonic()
@@ -424,61 +430,108 @@ class Api:
             stack.extend(reversed(subdirs))
 
     def _ingest_folder_async(self, root: str) -> None:
-        """Walk a folder on a worker thread, adding tracks in batches.
+        """Walk a folder on a helper thread, adding tracks in batches.
 
         The playlist grows while you watch instead of after the whole share
-        has been enumerated.
+        has been enumerated. The helper thread only discovers paths and posts
+        them; the worker thread applies every mutation, so playlist state,
+        the revision counter and the status line keep a single owner.
         """
         def work():
-            batch, total = [], 0
+            batch = []
             for path in self._walk_folder(root):
                 batch.append(path)
                 if len(batch) >= 150:
-                    total += self._add_batch(batch)
+                    self._post("add_batch", batch)
                     batch = []
-                    self._set_status(f"Scanning folder... {total} found", 30.0)
             if batch:
-                total += self._add_batch(batch)
-            if total:
-                self._set_status(f"Added {total} track{'s' if total != 1 else ''}")
-            else:
-                self._set_status("No audio files found")
+                self._post("add_batch", batch)
+            self._post("folder_scan_done")
 
-        self._set_status("Scanning folder...", 30.0)
+        self._post("status", "Scanning folder...", 30.0)
         threading.Thread(target=work, name="elysian-folder", daemon=True).start()
 
-    def _add_batch(self, paths) -> int:
+    def _do_add_batch(self, paths) -> None:
+        # Mutation is worker-only now, but _lock still matters: get_meta
+        # iterates playlist state under it from the bridge thread, so every
+        # worker-side mutation must hold it for that read to be safe.
         with self._lock:
+            before = len(self._playlist)
             added = self._playlist.add_paths(paths)
-            if added:
-                self._rebuild_bag()
+            added_ids = self._added_ids_from_tail(before, len(added))
+        if added and self._shuffle:
+            self._extend_shuffle_bag(added_ids)
         if added:
             self._bump()
-        return len(added)
+            # Dropping several folders at once merges their counts. That is
+            # rare, and "Added N tracks" for the lot is still the truth.
+            self._folder_added += len(added)
+            self._set_status(f"Scanning folder... {self._folder_added} found",
+                             30.0)
 
-    def _ingest(self, paths) -> int:
+    def _do_folder_scan_done(self) -> None:
+        total = self._folder_added
+        self._folder_added = 0
+        if total:
+            self._set_status(f"Added {total} track{'s' if total != 1 else ''}")
+        else:
+            self._set_status("No audio files found")
+
+    def _do_status(self, text: str, seconds: float = 4.0) -> None:
+        self._set_status(text, seconds)
+
+    def _split_paths(self, paths):
+        """Sort raw paths into audio files and folders.
+
+        is_dir() is a stat per path, a round trip each on a network share, so
+        this only ever runs on the worker thread.
+        """
         audio, folders = [], []
-        for raw in paths:
+        for raw in paths or []:
             p = Path(raw)
             if p.is_dir():
                 folders.append(str(p))
             elif p.suffix.lower() in config.AUDIO_EXTENSIONS:
                 audio.append(str(p))
+        return audio, folders
+
+    def _ingest(self, paths) -> int:
+        """Hand raw paths to the worker and return immediately.
+
+        Even classifying the paths is I/O (is_dir stats each one), so the
+        bridge and drop threads get to do none of it. Returns the number of
+        paths handed off, not the number added; nothing reads this value, and
+        dedup results arrive through the status line.
+        """
+        paths = [str(p) for p in (paths or []) if p]
+        if not paths:
+            return 0
+        self._post("ingest", paths)
+        return len(paths)
+
+    def _do_ingest(self, paths) -> None:
+        audio, folders = self._split_paths(paths)
         for folder in folders:
             self._ingest_folder_async(folder)
-        if not audio:
-            return 0
+        if audio:
+            self._do_add_audio_paths(audio)
+        elif not folders:
+            self._set_status("No audio files found")
+
+    def _do_add_audio_paths(self, paths) -> None:
+        # _lock guards readers that iterate playlist state from the bridge
+        # thread (get_meta), now that mutation itself is worker-only.
         with self._lock:
-            added = self._playlist.add_paths(audio)
+            before = len(self._playlist)
+            added = self._playlist.add_paths(paths)
+            added_ids = self._added_ids_from_tail(before, len(added))
+        if added and self._shuffle:
+            self._extend_shuffle_bag(added_ids)
         if added:
-            self._rebuild_bag()
             self._bump()
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
-        elif audio:
-            self._set_status("Already in the playlist")
         else:
-            self._set_status("No audio files found")
-        return len(added)
+            self._set_status("Already in the playlist")
 
     def add_files(self) -> int:
         import webview
@@ -498,6 +551,13 @@ class Api:
         return self._ingest(paths or [])
 
     def load_m3u(self) -> int:
+        """Pick a playlist file; the worker does the reading.
+
+        The playlist may sit on a network share, and reading it on the bridge
+        call would freeze the interface exactly the way this app is built not
+        to. Returns 1 if a file was chosen, 0 if the dialog was cancelled; the
+        outcome arrives through the status line like every other slow result.
+        """
         import webview
 
         result = self._window.create_file_dialog(
@@ -505,31 +565,53 @@ class Api:
             file_types=("Playlists (*.m3u;*.m3u8)", "All files (*.*)"))
         if not result:
             return 0
-        added = self._playlist.load_m3u(result[0], config.AUDIO_EXTENSIONS)
+        self._post("load_m3u", result[0])
+        return 1
+
+    def _do_load_m3u(self, path: str) -> None:
+        try:
+            # Parsing reads the file and stats candidates, so it happens
+            # outside _lock; only the mutation needs it.
+            found = self._playlist.read_m3u_paths(path, config.AUDIO_EXTENSIONS)
+        except OSError:
+            log.error("could not load playlist %s", path, exc_info=True)
+            self._set_status("Could not load playlist")
+            return
+        with self._lock:
+            before = len(self._playlist)
+            added = self._playlist.add_paths(found)
+            added_ids = self._added_ids_from_tail(before, len(added))
+        if added and self._shuffle:
+            self._extend_shuffle_bag(added_ids)
         if added:
-            self._rebuild_bag()
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
-        return len(added)
 
     def save_m3u(self) -> bool:
+        """Pick a destination; the worker writes the file.
+
+        Writing on the bridge call could block on a slow share the same way
+        loading could. Returns True if a destination was chosen.
+        """
         import webview
 
         if not len(self._playlist):
-            self._set_status("Playlist is empty")
+            self._post("status", "Playlist is empty")
             return False
         result = self._window.create_file_dialog(
             webview.SAVE_DIALOG, save_filename="playlist.m3u")
         if not result:
             return False
         path = result if isinstance(result, str) else result[0]
+        self._post("save_m3u", path)
+        return True
+
+    def _do_save_m3u(self, path: str) -> None:
         try:
             self._playlist.save_m3u(path)
             self._set_status(f"Saved {os.path.basename(path)}")
-            return True
         except OSError as exc:
             self._set_status(f"Could not save: {exc}")
-            return False
 
     def _do_remove(self, ids) -> None:
         ids = {int(i) for i in ids or []}
@@ -538,7 +620,10 @@ class Api:
         if self._current_id in ids:
             self._do_stop()
         self._playlist.remove_ids(ids)
-        self._rebuild_bag()
+        # Only worth reshuffling if shuffle is on. Correctness never depended
+        # on this rebuild anyway: _next_id skips ids that no longer exist.
+        if self._shuffle:
+            self._rebuild_bag()
         self._bump()
         self._set_status(f"Removed {len(ids)} track{'s' if len(ids) != 1 else ''}")
 
@@ -567,11 +652,13 @@ class Api:
         self._scan_one(self._current_id)
         if not track.scanned or not track.length:
             # Writing length directly means the cached total is now wrong.
-            before = track.length
-            track.length = self._engine.duration
-            self._playlist.adjust_length(track.length - before)
-            self._dirty.add(self._current_id)
-            self._meta_revision += 1
+            # _lock for the _dirty add: get_meta iterates that set under it.
+            with self._lock:
+                before = track.length
+                track.length = self._engine.duration
+                self._playlist.adjust_length(track.length - before)
+                self._dirty.add(self._current_id)
+                self._meta_revision += 1
         if not self._history or self._history[-1] != self._current_id:
             self._history.append(self._current_id)
             del self._history[:-200]
@@ -627,15 +714,20 @@ class Api:
     def _do_nudge(self, delta: float) -> None:
         self._engine.nudge(float(delta))
 
-    def set_volume(self, value: float) -> None:
+    def _do_set_volume(self, value: float) -> None:
         self._engine.set_volume(float(value))
 
-    def toggle_shuffle(self) -> None:
+    def _do_toggle_shuffle(self) -> None:
         self._shuffle = not self._shuffle
-        self._rebuild_bag()
+        if self._shuffle:
+            self._rebuild_bag()
+        else:
+            # No point generating a fresh random permutation nobody will draw
+            # from. Toggling back on rebuilds.
+            self._shuffle_bag = []
         self._bump()
 
-    def cycle_repeat(self) -> None:
+    def _do_cycle_repeat(self) -> None:
         self._repeat = REPEAT_CYCLE[self._repeat]
         self._bump()
 
@@ -664,18 +756,63 @@ class Api:
         return None
 
     def _rebuild_bag(self) -> None:
-        ids = [i for i in self._playlist.ids if i != self._current_id]
+        """Regenerate the shuffle draw order. Callers gate on self._shuffle,
+        so while shuffle is off the bag stays empty and add/remove/load paths
+        skip this entirely.
+
+        Only the shared reads happen under _lock; the filter and shuffle of
+        what can be a large id list run outside it, so bridge-thread readers
+        are held up for a copy, not a shuffle. The bag itself is worker-owned.
+        """
+        with self._lock:
+            current = self._current_id
+            ids = self._playlist.ids
+        ids = [i for i in ids if i != current]
         random.shuffle(ids)
         self._shuffle_bag = ids
+
+    def _added_ids_from_tail(self, before_len: int, added_count: int) -> list[int]:
+        """Ids of the tracks the most recent add_paths() appended.
+
+        add_paths always appends new tracks at the tail, so the new ids are
+        exactly the positions [before_len, before_len + added_count).
+        Callers invoke this under _lock, right after the add.
+        """
+        if added_count <= 0:
+            return []
+        return [self._playlist.id_at(i)
+                for i in range(before_len, before_len + added_count)]
+
+    def _extend_shuffle_bag(self, new_ids) -> None:
+        """Mix newly appended ids into the existing bag without a rebuild.
+
+        Each id goes to a uniformly random position, NOT the end: _next_id
+        pops from the end, so appending would make "shuffle" keep drawing
+        the newest batch first for the whole length of a folder scan.
+        Random insertion keeps draws uniform across the library and leaves
+        the relative order of everything already in the bag untouched.
+        Unlike the full rebuild this never re-admits already-played tracks,
+        which also stops long scans from repeating songs you just heard.
+        """
+        bag = self._shuffle_bag
+        for tid in new_ids:
+            if tid == self._current_id:
+                continue
+            bag.insert(random.randrange(len(bag) + 1), tid)
 
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
     # run on the call from JavaScript. The frontend already updates itself
     # optimistically, so the round trip is invisible.
 
-    def play_id(self, track_id: int, start: float = 0.0) -> bool:
+    def play_id(self, track_id: int, start: float = 0.0) -> None:
+        """Queue playback of this track.
+
+        Fire-and-forget: the outcome lands in the snapshot (or the status
+        line on failure) after the worker processes the command. Nothing in
+        the frontend or host reads a return value here.
+        """
         self._post("play_id", int(track_id), float(start))
-        return True
 
     def toggle_play(self) -> None:
         self._post("toggle_play")
@@ -694,6 +831,15 @@ class Api:
 
     def nudge(self, delta: float) -> None:
         self._post("nudge", float(delta))
+
+    def set_volume(self, value: float) -> None:
+        self._post("set_volume", float(value))
+
+    def toggle_shuffle(self) -> None:
+        self._post("toggle_shuffle")
+
+    def cycle_repeat(self) -> None:
+        self._post("cycle_repeat")
 
     def remove(self, ids) -> None:
         self._post("remove", [int(i) for i in (ids or [])])
@@ -735,15 +881,17 @@ class Api:
 
     # ---- session -------------------------------------------------------
 
-    def _restore_session(self) -> None:
+    def _do_restore_session(self) -> None:
         # Deliberately no os.path.isfile() here. On a network share that is
         # one round trip per saved path before the window has even drawn.
-        # Missing files surface when something tries to play them, or via
-        # Tools > Remove missing.
+        # Missing files surface only when something later tries to open them.
         paths = self._settings.get("playlist", [])
         if paths:
             self._playlist.add_paths(paths)
-            self._rebuild_bag()
+            # _shuffle was loaded from the same settings in __init__, so this
+            # honours the saved state rather than assuming shuffle is on.
+            if self._shuffle:
+                self._rebuild_bag()
         last = self._settings.get("last_path", "")
         if last:
             self._resume_at = float(
@@ -768,12 +916,23 @@ class Api:
         })
         settings_store.save(self._settings)
 
-    #: Queued commands that change what gets written to the settings file.
-    #: Anything else still queued at exit is transport, and running it on the
-    #: way out would only start work nobody is waiting for.
+    #: Queued commands whose effects the user expects to survive exit,
+    #: applied by _flush_persisted before the session is saved.
+    #: restore_session is here so a close moments after launch can never save
+    #: an empty playlist over the previous session. save_m3u is an explicit
+    #: user action; silently discarding a save the user believes happened is
+    #: worse than a slow exit. load_m3u, ingest and open_paths are deliberately
+    #: absent: applying them here would stat or read files, possibly over a
+    #: dead network share, with the window already gone, and their loss costs
+    #: nothing that reopening the app cannot redo. Anything else still queued
+    #: at exit is transport, and running it on the way out would only start
+    #: work nobody is waiting for.
     #: Underscored because pywebview walks every public attribute of this
     #: object when it builds the JS API.
-    _PERSISTED_COMMANDS = frozenset({"remove", "reorder"})
+    _PERSISTED_COMMANDS = frozenset({
+        "restore_session", "remove", "reorder", "add_batch",
+        "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
+    })
 
     def _shutdown(self) -> None:
         if self._closing:
@@ -821,18 +980,24 @@ class Api:
     # created and every call from JavaScript failed.
 
     #: Everything JavaScript is allowed to call. Anything public and not in
-    #: this set is a mistake. See _assert_bridge_surface.
-    BRIDGE = frozenset({
+    #: this set or HOST_PUBLIC is a mistake. See _assert_bridge_surface.
+    JS_BRIDGE = frozenset({
         "get_tick", "get_full", "get_meta", "get_peaks",
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
-        "remove", "reorder", "open_paths",
+        "remove", "reorder",
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "win_minimise", "win_maximise", "win_close",
-        # host-side entry points, not called from JS but necessarily public
-        "attach", "boot", "ingest", "close", "set_maximized", "BRIDGE",
+    })
+
+    #: Public for the host process only, never called from JavaScript, but
+    #: necessarily unprefixed. The two set names are here because pywebview
+    #: sees them as public attributes of this object too.
+    HOST_PUBLIC = frozenset({
+        "attach", "boot", "ingest", "open_paths", "close", "set_maximized",
+        "JS_BRIDGE", "HOST_PUBLIC",
     })
 
     def _assert_bridge_surface(self) -> None:
@@ -845,13 +1010,24 @@ class Api:
         frontend silently failed. This turns that class of mistake into an
         error at startup instead of a dead interface.
         """
-        extra = {n for n in dir(self) if not n.startswith("_")} - self.BRIDGE
+        allowed = self.JS_BRIDGE | self.HOST_PUBLIC
+        extra = {n for n in dir(self) if not n.startswith("_")} - allowed
         if extra:
             raise RuntimeError(
                 "Api exposes unexpected public attributes to pywebview: "
                 + ", ".join(sorted(extra))
                 + ". Prefix them with an underscore, or add them to "
-                  "Api.BRIDGE if JavaScript is meant to call them.")
+                  "Api.JS_BRIDGE (JavaScript may call them) or "
+                  "Api.HOST_PUBLIC (host-side only).")
+        methods = (self.JS_BRIDGE
+                   | (self.HOST_PUBLIC - {"JS_BRIDGE", "HOST_PUBLIC"}))
+        dud = sorted(n for n in methods
+                     if not callable(getattr(self, n, None)))
+        if dud:
+            raise RuntimeError(
+                "Api bridge sets list names that are not callable methods: "
+                + ", ".join(dud)
+                + ". A constant or attribute has taken a method's place.")
 
     def attach(self, window) -> None:
         self._window = window
@@ -865,7 +1041,11 @@ class Api:
         self._maximized = bool(flag)
 
     def boot(self) -> None:
-        self._restore_session()
+        # Enqueued, not called: the worker is already running its maintenance
+        # loop by now, and restoring mutated the playlist from the host's
+        # bind thread while _rebuild_snapshot was iterating it. The queue is
+        # FIFO, so restore still lands before any open_paths posted after it.
+        self._post("restore_session")
 
     def ingest(self, paths) -> int:
         return self._add_paths(paths)
@@ -874,16 +1054,31 @@ class Api:
         self._shutdown()
 
     def open_paths(self, paths) -> int:
-        """Add these files and return the id of the FIRST one.
+        """Queue these files to be added, and the FIRST one played.
 
-        Returns the right id whether the file was just added or was already in
-        the playlist, so double-clicking a track in Explorer plays that track
-        rather than whatever happens to sit at position one.
+        Explorer open used to need the id back synchronously so the host
+        could call play_id, which meant playlist mutation on the host thread.
+        The worker now owns the whole add-and-play step; it plays the file you
+        opened whether or not it was already in the playlist. Returns 1 if
+        anything was queued, 0 otherwise.
         """
-        paths = [p for p in (paths or []) if p]
+        paths = [str(p) for p in (paths or []) if p]
         if not paths:
-            return -1
-        self._add_paths(paths)
+            return 0
+        self._post("open_paths", paths)
+        return 1
+
+    def _do_open_paths(self, paths) -> None:
+        audio, folders = self._split_paths(paths)
+        for folder in folders:
+            self._ingest_folder_async(folder)
+        if not audio:
+            if not folders:
+                self._set_status("No audio files found")
+            return
+        self._do_add_audio_paths(audio)
         with self._lock:
-            index = self._playlist.index_of_path(paths[0])
-            return self._playlist.id_at(index) if index >= 0 else -1
+            index = self._playlist.index_of_path(audio[0])
+            target = self._playlist.id_at(index) if index >= 0 else -1
+        if target >= 0:
+            self._do_play_id(target)
