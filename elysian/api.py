@@ -456,9 +456,11 @@ class Api:
         # iterates playlist state under it from the bridge thread, so every
         # worker-side mutation must hold it for that read to be safe.
         with self._lock:
+            before = len(self._playlist)
             added = self._playlist.add_paths(paths)
+            added_ids = self._added_ids_from_tail(before, len(added))
         if added and self._shuffle:
-            self._rebuild_bag()
+            self._extend_shuffle_bag(added_ids)
         if added:
             self._bump()
             # Dropping several folders at once merges their counts. That is
@@ -520,9 +522,11 @@ class Api:
         # _lock guards readers that iterate playlist state from the bridge
         # thread (get_meta), now that mutation itself is worker-only.
         with self._lock:
+            before = len(self._playlist)
             added = self._playlist.add_paths(paths)
+            added_ids = self._added_ids_from_tail(before, len(added))
         if added and self._shuffle:
-            self._rebuild_bag()
+            self._extend_shuffle_bag(added_ids)
         if added:
             self._bump()
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
@@ -574,9 +578,11 @@ class Api:
             self._set_status("Could not load playlist")
             return
         with self._lock:
+            before = len(self._playlist)
             added = self._playlist.add_paths(found)
+            added_ids = self._added_ids_from_tail(before, len(added))
         if added and self._shuffle:
-            self._rebuild_bag()
+            self._extend_shuffle_bag(added_ids)
         if added:
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
@@ -765,20 +771,48 @@ class Api:
         random.shuffle(ids)
         self._shuffle_bag = ids
 
+    def _added_ids_from_tail(self, before_len: int, added_count: int) -> list[int]:
+        """Ids of the tracks the most recent add_paths() appended.
+
+        add_paths always appends new tracks at the tail, so the new ids are
+        exactly the positions [before_len, before_len + added_count).
+        Callers invoke this under _lock, right after the add.
+        """
+        if added_count <= 0:
+            return []
+        return [self._playlist.id_at(i)
+                for i in range(before_len, before_len + added_count)]
+
+    def _extend_shuffle_bag(self, new_ids) -> None:
+        """Mix newly appended ids into the existing bag without a rebuild.
+
+        Each id goes to a uniformly random position, NOT the end: _next_id
+        pops from the end, so appending would make "shuffle" keep drawing
+        the newest batch first for the whole length of a folder scan.
+        Random insertion keeps draws uniform across the library and leaves
+        the relative order of everything already in the bag untouched.
+        Unlike the full rebuild this never re-admits already-played tracks,
+        which also stops long scans from repeating songs you just heard.
+        """
+        bag = self._shuffle_bag
+        for tid in new_ids:
+            if tid == self._current_id:
+                continue
+            bag.insert(random.randrange(len(bag) + 1), tid)
+
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
     # run on the call from JavaScript. The frontend already updates itself
     # optimistically, so the round trip is invisible.
 
-    def play_id(self, track_id: int, start: float = 0.0) -> bool:
+    def play_id(self, track_id: int, start: float = 0.0) -> None:
         """Queue playback of this track.
 
-        True means queued, not playing: like every other command, the
-        outcome lands in the snapshot (or the status line on failure), and
-        the frontend already renders from that rather than this value.
+        Fire-and-forget: the outcome lands in the snapshot (or the status
+        line on failure) after the worker processes the command. Nothing in
+        the frontend or host reads a return value here.
         """
         self._post("play_id", int(track_id), float(start))
-        return True
 
     def toggle_play(self) -> None:
         self._post("toggle_play")
