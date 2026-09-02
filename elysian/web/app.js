@@ -3,7 +3,7 @@ const api = () => window.pywebview && window.pywebview.api;
 
 let state = {
   tracks: [], current_id: -1, playing: false, position: 0, duration: 0,
-  volume: 0.8, shuffle: false, repeat: "none", peaks: [],
+  volume: 0.8, muted: false, shuffle: false, repeat: "none", peaks: [],
 };
 let selected = new Set();
 let seeking = false;
@@ -53,6 +53,10 @@ function setView(name) {
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
+  // While hidden the list has no height, so its row window was computed
+  // against a fallback. Recompute against the real height now that it shows,
+  // covering a window resized while the Now Playing view was up.
+  if (name === "playlists") renderWindow(false);
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -424,6 +428,37 @@ $("tracks").addEventListener("scroll", () => {
    be there. */
 let selectionAnchor = null;
 
+/* ---------- confirm dialog ---------- */
+let modalYes = null;
+
+function openConfirm(text, onYes) {
+  modalYes = onYes;
+  $("modal-text").textContent = text;
+  $("modal").classList.add("show");
+  // Focus the safe answer, so a stray Enter or Space declines.
+  $("modal-no").focus();
+}
+
+function closeConfirm() {
+  modalYes = null;
+  $("modal").classList.remove("show");
+}
+
+function modalOpen() {
+  return $("modal").classList.contains("show");
+}
+
+/* Swap the speaker glyph by display, never by replacing nodes: a node
+   replaced between mousedown and mouseup means the browser fires no click. */
+function paintMuteIcon(muted) {
+  if (prev.muted === muted) return;
+  prev.muted = muted;
+  $("vol-waves").style.display = muted ? "none" : "";
+  $("vol-muted").style.display = muted ? "" : "none";
+  $("volicon").classList.toggle("muted", muted);
+  $("volicon").setAttribute("title", muted ? "Unmute" : "Mute");
+}
+
 function rangeIds(fromId, toId) {
   let a = -1, b = -1;
   for (let i = 0; i < filtered.length; i++) {
@@ -649,6 +684,13 @@ const intent = {
     api().toggle_shuffle();
   },
 
+  mute() {
+    state.muted = !state.muted;
+    predict("muted", state.muted);
+    paintMuteIcon(state.muted);
+    api().toggle_mute();
+  },
+
   repeat() {
     const order = { none: "all", all: "one", one: "none" };
     state.repeat = order[state.repeat] || "all";
@@ -714,6 +756,15 @@ const intent = {
     selected.clear();
     paintRowStates();
   },
+  clearPlaylist() {
+    if (!state.tracks.length) return;
+    openConfirm("Clear the entire playlist?", () => {
+      selected.clear();
+      selectionAnchor = null;
+      api().clear_playlist();
+      paintRowStates();
+    });
+  },
 };
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
@@ -726,6 +777,18 @@ wire("ic-add", () => api().add_files());
 wire("ic-folder", () => api().add_folder());
 wire("btn-load", () => api().load_m3u());
 wire("btn-save", () => api().save_m3u());
+wire("btn-clear", () => intent.clearPlaylist());
+wire("volicon", () => intent.mute());
+wire("modal-yes", () => {
+  const fn = modalYes;
+  closeConfirm();
+  if (fn) fn();
+});
+wire("modal-no", () => closeConfirm());
+// Clicking the dimmed backdrop declines, like pressing Escape.
+$("modal").addEventListener("click", (e) => {
+  if (e.target === $("modal")) closeConfirm();
+});
 wire("win-min", () => api().win_minimise());
 wire("win-max", () => intent.toggleMaximise());
 wire("win-close", () => api().win_close());
@@ -738,6 +801,13 @@ $("titlebar").addEventListener("dblclick", (e) => {
 $("filter").addEventListener("input", () => renderList(true));
 
 document.addEventListener("keydown", (e) => {
+  if (modalOpen()) {
+    // The dialog owns the keyboard: Escape declines, and Enter or Space
+    // activate whichever button holds focus (the browser default). Nothing
+    // falls through, or Space would toggle playback behind the dialog.
+    if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
+    return;
+  }
   if (e.target === $("filter")) {
     if (e.key === "Escape") { $("filter").value = ""; $("filter").blur(); renderList(true); }
     return;
@@ -754,6 +824,10 @@ document.addEventListener("keydown", (e) => {
   }
   else if (k === "ArrowUp") { e.preventDefault(); intent.volumeBy(0.05); }
   else if (k === "ArrowDown") { e.preventDefault(); intent.volumeBy(-0.05); }
+  else if (k === "Delete" && e.ctrlKey && e.shiftKey) {
+    e.preventDefault();
+    intent.clearPlaylist();
+  }
   else if (k === "Delete") { intent.removeSelected(); }
   else if (k === "Enter") {
     /* Enter is also the default activation key for whatever control has
@@ -806,6 +880,12 @@ function drawWave() {
 }
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
+  // The visible row window is sized from the container at render time, and
+  // only scrolling or a data change recomputed it. Growing the window
+  // (maximise, or dragging the edge) left the rows sized for the old height,
+  // with blank space below until the first scroll. Recompute here; the
+  // range early-out makes this free when the height did not actually change.
+  renderWindow(false);
 });
 
 /* ---------- state sync ---------- */
@@ -814,6 +894,9 @@ function applyTick(s) {
   const playing = settled("playing", s.playing);
   const shuffle = settled("shuffle", s.shuffle);
   const repeat = settled("repeat", s.repeat);
+  const muted = settled("muted", !!s.muted);
+  state.muted = muted;
+  paintMuteIcon(muted);
 
   const position = settledPosition(s.position);
 
@@ -868,6 +951,7 @@ function applyMeta(m) {
   if (!m || !m.tracks || !m.tracks.length) return;
   const byId = new Map(state.tracks.map((t) => [t.id, t]));
   let touched = false;
+  let currentTouched = false;
   for (const row of m.tracks) {
     const t = byId.get(row.id);
     if (!t) continue;
@@ -876,10 +960,23 @@ function applyMeta(m) {
     t.album = row.album;
     t.length = row.length;
     t.scanned = row.scanned;
+    if (row.id === state.current_id) currentTouched = true;
     if (scanRequested.has(row.id) && scanOutstanding > 0) scanOutstanding--;
     touched = true;
   }
   if (!touched) return;
+  /* Now Playing text is otherwise only written by applyFull on a structural
+     revision, so tags landing for the current track left the card on the
+     filename until something else forced a full refresh. Whether it updated
+     at all depended on album art luck: art arriving bumps the revision, but
+     a cached-art track bumps nothing. Update the card here directly. */
+  if (currentTouched) {
+    const current = byId.get(state.current_id);
+    if (current) {
+      setText($("np-title"), "npTitle", current.title || "Nothing playing");
+      setText($("np-artist"), "npArtist", current.artist || "");
+    }
+  }
   // filtered holds the same objects, so the visible rows just need rewriting.
   updateRowText();
   // A filter may now match more or fewer tracks than before.
@@ -974,12 +1071,23 @@ async function poll() {
         if (tick.revision !== lastRevision) {
           // Structure changed: rows added, removed or reordered.
           lastRevision = tick.revision;
-          lastMetaRevision = tick.meta_revision;
           applyFull(await a.get_full());
-        } else if (tick.meta_revision !== lastMetaRevision) {
+        }
+        if (tick.meta_revision !== lastMetaRevision) {
           // Only tags filled in. Fetch just those rows rather than the whole
           // list, which on a long playlist was over a megabyte a second to
           // deliver a couple of dozen changes.
+          //
+          // Deliberately NOT an else-branch, and never marked consumed by the
+          // full fetch above: tags landing between a structural bump and this
+          // poll leave the full snapshot stale (it is only rebuilt on
+          // structural change), so treating the full as covering the meta
+          // counter silently discarded those rows. Playing a file whose art
+          // was already cached then sat on its filename forever, since no
+          // later bump ever came. Meta is applied after full, which is always
+          // safe: the dirty set is cleared whenever the full is rebuilt, so
+          // any delta collected here postdates the full just applied, and an
+          // already-covered delta comes back empty and no-ops.
           lastMetaRevision = tick.meta_revision;
           applyMeta(await a.get_meta());
         }

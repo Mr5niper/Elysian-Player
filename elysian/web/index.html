@@ -66,6 +66,7 @@
           <input id="filter" type="text" placeholder="Filter" spellcheck="false">
           <button class="tbtn" id="btn-load">Load M3U</button>
           <button class="tbtn" id="btn-save">Save M3U</button>
+          <button class="tbtn" id="btn-clear" title="Clear the entire playlist">Clear Playlist</button>
         </div>
         <div id="tracks"><div id="sizer"></div></div>
         <div id="empty">
@@ -108,7 +109,7 @@
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
       </div>
       <span class="time right" id="t-total">0:00</span>
-      <svg id="volicon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+      <svg id="volicon" title="Mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><g id="vol-waves"><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></g><g id="vol-muted" style="display:none" stroke-linecap="round"><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></g></svg>
       <div class="slider" id="vol">
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
       </div>
@@ -116,6 +117,16 @@
   </div>
 
   <div id="drophint">Drop to add to playlist</div>
+
+  <div id="modal">
+    <div id="modal-box">
+      <div id="modal-text">Are you sure?</div>
+      <div id="modal-buttons">
+        <button class="tbtn" id="modal-yes">Yes</button>
+        <button class="tbtn" id="modal-no">No</button>
+      </div>
+    </div>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>

@@ -43,6 +43,11 @@ class Api:
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
         self._engine.set_volume(self._settings.get("volume", 0.8))
+        # Mute is session-local: the engine goes to 0 but _premute_volume is
+        # what the slider shows, what unmute restores, and what gets saved,
+        # so closing muted cannot trap the next launch at volume zero.
+        self._muted = False
+        self._premute_volume = float(self._settings.get("volume", 0.8))
 
         self._shuffle_bag: list[int] = []
         self._history: list[int] = []
@@ -55,6 +60,9 @@ class Api:
         self._queued: dict[int, int] = {}
         # Running count for the folder-scan status line, owned by the worker.
         self._folder_added = 0
+        # Bumped by clear_playlist so folder walks started before the clear
+        # stop adding to the playlist the user just emptied.
+        self._ingest_gen = 0
         # Offset to resume at, applied the first time the restored track is
         # played. Seeking at startup would mean opening the file over the
         # network before the window has even drawn.
@@ -227,6 +235,11 @@ class Api:
         dropped = self._scanner.drop_all()
         for track_id in dropped:
             self._queued.pop(track_id, None)
+        # The playing track feeds the Now Playing card no matter which view
+        # is on screen, so its scan must survive this reset: with the card
+        # showing and no playlist rows visible, nothing else would ever
+        # re-request it. _scan_one no-ops if it was already read.
+        self._scan_one(self._current_id)
         return len(dropped)
 
     def drop_prefetch(self) -> int:
@@ -313,7 +326,9 @@ class Api:
                 "paused": self._engine.paused,
                 "position": round(self._engine.position, 2),
                 "duration": round(self._engine.duration, 2),
-                "volume": round(self._engine.volume, 3),
+                "volume": round(self._premute_volume if self._muted
+                                else self._engine.volume, 3),
+                "muted": self._muted,
                 "shuffle": self._shuffle,
                 "repeat": self._repeat,
                 "status": self._footer(),
@@ -437,21 +452,30 @@ class Api:
         them; the worker thread applies every mutation, so playlist state,
         the revision counter and the status line keep a single owner.
         """
+        gen = self._ingest_gen
+
         def work():
             batch = []
             for path in self._walk_folder(root):
+                if gen != self._ingest_gen:
+                    # The playlist was cleared after this walk began. Its
+                    # batches would repopulate the list the user just
+                    # emptied, so stop rather than keep reading the share.
+                    return
                 batch.append(path)
                 if len(batch) >= 150:
-                    self._post("add_batch", batch)
+                    self._post("add_batch", batch, gen)
                     batch = []
             if batch:
-                self._post("add_batch", batch)
-            self._post("folder_scan_done")
+                self._post("add_batch", batch, gen)
+            self._post("folder_scan_done", gen)
 
         self._post("status", "Scanning folder...", 30.0)
         threading.Thread(target=work, name="elysian-folder", daemon=True).start()
 
-    def _do_add_batch(self, paths) -> None:
+    def _do_add_batch(self, paths, gen=None) -> None:
+        if gen is not None and gen != self._ingest_gen:
+            return
         # Mutation is worker-only now, but _lock still matters: get_meta
         # iterates playlist state under it from the bridge thread, so every
         # worker-side mutation must hold it for that read to be safe.
@@ -469,7 +493,9 @@ class Api:
             self._set_status(f"Scanning folder... {self._folder_added} found",
                              30.0)
 
-    def _do_folder_scan_done(self) -> None:
+    def _do_folder_scan_done(self, gen=None) -> None:
+        if gen is not None and gen != self._ingest_gen:
+            return
         total = self._folder_added
         self._folder_added = 0
         if total:
@@ -613,6 +639,37 @@ class Api:
         except OSError as exc:
             self._set_status(f"Could not save: {exc}")
 
+    def clear_playlist(self) -> None:
+        self._post("clear_playlist")
+
+    def _do_clear_playlist(self) -> None:
+        """Remove every track and reset playlist-related state.
+
+        Worker-owned, like every other mutation. The frontend clears its
+        local selection immediately, but the source of truth is here.
+        """
+        self._engine.stop()
+        # Invalidate running folder walks and discard queued tag reads: both
+        # would spend share round trips on tracks that no longer exist.
+        self._ingest_gen += 1
+        self._folder_added = 0
+        self._scanner.drop_all()
+        self._queued.clear()
+        with self._lock:
+            self._playlist.clear()
+            self._current_id = -1
+            self._dirty.clear()
+            self._meta_revision += 1
+        self._shuffle_bag = []
+        self._history.clear()
+        self._peaks = []
+        self._peaks_for = None
+        self._resume_id = -1
+        self._resume_at = 0.0
+        self._art_cache.clear()
+        self._bump()
+        self._set_status("Playlist cleared")
+
     def _do_remove(self, ids) -> None:
         ids = {int(i) for i in ids or []}
         if not ids:
@@ -715,7 +772,24 @@ class Api:
         self._engine.nudge(float(delta))
 
     def _do_set_volume(self, value: float) -> None:
+        # Touching the volume while muted unmutes, as the system mixer does;
+        # otherwise the slider moves and nothing audible happens.
+        self._muted = False
         self._engine.set_volume(float(value))
+        self._premute_volume = self._engine.volume
+
+    def _do_toggle_mute(self) -> None:
+        if self._muted:
+            self._muted = False
+            # Unmuting to silence reads as a dead button, so a zero premute
+            # volume restores to something audible instead.
+            restore = self._premute_volume if self._premute_volume > 0 else 0.5
+            self._engine.set_volume(restore)
+        else:
+            self._premute_volume = self._engine.volume
+            self._muted = True
+            self._engine.set_volume(0.0)
+        self._bump()
 
     def _do_toggle_shuffle(self) -> None:
         self._shuffle = not self._shuffle
@@ -841,6 +915,9 @@ class Api:
     def cycle_repeat(self) -> None:
         self._post("cycle_repeat")
 
+    def toggle_mute(self) -> None:
+        self._post("toggle_mute")
+
     def remove(self, ids) -> None:
         self._post("remove", [int(i) for i in (ids or [])])
 
@@ -901,13 +978,21 @@ class Api:
                     self._current_id = self._playlist.id_at(i)
                     if self._resume_at > 1.0:
                         self._resume_id = self._current_id
+                    # The restored track is shown in Now Playing immediately,
+                    # so queue its tags now. Without this it sat on its
+                    # filename until it was played again or scrolled into
+                    # view, since only _do_play_id scanned the current track.
+                    # _scan_one only submits to the background queue, so
+                    # startup still opens no files.
+                    self._scan_one(self._current_id)
                     break
         self._bump()
 
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
         self._settings.update({
-            "volume": self._engine.volume,
+            "volume": self._premute_volume if self._muted
+                      else self._engine.volume,
             "shuffle": self._shuffle,
             "repeat": self._repeat,
             "playlist": [t.path for t in self._playlist.tracks],
@@ -932,6 +1017,7 @@ class Api:
     _PERSISTED_COMMANDS = frozenset({
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
+        "clear_playlist",
     })
 
     def _shutdown(self) -> None:
@@ -986,9 +1072,11 @@ class Api:
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
+        "clear_playlist",
         "remove", "reorder",
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
+        "toggle_mute",
         "win_minimise", "win_maximise", "win_close",
     })
 
