@@ -11,7 +11,22 @@ int queue_init(PacketQueue* q, int cap) {
     return 1;
 }
 
+void packet_dispose(Packet* p) {
+    if (!p) return;
+    free(p->data);
+    memset(p, 0, sizeof(*p));
+}
+
+void queue_clear(PacketQueue* q) {
+    if (!q) return;
+    Packet pkt;
+    while (queue_pop(q, &pkt))
+        packet_dispose(&pkt);
+}
+
 void queue_free(PacketQueue* q) {
+    if (!q) return;
+    queue_clear(q);
     free(q->items);
     memset(q, 0, sizeof(*q));
 }

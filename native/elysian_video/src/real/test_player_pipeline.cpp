@@ -136,6 +136,109 @@ int main(int argc, char** argv) {
         printf("audio-only path: flows and drains to ENDED\n");
     }
 
+    /* ---- C.2 additions --------------------------------------------------- */
+
+    /* repeated stop safety */
+    assert(ely_load(p, wpath) == 0);
+    assert(ely_play(p) == 0);
+    sleep_ms(60);
+    assert(ely_stop(p) == 0);
+    assert(ely_stop(p) == 0 && "second stop must be safe");
+    assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    assert(ely_get_duration(p) > 0.0);
+    printf("repeated stop: safe, queues empty, media retained\n");
+
+    /* explicit pipeline reset safety */
+    assert(ely_play(p) == 0);
+    sleep_ms(60);
+    ely_get_state(p);
+    player_reset_pipeline(p);
+    assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    assert(p->demux_eof == 0 && p->audio_eof == 0 && p->video_eof == 0);
+    assert(p->audio_failures == 0 && p->video_failures == 0);
+    printf("explicit reset: counts and flags all cleared\n");
+    assert(ely_stop(p) == 0);
+
+    /* detached video target safety */
+    assert(ely_set_video_hwnd(p, (void*)0x1) == 0);
+    assert(p->video_out->attached == 1);
+    assert(ely_set_video_hwnd(p, NULL) == 0);
+    assert(p->video_out->attached == 0);
+    assert(ely_resize_video(p, 640, 360) == 0 &&
+           "resize with no target stays a legal no-op");
+    printf("video target: attach, detach and detached resize safe\n");
+
+    /* queue pressure: with the target full, fill must neither drop a
+       sample nor advance the demux cursor to find that out */
+    player_reset_pipeline(p);
+    mp4_seek(p->demux, 0.0);
+    while (p->video_q->count < p->video_q->cap) {
+        Packet dummy;
+        memset(&dummy, 0, sizeof(dummy));
+        dummy.data = (unsigned char*)malloc(1);
+        dummy.size = 1;
+        dummy.stream_kind = 2;
+        assert(queue_push(p->video_q, dummy));
+    }
+    {
+        size_t vcur = p->demux->video.cursor;
+        size_t acur = p->demux->audio.cursor;
+        int kind = 0;
+        assert(mp4_peek_next_kind(p->demux, &kind));
+        if (kind == 2) {
+            int filled = player_fill_queues(p, 16);
+            assert(filled == 0 && "full target must stop the fill");
+            assert(p->demux->video.cursor == vcur &&
+                   p->demux->audio.cursor == acur &&
+                   "a full target must not cost consumed samples");
+        }
+        assert(p->video_q->count == p->video_q->cap && "no overfill");
+    }
+    player_reset_pipeline(p);
+    printf("queue pressure: bounded, and peek prevents consumed samples\n");
+
+    /* failure escalation: malformed (zero-size) packets must fail decode
+       repeatedly and promote the player to ERROR through settle */
+    assert(ely_play(p) == 0);
+    for (int i = 0; i < 12; i++) {
+        Packet bad;
+        memset(&bad, 0, sizeof(bad));
+        bad.data = (unsigned char*)malloc(1);
+        bad.size = 0;                       /* malformed: no bytes */
+        bad.stream_kind = 1;
+        bad.pts = 0.0;                      /* always due */
+        assert(queue_push(p->audio_q, bad));
+    }
+    for (int i = 0; i < 4 && ely_get_state(p) != 6; i++) sleep_ms(10);
+    assert(ely_get_state(p) == 6 && "repeated decode failure must ERROR");
+    assert(wcslen(ely_get_last_error(p)) > 0);
+    assert(ely_unload(p) == 0 && ely_get_state(p) == 0 &&
+           "unload must recover from ERROR");
+    printf("failure escalation: ERROR after repeated decode failure, "
+           "unload recovers\n");
+
+    /* real-world file: FFmpeg-muxed, libx264+AAC, end to end */
+    if (argc > 3) {
+        wchar_t rpath[2048];
+        mbstowcs(rpath, argv[3], 2047);
+        rpath[2047] = 0;
+        assert(ely_load(p, rpath) == 0 &&
+               "a real muxer's MP4 must load through the owned demuxer");
+        ElyMediaInfo info;
+        memset(&info, 0, sizeof(info));
+        info.struct_size = (int)sizeof(info);
+        assert(ely_get_media_info(p, &info) == 0);
+        assert(info.kind == 2 && info.width == 320 && info.height == 240);
+        assert(ely_play(p) == 0 &&
+               "real avcC and ASC must satisfy the parsing decoders");
+        sleep_ms(150);
+        ely_get_state(p);
+        assert(p->audio_out->writes > 0 && p->video_out->presents > 0);
+        assert(ely_get_position(p) > 0.05);
+        assert(ely_stop(p) == 0);
+        printf("real-world MP4 (libx264 + AAC): loads, plays, flows\n");
+    }
+
     ely_destroy_player(p);
     printf("ALL PIPELINE TESTS PASSED\n");
     return 0;

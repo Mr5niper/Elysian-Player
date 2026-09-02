@@ -56,6 +56,11 @@ int mp4_fill_info(Mp4Demux* d, ElyMediaInfo* out);
  * back to the nearest preceding sync sample so a decoder can start clean. */
 int mp4_seek(Mp4Demux* d, double seconds);
 
+/* Which track the next sample belongs to, WITHOUT advancing any cursor;
+ * returns 0 at end of media. Lets the pump route to a queue and check its
+ * capacity before consuming demux state. */
+int mp4_peek_next_kind(Mp4Demux* d, int* out_kind);
+
 /* Next sample across both tracks in dts order; returns 0 at end of media.
  * out_kind is ELY_MEDIA_AUDIO or ELY_MEDIA_VIDEO. The sample's bytes are
  * read into buf (caller-sized); sizes above buf_cap fail with 0. */

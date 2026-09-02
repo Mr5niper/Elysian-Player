@@ -57,6 +57,7 @@ ElyPlayer* player_create(void) {
     p->demux_eof = 0;
     p->audio_ready = p->video_ready = 0;
     p->audio_eof = p->video_eof = 0;
+    p->audio_failures = p->video_failures = 0;
     clock_reset(p->clock, 0.0);
     return p;
 }
@@ -83,16 +84,15 @@ void player_destroy(ElyPlayer* p) {
 
 void player_reset_pipeline(ElyPlayer* p) {
     if (!p) return;
-    /* The plan's version zeroed the queue counters and leaked every queued
-     * payload; ownership says whoever pops frees, and reset pops it all. */
-    Packet pkt;
-    while (p->audio_q && queue_pop(p->audio_q, &pkt)) free(pkt.data);
-    while (p->video_q && queue_pop(p->video_q, &pkt)) free(pkt.data);
+    if (p->audio_q) queue_clear(p->audio_q);
+    if (p->video_q) queue_clear(p->video_q);
     p->demux_eof = 0;
     p->audio_eof = 0;
     p->video_eof = 0;
     p->audio_ready = 0;
     p->video_ready = 0;
+    p->audio_failures = 0;
+    p->video_failures = 0;
     if (p->audio_out) audio_out_flush(p->audio_out);
     if (p->video_out) video_out_clear(p->video_out);
     if (p->audio_dec) aac_flush(p->audio_dec);
@@ -131,39 +131,39 @@ int player_fill_queues(ElyPlayer* p, int max_packets) {
 
     int filled = 0;
     while (filled < max_packets) {
-        PacketQueue* target;
-        {
-            /* peek which track comes next so a full target queue stops the
-               fill instead of dropping the sample */
-            Mp4Sample s;
-            int kind = 0;
-            /* read without buffer first to route, then with buffer */
-            /* mp4_next_sample advances the cursor, so route by trying the
-               push after the read and un-reading is not possible; instead
-               check both queue capacities up front */
-            if (p->audio_q->count >= p->audio_q->cap &&
-                p->video_q->count >= p->video_q->cap)
-                break;
-            if (!mp4_next_sample(p->demux, &s, &kind,
-                                 p->demux_buf.data(), p->demux_buf.size())) {
-                p->demux_eof = 1;
-                break;
-            }
-            Packet pkt;
-            memset(&pkt, 0, sizeof(pkt));
-            pkt.size = s.size;
-            pkt.data = (unsigned char*)malloc(s.size ? s.size : 1);
-            if (!pkt.data) break;
-            memcpy(pkt.data, p->demux_buf.data(), s.size);
-            pkt.pts = s.dts;
-            pkt.duration = s.duration;
-            pkt.stream_kind = kind;
-            pkt.keyframe = s.keyframe;
-            target = (kind == ELY_MEDIA_AUDIO) ? p->audio_q : p->video_q;
-            if (!queue_push(target, pkt)) {
-                free(pkt.data);
-                break;      /* target full; the pump drains before refill */
-            }
+        /* Route before consuming: peek which track is next, check that
+         * queue's capacity, and only then advance the demuxer. A full
+         * target no longer costs a consumed sample. */
+        int kind = 0;
+        if (!mp4_peek_next_kind(p->demux, &kind)) {
+            p->demux_eof = 1;
+            break;
+        }
+        PacketQueue* target =
+            (kind == ELY_MEDIA_AUDIO) ? p->audio_q : p->video_q;
+        if (target->count >= target->cap)
+            break;
+
+        Mp4Sample s;
+        int got_kind = 0;
+        if (!mp4_next_sample(p->demux, &s, &got_kind,
+                             p->demux_buf.data(), p->demux_buf.size())) {
+            p->demux_eof = 1;
+            break;
+        }
+        Packet pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.size = s.size;
+        pkt.data = (unsigned char*)malloc(s.size ? s.size : 1);
+        if (!pkt.data) break;
+        memcpy(pkt.data, p->demux_buf.data(), s.size);
+        pkt.pts = s.dts;
+        pkt.duration = s.duration;
+        pkt.stream_kind = got_kind;
+        pkt.keyframe = s.keyframe;
+        if (!queue_push(target, pkt)) {
+            packet_dispose(&pkt);
+            break;
         }
         filled++;
     }
@@ -206,9 +206,14 @@ int player_pump(ElyPlayer* p) {
             Packet pkt;
             queue_pop(p->audio_q, &pkt);
             PcmFrame pcm;
-            if (aac_decode_packet(p->audio_dec, &pkt, &pcm))
+            if (aac_decode_packet(p->audio_dec, &pkt, &pcm)) {
                 audio_out_write(p->audio_out, &pcm);
-            free(pkt.data);
+                p->audio_failures = 0;
+            } else if (++p->audio_failures > 8) {
+                packet_dispose(&pkt);
+                return -1;
+            }
+            packet_dispose(&pkt);
             did = 1;
             work++;
         }
@@ -217,9 +222,14 @@ int player_pump(ElyPlayer* p) {
             Packet pkt;
             queue_pop(p->video_q, &pkt);
             VideoFrame frame;
-            if (h264_decode_packet(p->video_dec, &pkt, &frame))
+            if (h264_decode_packet(p->video_dec, &pkt, &frame)) {
                 video_out_present(p->video_out, &frame);
-            free(pkt.data);
+                p->video_failures = 0;
+            } else if (++p->video_failures > 8) {
+                packet_dispose(&pkt);
+                return -1;
+            }
+            packet_dispose(&pkt);
             did = 1;
             work++;
         }
@@ -236,7 +246,13 @@ int player_pump(ElyPlayer* p) {
 
 void player_settle(ElyPlayer* p) {
     if (!p || p->state != ELY_STATE_PLAYING) return;
-    player_pump(p);
+    if (player_pump(p) < 0) {
+        /* Repeated decode failure is fatal for this media, per contract:
+         * the player promotes to ERROR and unload recovers it. */
+        player_set_error(p, L"decode: pipeline failure");
+        p->state = ELY_STATE_ERROR;
+        return;
+    }
     /* Audio is master only when a real device clock exists; the synthetic
      * sink reports none and the playback clock stays authoritative, which
      * is what keeps wall-time position semantics intact until WASAPI. */
