@@ -241,7 +241,13 @@ html, body {
 }
 #seek { flex: 1; min-width: 0; }
 #vol { width: 96px; flex-shrink: 0; }
-#volicon { width: 17px; height: 17px; stroke: var(--accent); flex-shrink: 0; margin-left: 6px; }
+#volicon {
+  width: 17px; height: 17px; stroke: var(--accent); flex-shrink: 0;
+  margin-left: 6px; cursor: pointer;
+}
+#volicon:hover { stroke: var(--accent-hi); }
+#volicon.muted { stroke: var(--muted); }
+#volicon.muted:hover { stroke: var(--text); }
 
 #status {
   font-size: 11px; color: var(--muted);
