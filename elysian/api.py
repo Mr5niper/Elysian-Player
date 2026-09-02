@@ -43,6 +43,11 @@ class Api:
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
         self._engine.set_volume(self._settings.get("volume", 0.8))
+        # Mute is session-local: the engine goes to 0 but _premute_volume is
+        # what the slider shows, what unmute restores, and what gets saved,
+        # so closing muted cannot trap the next launch at volume zero.
+        self._muted = False
+        self._premute_volume = float(self._settings.get("volume", 0.8))
 
         self._shuffle_bag: list[int] = []
         self._history: list[int] = []
@@ -321,7 +326,9 @@ class Api:
                 "paused": self._engine.paused,
                 "position": round(self._engine.position, 2),
                 "duration": round(self._engine.duration, 2),
-                "volume": round(self._engine.volume, 3),
+                "volume": round(self._premute_volume if self._muted
+                                else self._engine.volume, 3),
+                "muted": self._muted,
                 "shuffle": self._shuffle,
                 "repeat": self._repeat,
                 "status": self._footer(),
@@ -765,7 +772,24 @@ class Api:
         self._engine.nudge(float(delta))
 
     def _do_set_volume(self, value: float) -> None:
+        # Touching the volume while muted unmutes, as the system mixer does;
+        # otherwise the slider moves and nothing audible happens.
+        self._muted = False
         self._engine.set_volume(float(value))
+        self._premute_volume = self._engine.volume
+
+    def _do_toggle_mute(self) -> None:
+        if self._muted:
+            self._muted = False
+            # Unmuting to silence reads as a dead button, so a zero premute
+            # volume restores to something audible instead.
+            restore = self._premute_volume if self._premute_volume > 0 else 0.5
+            self._engine.set_volume(restore)
+        else:
+            self._premute_volume = self._engine.volume
+            self._muted = True
+            self._engine.set_volume(0.0)
+        self._bump()
 
     def _do_toggle_shuffle(self) -> None:
         self._shuffle = not self._shuffle
@@ -891,6 +915,9 @@ class Api:
     def cycle_repeat(self) -> None:
         self._post("cycle_repeat")
 
+    def toggle_mute(self) -> None:
+        self._post("toggle_mute")
+
     def remove(self, ids) -> None:
         self._post("remove", [int(i) for i in (ids or [])])
 
@@ -964,7 +991,8 @@ class Api:
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
         self._settings.update({
-            "volume": self._engine.volume,
+            "volume": self._premute_volume if self._muted
+                      else self._engine.volume,
             "shuffle": self._shuffle,
             "repeat": self._repeat,
             "playlist": [t.path for t in self._playlist.tracks],
@@ -1048,6 +1076,7 @@ class Api:
         "remove", "reorder",
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
+        "toggle_mute",
         "win_minimise", "win_maximise", "win_close",
     })
 
