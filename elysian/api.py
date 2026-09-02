@@ -575,8 +575,9 @@ class Api:
             return
         with self._lock:
             added = self._playlist.add_paths(found)
+            if added:
+                self._rebuild_bag()
         if added:
-            self._rebuild_bag()
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
 
@@ -751,6 +752,12 @@ class Api:
     # optimistically, so the round trip is invisible.
 
     def play_id(self, track_id: int, start: float = 0.0) -> bool:
+        """Queue playback of this track.
+
+        True means queued, not playing: like every other command, the
+        outcome lands in the snapshot (or the status line on failure), and
+        the frontend already renders from that rather than this value.
+        """
         self._post("play_id", int(track_id), float(start))
         return True
 
@@ -917,18 +924,24 @@ class Api:
     # created and every call from JavaScript failed.
 
     #: Everything JavaScript is allowed to call. Anything public and not in
-    #: this set is a mistake. See _assert_bridge_surface.
-    BRIDGE = frozenset({
+    #: this set or HOST_PUBLIC is a mistake. See _assert_bridge_surface.
+    JS_BRIDGE = frozenset({
         "get_tick", "get_full", "get_meta", "get_peaks",
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
-        "remove", "reorder", "open_paths",
+        "remove", "reorder",
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "win_minimise", "win_maximise", "win_close",
-        # host-side entry points, not called from JS but necessarily public
-        "attach", "boot", "ingest", "close", "set_maximized", "BRIDGE",
+    })
+
+    #: Public for the host process only, never called from JavaScript, but
+    #: necessarily unprefixed. The two set names are here because pywebview
+    #: sees them as public attributes of this object too.
+    HOST_PUBLIC = frozenset({
+        "attach", "boot", "ingest", "open_paths", "close", "set_maximized",
+        "JS_BRIDGE", "HOST_PUBLIC",
     })
 
     def _assert_bridge_surface(self) -> None:
@@ -941,13 +954,24 @@ class Api:
         frontend silently failed. This turns that class of mistake into an
         error at startup instead of a dead interface.
         """
-        extra = {n for n in dir(self) if not n.startswith("_")} - self.BRIDGE
+        allowed = self.JS_BRIDGE | self.HOST_PUBLIC
+        extra = {n for n in dir(self) if not n.startswith("_")} - allowed
         if extra:
             raise RuntimeError(
                 "Api exposes unexpected public attributes to pywebview: "
                 + ", ".join(sorted(extra))
                 + ". Prefix them with an underscore, or add them to "
-                  "Api.BRIDGE if JavaScript is meant to call them.")
+                  "Api.JS_BRIDGE (JavaScript may call them) or "
+                  "Api.HOST_PUBLIC (host-side only).")
+        methods = (self.JS_BRIDGE
+                   | (self.HOST_PUBLIC - {"JS_BRIDGE", "HOST_PUBLIC"}))
+        dud = sorted(n for n in methods
+                     if not callable(getattr(self, n, None)))
+        if dud:
+            raise RuntimeError(
+                "Api bridge sets list names that are not callable methods: "
+                + ", ".join(dud)
+                + ". A constant or attribute has taken a method's place.")
 
     def attach(self, window) -> None:
         self._window = window
