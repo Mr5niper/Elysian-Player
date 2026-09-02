@@ -28,6 +28,8 @@ int video_out_present(VideoOut* v, const VideoFrame* frame) {
     v->last = *frame;
     v->last_pts = frame->pts;
     v->presents++;
+    v->bytes_presented += frame->pixels.size();
+    v->cleared = 0;
     return 1;
 }
 
@@ -36,4 +38,6 @@ void video_out_clear(VideoOut* v) {
     v->last = VideoFrame();
     v->last_pts = 0.0;
     v->presents = 0;
+    v->bytes_presented = 0;
+    v->cleared = 1;
 }

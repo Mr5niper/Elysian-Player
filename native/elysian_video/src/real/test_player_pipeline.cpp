@@ -47,8 +47,11 @@ int main(int argc, char** argv) {
     /* pump for a moment of real time: packets must flow into both outputs */
     for (int i = 0; i < 6; i++) { sleep_ms(50); ely_get_state(p); }
     assert(p->audio_out->writes > 0 && "PCM must reach the audio sink");
+    assert(audio_out_position(p->audio_out) >= 0.0 &&
+           "audio backend must expose a non-negative clock now");
     assert(p->video_out->presents > 0 && "frames must reach the presenter");
-    assert(p->video_out->last.width == 1920 && p->video_out->last.stride == 1920 * 4);
+    assert(p->video_out->last.width == p->demux->width &&
+           p->video_out->last.stride == p->demux->width * 4);
     double pos = ely_get_position(p);
     assert(pos > 0.15 && "position advances on the clock");
     /* presented frames track the clock within the pump lookahead, in real
@@ -60,12 +63,16 @@ int main(int argc, char** argv) {
 
     /* presented frames keep pace with the clock, not with call count */
     size_t before = p->video_out->presents;
-    double t0 = ely_get_position(p);
+    double last_before = p->video_out->last_pts;
     for (int i = 0; i < 50; i++) ely_get_state(p);   /* burst of calls */
     double t1 = ely_get_position(p);
-    /* frames presented during the burst must track elapsed clock time
-       (30 fps plus lookahead slack), never the call count */
-    size_t allowed = (size_t)((t1 - t0) * 30.0) + 4;
+    /* Frames presented during the burst may include catch-up on any
+       backlog (instrumented builds run the pump slower than the clock),
+       but must never exceed the frames actually due between the last
+       presented timestamp and now plus the pump lookahead. A call-paced
+       pump would present ~50 here; the due-window bound stays well under
+       that in the uninstrumented build and scales honestly under ASAN. */
+    size_t allowed = (size_t)((t1 + 0.6 - last_before) * 30.0) + 4;
     assert(p->video_out->presents - before <= allowed &&
            "pump must be paced by the clock, not by call frequency");
     printf("pump is clock-paced: burst of 50 calls presented %zu frames\n",
@@ -78,6 +85,14 @@ int main(int argc, char** argv) {
     ely_get_state(p);
     assert(p->audio_out->writes == wa && p->video_out->presents == wv);
     printf("pause: pipeline holds still\n");
+
+    {
+        double p0 = audio_out_position(p->audio_out);
+        sleep_ms(80);
+        double p1 = audio_out_position(p->audio_out);
+        assert(p1 - p0 < 0.01 && "paused audio clock must freeze");
+        printf("audio clock freezes while paused\n");
+    }
 
     /* seek flushes queues and decoders, stays paused, resumes cleanly */
     assert(ely_seek(p, 5.0) == 0);
@@ -235,6 +250,10 @@ int main(int argc, char** argv) {
         ely_get_state(p);
         assert(p->audio_out->writes > 0 && p->video_out->presents > 0);
         assert(ely_get_position(p) > 0.05);
+        assert(p->video_out->bytes_presented > 0 &&
+               "video presenter must track real presented bytes");
+        assert(p->video_out->cleared == 0);
+        printf("video presenter tracks bytes and clear state\n");
         assert(ely_stop(p) == 0);
         printf("real-world MP4 (libx264 + AAC): loads, plays, flows\n");
     }
