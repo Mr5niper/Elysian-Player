@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.2.0.0
+- **Version**: 2.3.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -38,6 +38,11 @@ megabytes. Audio runs on miniaudio.
   clicked, and ctrl+shift-click adds that run to what is already selected.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
+* Click the speaker icon to mute. The slider keeps your volume, unmuting
+  restores it, and moving the volume while muted unmutes.
+* Clear the whole playlist from the toolbar or with `Ctrl+Shift+Delete`. It
+  asks first, and a folder scan running at the time stops rather than
+  refilling the list you just emptied.
 * Restores your playlist, current track, volume, shuffle and repeat state on
   the next launch, and resumes the last track from where you stopped the first
   time you press play.
@@ -53,9 +58,11 @@ megabytes. Audio runs on miniaudio.
 | `Up` / `Down`    | Volume up or down 5%    |
 | `Enter`          | Play the selected track |
 | `Delete`         | Remove selected tracks  |
+| `Ctrl+Shift+Delete` | Clear the playlist (asks first) |
 | `/`              | Jump to the filter box  |
 | `Escape`         | Clear the filter        |
 | `Double-click`   | Play that track         |
+| Click the speaker | Mute or unmute         |
 | `Ctrl+click`     | Toggle one row          |
 | `Shift+click`    | Select a run of rows    |
 | `Ctrl+Shift+click` | Add a run to the selection |
@@ -64,7 +71,7 @@ megabytes. Audio runs on miniaudio.
 Double-clicking the title bar maximises and restores, as it would on a normal
 window. The maximise button changes to a restore glyph while maximised.
 
-## Not in 2.2.0.0
+## Not in 2.3.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:

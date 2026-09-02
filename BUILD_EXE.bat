@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 :: ==========================================================================
-::  Elysian Player 2.2.0.0 EXE Builder
+::  Elysian Player 2.3.0.0 EXE Builder
 ::  Strictly requires Python 3.13.12
 ::  Works even when Python is NOT on PATH (uses the "py" launcher).
 ::
