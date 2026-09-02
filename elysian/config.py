@@ -14,7 +14,7 @@ COVER_NAMES = (
     "album.jpg", "cover.png", "folder.png",
 )
 
-ART_SIZE = 160
+ART_SIZE = 240  # the CSS #art box; art.py renders at 2x this for HiDPI
 ART_CACHE_LIMIT = 64
 
 TICK_SECONDS = 0.1
