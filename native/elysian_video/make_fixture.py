@@ -62,10 +62,7 @@ def _avc1(w: int, h: int) -> bytes:
     entry += struct.pack(">H", 1)                    # frame_count
     entry += b"\x00" * 32                            # compressorname
     entry += struct.pack(">Hh", 0x0018, -1)          # depth, pre_defined
-    avcc = bytes([1, 0x42, 0x00, 0x1E, 0xFF,
-                  0xE1, 0x00, 0x02, 0x67, 0x42,      # one placeholder SPS
-                  0x01, 0x00, 0x02, 0x68, 0xCE])     # one placeholder PPS
-    entry += box(b"avcC", avcc)
+    entry += box(b"avcC", _avcc(w, h))
     return box(b"avc1", entry)
 
 
@@ -150,7 +147,127 @@ def write_mp4(path, video: bool = True, seconds: float = 10.0) -> None:
     mvhd_body += _matrix() + b"\x00" * 24 + struct.pack(">I", tid + 1)
     moov = box(b"moov", full(b"mvhd", 0, 0, mvhd_body) + traks)
 
+    # Video samples are structurally valid MP4-form access units: a 4-byte
+    # NAL length prefix, a NAL header (IDR for sync samples, non-IDR
+    # otherwise), then padding. The AU walker in the H.264 seam parses
+    # these for real; zero-filled payloads would rightly be rejected.
+    payload = bytearray()
+    if video:
+        for i in range(vid_count):
+            nal_type = 0x65 if i % 30 == 0 else 0x41
+            payload += struct.pack(">I", vid_size - 4)
+            payload += bytes([nal_type])
+            payload += b"\x00" * (vid_size - 5)
+    payload += b"\x00" * (aud_count * aud_size)
+    assert len(payload) == mdat_payload_size
+
     with open(path, "wb") as fh:
         fh.write(ftyp)
-        fh.write(box(b"mdat", b"\x00" * mdat_payload_size))
+        fh.write(box(b"mdat", bytes(payload)))
         fh.write(moov)
+
+
+class _BitWriter:
+    """MSB-first bit writer for assembling real SPS/PPS bitstreams."""
+
+    def __init__(self):
+        self.bits = []
+
+    def u(self, value: int, count: int) -> None:
+        for i in range(count - 1, -1, -1):
+            self.bits.append((value >> i) & 1)
+
+    def ue(self, value: int) -> None:
+        v = value + 1
+        zeros = v.bit_length() - 1
+        self.u(0, zeros)
+        self.u(v, zeros + 1)
+
+    def se(self, value: int) -> None:
+        self.ue(2 * value - 1 if value > 0 else -2 * value)
+
+    def trailing(self) -> None:
+        self.bits.append(1)
+        while len(self.bits) % 8:
+            self.bits.append(0)
+
+    def bytes(self) -> bytes:
+        out = bytearray()
+        for i in range(0, len(self.bits), 8):
+            b = 0
+            for bit in self.bits[i:i + 8]:
+                b = (b << 1) | bit
+            out.append(b)
+        return bytes(out)
+
+
+def _escape_rbsp(rbsp: bytes) -> bytes:
+    out = bytearray()
+    zeros = 0
+    for byte in rbsp:
+        if zeros >= 2 and byte <= 3:
+            out.append(3)
+            zeros = 0
+        out.append(byte)
+        zeros = zeros + 1 if byte == 0 else 0
+    return bytes(out)
+
+
+def _sps(w: int, h: int) -> bytes:
+    """A spec-valid baseline SPS for WxH (4:2:0, frames only)."""
+    mb_w = (w + 15) // 16
+    mb_h = (h + 15) // 16
+    crop_r = (mb_w * 16 - w) // 2
+    crop_b = (mb_h * 16 - h) // 2
+    bw = _BitWriter()
+    bw.u(66, 8)          # profile_idc: baseline
+    bw.u(0xC0, 8)        # constraint flags
+    bw.u(30, 8)          # level 3.0
+    bw.ue(0)             # sps_id
+    bw.ue(0)             # log2_max_frame_num_minus4
+    bw.ue(0)             # poc_type 0
+    bw.ue(0)             # log2_max_poc_lsb_minus4
+    bw.ue(1)             # max_num_ref_frames
+    bw.u(0, 1)           # gaps_in_frame_num_allowed
+    bw.ue(mb_w - 1)
+    bw.ue(mb_h - 1)
+    bw.u(1, 1)           # frame_mbs_only
+    bw.u(0, 1)           # direct_8x8
+    if crop_r or crop_b:
+        bw.u(1, 1)
+        bw.ue(0); bw.ue(crop_r); bw.ue(0); bw.ue(crop_b)
+    else:
+        bw.u(0, 1)
+    bw.u(0, 1)           # vui absent
+    bw.trailing()
+    return bytes([0x67]) + _escape_rbsp(bw.bytes())
+
+
+def _pps() -> bytes:
+    bw = _BitWriter()
+    bw.ue(0)             # pps_id
+    bw.ue(0)             # sps_id
+    bw.u(0, 1)           # entropy: CAVLC
+    bw.u(0, 1)           # bottom_field_pic_order
+    bw.ue(0)             # one slice group
+    bw.ue(0)             # refs l0
+    bw.ue(0)             # refs l1
+    bw.u(0, 1)           # weighted pred
+    bw.u(0, 2)           # weighted bipred
+    bw.se(0)             # pic_init_qp_minus26
+    bw.se(0)             # pic_init_qs_minus26
+    bw.se(0)             # chroma_qp_offset
+    bw.u(1, 1)           # deblocking_filter_control
+    bw.u(0, 1)           # constrained_intra
+    bw.u(0, 1)           # redundant_pic_cnt
+    bw.trailing()
+    return bytes([0x68]) + _escape_rbsp(bw.bytes())
+
+
+def _avcc(w: int, h: int) -> bytes:
+    sps = _sps(w, h)
+    pps = _pps()
+    out = bytes([1, sps[1], sps[2], sps[3], 0xFF, 0xE1])
+    out += struct.pack(">H", len(sps)) + sps
+    out += bytes([1]) + struct.pack(">H", len(pps)) + pps
+    return out

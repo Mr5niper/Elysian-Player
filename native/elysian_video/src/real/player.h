@@ -38,6 +38,10 @@ struct ElyPlayer {
     int video_ready;
     int audio_eof;
     int video_eof;
+    /* Consecutive decode failures per path; the pump escalates past a
+     * threshold and settle promotes the player to ERROR. */
+    int audio_failures;
+    int video_failures;
 };
 
 ElyPlayer* player_create(void);

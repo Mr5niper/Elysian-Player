@@ -485,19 +485,29 @@ int mp4_seek(Mp4Demux* d, double seconds) {
     return 1;
 }
 
-int mp4_next_sample(Mp4Demux* d, Mp4Sample* out, int* out_kind,
-                    uint8_t* buf, size_t buf_cap) {
-    if (!d || !d->f || !out || !out_kind) return 0;
+static Mp4Track* pick_next_track(Mp4Demux* d) {
     Mp4Track* a = d->audio.present &&
                   d->audio.cursor < d->audio.samples.size() ? &d->audio : NULL;
     Mp4Track* v = d->video.present &&
                   d->video.cursor < d->video.samples.size() ? &d->video : NULL;
-    Mp4Track* pick;
     if (a && v)
-        pick = d->audio.samples[d->audio.cursor].dts
+        return d->audio.samples[d->audio.cursor].dts
              <= d->video.samples[d->video.cursor].dts ? a : v;
-    else
-        pick = a ? a : v;
+    return a ? a : v;
+}
+
+int mp4_peek_next_kind(Mp4Demux* d, int* out_kind) {
+    if (!d || !d->f || !out_kind) return 0;
+    Mp4Track* pick = pick_next_track(d);
+    if (!pick) return 0;
+    *out_kind = pick == &d->video ? ELY_MEDIA_VIDEO : ELY_MEDIA_AUDIO;
+    return 1;
+}
+
+int mp4_next_sample(Mp4Demux* d, Mp4Sample* out, int* out_kind,
+                    uint8_t* buf, size_t buf_cap) {
+    if (!d || !d->f || !out || !out_kind) return 0;
+    Mp4Track* pick = pick_next_track(d);
     if (!pick) return 0;                        /* end of media */
 
     const Mp4Sample& s = pick->samples[pick->cursor];
