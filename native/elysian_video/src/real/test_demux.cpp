@@ -99,6 +99,29 @@ int main(int argc, char** argv) {
         mp4_close(&t);
     }
     printf("damaged container classified as BAD_CONTAINER\n");
+
+    /* audio-only fixture (second argv): no video track, audio walk intact */
+    if (argc > 2) {
+        wchar_t apath[2048];
+        mbstowcs(apath, argv[2], 2047);
+        apath[2047] = 0;
+        Mp4Demux a;
+        assert(mp4_open(&a, apath) == ELY_OK);
+        assert(a.has_audio && !a.has_video);
+        assert(a.width == 0 && a.height == 0);
+        assert(a.audio.samples.size() == 430);
+        assert(a.audio.codec_config.size() == 2);
+        unsigned char abuf[4096];
+        Mp4Sample as; int akind; size_t an = 0;
+        while (mp4_next_sample(&a, &as, &akind, abuf, sizeof(abuf))) {
+            assert(akind == ELY_MEDIA_AUDIO);
+            an++;
+        }
+        assert(an == 430);
+        mp4_close(&a);
+        printf("audio-only fixture: classification and walk correct\n");
+    }
+
     printf("ALL DEMUX TESTS PASSED\n");
     return 0;
 }

@@ -3,6 +3,7 @@
 #include "player.h"
 #include "clock.h"
 #include "mp4_demux.h"
+#include "audio_out.h"
 #include "video_out.h"
 
 #include <string.h>
@@ -47,6 +48,7 @@ ELY_API int ely_load(ElyPlayer* p, const wchar_t* path) {
     p->info.struct_size = (int)sizeof(ElyMediaInfo);
     p->path = path;
     clock_reset(p->clock, 0.0);
+    player_reset_pipeline(p);
     p->state = ELY_STATE_LOADED;
     /* Deliberately no error-buffer clear: success never clears last_error,
      * per the locked contract rule. */
@@ -55,6 +57,7 @@ ELY_API int ely_load(ElyPlayer* p, const wchar_t* path) {
 
 ELY_API int ely_unload(ElyPlayer* p) {
     if (!p) return ELY_ERR_BAD_ARG;
+    player_reset_pipeline(p);
     mp4_close(p->demux);
     p->path.clear();
     memset(&p->info, 0, sizeof(p->info));
@@ -73,7 +76,8 @@ ELY_API int ely_play(ElyPlayer* p) {
         break;                              /* start / resume from current */
     case ELY_STATE_STOPPED:
     case ELY_STATE_ENDED:
-        mp4_seek(p->demux, 0.0);            /* restart from zero */
+        player_reset_pipeline(p);           /* restart from zero */
+        mp4_seek(p->demux, 0.0);
         clock_seek(p->clock, 0.0);
         break;
     case ELY_STATE_PLAYING:
@@ -81,6 +85,9 @@ ELY_API int ely_play(ElyPlayer* p) {
     default:
         return fail(p, ELY_ERR_BAD_STATE, L"play: nothing loaded");
     }
+    if (!player_prepare_pipeline(p))
+        return fail(p, ELY_ERR_DECODE, L"play: pipeline init failed");
+    audio_out_resume(p->audio_out);
     clock_play(p->clock);
     p->state = ELY_STATE_PLAYING;
     return ELY_OK;
@@ -92,6 +99,7 @@ ELY_API int ely_pause(ElyPlayer* p) {
     if (p->state != ELY_STATE_PLAYING)
         return fail(p, ELY_ERR_BAD_STATE, L"pause: not playing");
     clock_pause(p->clock);
+    audio_out_pause(p->audio_out);
     p->state = ELY_STATE_PAUSED;
     return ELY_OK;
 }
@@ -100,6 +108,7 @@ ELY_API int ely_resume(ElyPlayer* p) {
     if (!p) return ELY_ERR_BAD_ARG;
     if (p->state != ELY_STATE_PAUSED)
         return fail(p, ELY_ERR_BAD_STATE, L"resume: not paused");
+    audio_out_resume(p->audio_out);
     clock_play(p->clock);
     p->state = ELY_STATE_PLAYING;
     return ELY_OK;
@@ -109,6 +118,7 @@ ELY_API int ely_stop(ElyPlayer* p) {
     if (!p) return ELY_ERR_BAD_ARG;
     if (p->state == ELY_STATE_EMPTY)
         return fail(p, ELY_ERR_BAD_STATE, L"stop: nothing loaded");
+    player_reset_pipeline(p);
     mp4_seek(p->demux, 0.0);
     clock_reset(p->clock, 0.0);
     p->state = ELY_STATE_STOPPED;           /* media stays loaded */
@@ -123,6 +133,7 @@ ELY_API int ely_seek(ElyPlayer* p, double seconds) {
     if (seconds < 0.0) seconds = 0.0;
     if (p->info.duration > 0.0 && seconds > p->info.duration)
         seconds = p->info.duration;
+    player_reset_pipeline(p);               /* flush queues and decoders */
     if (!mp4_seek(p->demux, seconds))
         return fail(p, ELY_ERR_SEEK, L"seek: demuxer refused the target");
     clock_seek(p->clock, seconds);
@@ -136,6 +147,7 @@ ELY_API int ely_set_volume(ElyPlayer* p, float volume) {
     if (volume < 0.0f) volume = 0.0f;
     if (volume > 1.0f) volume = 1.0f;
     p->volume = volume;
+    audio_out_set_volume(p->audio_out, volume);
     return ELY_OK;
 }
 
