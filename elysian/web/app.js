@@ -53,6 +53,10 @@ function setView(name) {
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
+  // While hidden the list has no height, so its row window was computed
+  // against a fallback. Recompute against the real height now that it shows,
+  // covering a window resized while the Now Playing view was up.
+  if (name === "playlists") renderWindow(false);
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -857,6 +861,12 @@ function drawWave() {
 }
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
+  // The visible row window is sized from the container at render time, and
+  // only scrolling or a data change recomputed it. Growing the window
+  // (maximise, or dragging the edge) left the rows sized for the old height,
+  // with blank space below until the first scroll. Recompute here; the
+  // range early-out makes this free when the height did not actually change.
+  renderWindow(false);
 });
 
 /* ---------- state sync ---------- */
