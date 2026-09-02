@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.1.0.0
+- **Version**: 2.2.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -64,7 +64,7 @@ megabytes. Audio runs on miniaudio.
 Double-clicking the title bar maximises and restores, as it would on a normal
 window. The maximise button changes to a restore glyph while maximised.
 
-## Not in 2.1.0.0
+## Not in 2.2.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:
