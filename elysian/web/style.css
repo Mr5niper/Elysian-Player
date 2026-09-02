@@ -258,6 +258,36 @@ html, body {
 }
 #drophint.show { display: flex; }
 
+/* ---- confirm dialog ----
+   An in-app dialog rather than window.confirm(): whether this embedding
+   renders native script dialogs is not something the app relies on anywhere,
+   and a confirm that silently returns false would make its caller look dead. */
+#modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none; align-items: center; justify-content: center;
+  z-index: 60;
+}
+#modal.show { display: flex; }
+#modal-box {
+  background: var(--panel-2);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 10px;
+  padding: 22px 26px 18px;
+  min-width: 260px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+}
+#modal-text {
+  color: var(--text);
+  font-size: 13px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+#modal-buttons {
+  display: flex; gap: 10px; justify-content: center;
+}
+#modal-buttons .tbtn { min-width: 72px; }
+
 
 /* ---- press feedback ----
    A Windows control reacts on mouse-down, not on release. Without an :active

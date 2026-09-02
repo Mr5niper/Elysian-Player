@@ -66,6 +66,7 @@
           <input id="filter" type="text" placeholder="Filter" spellcheck="false">
           <button class="tbtn" id="btn-load">Load M3U</button>
           <button class="tbtn" id="btn-save">Save M3U</button>
+          <button class="tbtn" id="btn-clear" title="Clear the entire playlist">Clear Playlist</button>
         </div>
         <div id="tracks"><div id="sizer"></div></div>
         <div id="empty">
@@ -116,6 +117,16 @@
   </div>
 
   <div id="drophint">Drop to add to playlist</div>
+
+  <div id="modal">
+    <div id="modal-box">
+      <div id="modal-text">Are you sure?</div>
+      <div id="modal-buttons">
+        <button class="tbtn" id="modal-yes">Yes</button>
+        <button class="tbtn" id="modal-no">No</button>
+      </div>
+    </div>
+  </div>
 </div>
 <script src="app.js"></script>
 </body>

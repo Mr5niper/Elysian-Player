@@ -424,6 +424,26 @@ $("tracks").addEventListener("scroll", () => {
    be there. */
 let selectionAnchor = null;
 
+/* ---------- confirm dialog ---------- */
+let modalYes = null;
+
+function openConfirm(text, onYes) {
+  modalYes = onYes;
+  $("modal-text").textContent = text;
+  $("modal").classList.add("show");
+  // Focus the safe answer, so a stray Enter or Space declines.
+  $("modal-no").focus();
+}
+
+function closeConfirm() {
+  modalYes = null;
+  $("modal").classList.remove("show");
+}
+
+function modalOpen() {
+  return $("modal").classList.contains("show");
+}
+
 function rangeIds(fromId, toId) {
   let a = -1, b = -1;
   for (let i = 0; i < filtered.length; i++) {
@@ -714,6 +734,15 @@ const intent = {
     selected.clear();
     paintRowStates();
   },
+  clearPlaylist() {
+    if (!state.tracks.length) return;
+    openConfirm("Clear the entire playlist?", () => {
+      selected.clear();
+      selectionAnchor = null;
+      api().clear_playlist();
+      paintRowStates();
+    });
+  },
 };
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
@@ -726,6 +755,17 @@ wire("ic-add", () => api().add_files());
 wire("ic-folder", () => api().add_folder());
 wire("btn-load", () => api().load_m3u());
 wire("btn-save", () => api().save_m3u());
+wire("btn-clear", () => intent.clearPlaylist());
+wire("modal-yes", () => {
+  const fn = modalYes;
+  closeConfirm();
+  if (fn) fn();
+});
+wire("modal-no", () => closeConfirm());
+// Clicking the dimmed backdrop declines, like pressing Escape.
+$("modal").addEventListener("click", (e) => {
+  if (e.target === $("modal")) closeConfirm();
+});
 wire("win-min", () => api().win_minimise());
 wire("win-max", () => intent.toggleMaximise());
 wire("win-close", () => api().win_close());
@@ -738,6 +778,13 @@ $("titlebar").addEventListener("dblclick", (e) => {
 $("filter").addEventListener("input", () => renderList(true));
 
 document.addEventListener("keydown", (e) => {
+  if (modalOpen()) {
+    // The dialog owns the keyboard: Escape declines, and Enter or Space
+    // activate whichever button holds focus (the browser default). Nothing
+    // falls through, or Space would toggle playback behind the dialog.
+    if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
+    return;
+  }
   if (e.target === $("filter")) {
     if (e.key === "Escape") { $("filter").value = ""; $("filter").blur(); renderList(true); }
     return;
@@ -754,9 +801,26 @@ document.addEventListener("keydown", (e) => {
   }
   else if (k === "ArrowUp") { e.preventDefault(); intent.volumeBy(0.05); }
   else if (k === "ArrowDown") { e.preventDefault(); intent.volumeBy(-0.05); }
+  else if (k === "Delete" && e.ctrlKey && e.shiftKey) {
+    e.preventDefault();
+    intent.clearPlaylist();
+  }
   else if (k === "Delete") { intent.removeSelected(); }
   else if (k === "Enter") {
-    if (selected.size) intent.playTrack(Array.from(selected)[0]);
+    /* Enter is also the default activation key for whatever control has
+       keyboard focus. Tabbing to Shuffle and pressing Enter used to both
+       toggle shuffle and restart the selected row from here, because the
+       button's own click and this shortcut fired on the same keydown.
+       Play-selected is a playlist shortcut, so it only applies when focus
+       is not sitting on a control. Space stays global on purpose: a click
+       leaves the clicked button focused, and Space after clicking Shuffle
+       should still mean play/pause, not shuffle again. */
+    const t = e.target;
+    const tag = t && t.tagName ? t.tagName.toLowerCase() : "";
+    const onControl = tag === "button" || tag === "input" ||
+        tag === "select" || tag === "textarea" ||
+        !!(t && t.closest && t.closest(".slider, .winbtn"));
+    if (!onControl && selected.size) intent.playTrack(Array.from(selected)[0]);
   }
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
