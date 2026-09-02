@@ -11,10 +11,18 @@
  *    handshake below.
  *  - Every call on one ElyPlayer must be serialized by the caller. The
  *    Elysian shell already funnels playback through one worker thread, so
- *    this costs it nothing. The engine may use internal threads freely.
+ *    this costs it nothing. The engine may use internal threads freely, but
+ *    getters must never block on pipeline work, and the engine never calls
+ *    back into caller code from its own threads. State is pulled, not
+ *    pushed.
  *  - Paths are wchar_t. Narrow-char paths through the C runtime are how the
  *    shell once lost waveforms for every non-ASCII filename; the engine does
- *    not get the chance to repeat that.
+ *    not get the chance to repeat that. v1 accepts local filesystem paths
+ *    only: no URLs, no device paths, no pipes or streams.
+ *  - Capability queries live in ElyMediaInfo via ely_get_media_info; there
+ *    are deliberately no separate has_audio/has_video/kind functions, and
+ *    textual metadata (title/artist/album) is out of scope for ABI v1: the
+ *    shell owns display metadata, as it already does for audio.
  */
 #pragma once
 
@@ -117,12 +125,16 @@ ELY_API int ely_get_state(ElyPlayer* p);                  /* ElyState */
 
 ELY_API int ely_get_media_info(ElyPlayer* p, ElyMediaInfo* out_info);
 
-/* hwnd is void* so the header stays platform-neutral; NULL detaches. */
+/* hwnd is void* so the header stays platform-neutral; NULL detaches.
+ * ely_resize_video with no target attached is a legal no-op success: the
+ * shell may report layout changes without tracking attachment state. */
 ELY_API int ely_set_video_hwnd(ElyPlayer* p, void* hwnd);
 ELY_API int ely_resize_video(ElyPlayer* p, int width, int height);
 
-/* Valid until the next failing call on the same player. Never NULL for a
- * valid player; empty string when no error has occurred. */
+/* Describes the most recent FAILURE on this handle. Success never clears
+ * it; the next failing call replaces it. Empty string until the first
+ * failure. Never NULL for a valid player; the pointer is valid until the
+ * next failing call on the same player. */
 ELY_API const wchar_t* ely_get_last_error(ElyPlayer* p);
 
 #ifdef __cplusplus

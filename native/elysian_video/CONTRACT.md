@@ -12,7 +12,11 @@ Enum values are pinned forever and may only be appended. Function signatures nev
 
 ## Threading contract
 
-All calls on one `ElyPlayer` handle must be serialized by the caller. The Elysian shell already routes playback through a single worker thread, so this costs nothing. The engine is free to run any internal threads it wants (demux, decode, output, render) provided every public call remains safe under that external serialization and getters never block on pipeline work.
+All calls on one `ElyPlayer` handle must be serialized by the caller. The Elysian shell already routes playback through a single worker thread, so this costs nothing. The engine is free to run any internal threads it wants (demux, decode, output, render) with two hard rules: every getter is non-blocking under that external serialization and never waits on pipeline work, and the engine never calls back into caller code from its own threads. State is pulled through getters, never pushed through callbacks; that rule is what keeps the shell's snapshot model intact.
+
+## Locked v1 policy decisions
+
+These were open questions; they are now decided and Part B may not reopen them. Capability queries live in `ElyMediaInfo` only; there are no separate `has_audio`/`has_video`/`kind` functions because the struct with its `struct_size` handshake already answers them in one call. Textual metadata (title, artist, album) is out of the ABI: the shell owns display metadata, exactly as it already does for audio with mutagen and filename fallback, and a future need for container-title text arrives as new functions, not a v1 change. `ely_get_last_error` describes the most recent failure on the handle; success never clears it, the next failure replaces it, and it is the empty string until the first failure. `ely_resize_video` with no attached target is a legal no-op success so the shell can report layout changes without tracking attachment. Paths are local filesystem paths only: no URLs, no device paths, no pipes or streams in v1.
 
 ## State machine
 
@@ -33,6 +37,10 @@ The `ElyResult` values in the header are the complete v1 set: generic, bad argum
 ## Roadmap and the Phase 3 decision
 
 Phases follow the execution plan: contract (done), stub (done), engine infrastructure, MP4 demux, audio decode and output, video decode and render, validation, then shell integration. One decision is deliberately deferred to Phase 3 with eyes open: the code behind this ABI can be hand-rolled demux and codecs, or it can drive the platform decoder (Windows Media Foundation, present on Windows 10/11 with hardware acceleration and no redistributables). Hand-rolling an MP4 demuxer is a reasonable project; hand-rolling H.264 and AAC decoders is a multi-year one. Nothing above this header changes either way, which is the point of freezing it first.
+
+## Future extensions
+
+When these arrive, they arrive as appended functions, never as changes to existing structs or signatures. Subtitles: new query/select/render functions. Multiple audio or video tracks: new enumeration and selection functions. Hardware decode and render choices: invisible implementation detail behind the current ABI, never surfaced through it. Network streams: out of scope for v1 entirely, and a future streaming story would be a new load-style entry point rather than new meanings for `ely_load`.
 
 ## v1 exclusions
 
