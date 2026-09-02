@@ -3,7 +3,7 @@ const api = () => window.pywebview && window.pywebview.api;
 
 let state = {
   tracks: [], current_id: -1, playing: false, position: 0, duration: 0,
-  volume: 0.8, shuffle: false, repeat: "none", peaks: [],
+  volume: 0.8, muted: false, shuffle: false, repeat: "none", peaks: [],
 };
 let selected = new Set();
 let seeking = false;
@@ -448,6 +448,17 @@ function modalOpen() {
   return $("modal").classList.contains("show");
 }
 
+/* Swap the speaker glyph by display, never by replacing nodes: a node
+   replaced between mousedown and mouseup means the browser fires no click. */
+function paintMuteIcon(muted) {
+  if (prev.muted === muted) return;
+  prev.muted = muted;
+  $("vol-waves").style.display = muted ? "none" : "";
+  $("vol-muted").style.display = muted ? "" : "none";
+  $("volicon").classList.toggle("muted", muted);
+  $("volicon").setAttribute("title", muted ? "Unmute" : "Mute");
+}
+
 function rangeIds(fromId, toId) {
   let a = -1, b = -1;
   for (let i = 0; i < filtered.length; i++) {
@@ -673,6 +684,13 @@ const intent = {
     api().toggle_shuffle();
   },
 
+  mute() {
+    state.muted = !state.muted;
+    predict("muted", state.muted);
+    paintMuteIcon(state.muted);
+    api().toggle_mute();
+  },
+
   repeat() {
     const order = { none: "all", all: "one", one: "none" };
     state.repeat = order[state.repeat] || "all";
@@ -760,6 +778,7 @@ wire("ic-folder", () => api().add_folder());
 wire("btn-load", () => api().load_m3u());
 wire("btn-save", () => api().save_m3u());
 wire("btn-clear", () => intent.clearPlaylist());
+wire("volicon", () => intent.mute());
 wire("modal-yes", () => {
   const fn = modalYes;
   closeConfirm();
@@ -875,6 +894,9 @@ function applyTick(s) {
   const playing = settled("playing", s.playing);
   const shuffle = settled("shuffle", s.shuffle);
   const repeat = settled("repeat", s.repeat);
+  const muted = settled("muted", !!s.muted);
+  state.muted = muted;
+  paintMuteIcon(muted);
 
   const position = settledPosition(s.position);
 
