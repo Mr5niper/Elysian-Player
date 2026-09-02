@@ -169,6 +169,11 @@ class MetadataScanner:
             self._results.put((track_id, info))
             with self._lock:
                 self._pending -= 1
+                # Same floor the drop paths apply: the count only feeds the
+                # footer, and a double-decrement should read as done, not as
+                # a negative tag count that never clears.
+                if self._pending < 0:
+                    self._pending = 0
 
     def shutdown(self) -> None:
         self._stop.set()
