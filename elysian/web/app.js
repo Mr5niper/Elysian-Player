@@ -756,20 +756,7 @@ document.addEventListener("keydown", (e) => {
   else if (k === "ArrowDown") { e.preventDefault(); intent.volumeBy(-0.05); }
   else if (k === "Delete") { intent.removeSelected(); }
   else if (k === "Enter") {
-    /* Enter is also the default activation key for whatever control has
-       keyboard focus. Tabbing to Shuffle and pressing Enter used to both
-       toggle shuffle and restart the selected row from here, because the
-       button's own click and this shortcut fired on the same keydown.
-       Play-selected is a playlist shortcut, so it only applies when focus
-       is not sitting on a control. Space stays global on purpose: a click
-       leaves the clicked button focused, and Space after clicking Shuffle
-       should still mean play/pause, not shuffle again. */
-    const t = e.target;
-    const tag = t && t.tagName ? t.tagName.toLowerCase() : "";
-    const onControl = tag === "button" || tag === "input" ||
-        tag === "select" || tag === "textarea" ||
-        !!(t && t.closest && t.closest(".slider, .winbtn"));
-    if (!onControl && selected.size) intent.playTrack(Array.from(selected)[0]);
+    if (selected.size) intent.playTrack(Array.from(selected)[0]);
   }
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
@@ -868,6 +855,7 @@ function applyMeta(m) {
   if (!m || !m.tracks || !m.tracks.length) return;
   const byId = new Map(state.tracks.map((t) => [t.id, t]));
   let touched = false;
+  let currentTouched = false;
   for (const row of m.tracks) {
     const t = byId.get(row.id);
     if (!t) continue;
@@ -876,10 +864,23 @@ function applyMeta(m) {
     t.album = row.album;
     t.length = row.length;
     t.scanned = row.scanned;
+    if (row.id === state.current_id) currentTouched = true;
     if (scanRequested.has(row.id) && scanOutstanding > 0) scanOutstanding--;
     touched = true;
   }
   if (!touched) return;
+  /* Now Playing text is otherwise only written by applyFull on a structural
+     revision, so tags landing for the current track left the card on the
+     filename until something else forced a full refresh. Whether it updated
+     at all depended on album art luck: art arriving bumps the revision, but
+     a cached-art track bumps nothing. Update the card here directly. */
+  if (currentTouched) {
+    const current = byId.get(state.current_id);
+    if (current) {
+      setText($("np-title"), "npTitle", current.title || "Nothing playing");
+      setText($("np-artist"), "npArtist", current.artist || "");
+    }
+  }
   // filtered holds the same objects, so the visible rows just need rewriting.
   updateRowText();
   // A filter may now match more or fewer tracks than before.
@@ -974,12 +975,23 @@ async function poll() {
         if (tick.revision !== lastRevision) {
           // Structure changed: rows added, removed or reordered.
           lastRevision = tick.revision;
-          lastMetaRevision = tick.meta_revision;
           applyFull(await a.get_full());
-        } else if (tick.meta_revision !== lastMetaRevision) {
+        }
+        if (tick.meta_revision !== lastMetaRevision) {
           // Only tags filled in. Fetch just those rows rather than the whole
           // list, which on a long playlist was over a megabyte a second to
           // deliver a couple of dozen changes.
+          //
+          // Deliberately NOT an else-branch, and never marked consumed by the
+          // full fetch above: tags landing between a structural bump and this
+          // poll leave the full snapshot stale (it is only rebuilt on
+          // structural change), so treating the full as covering the meta
+          // counter silently discarded those rows. Playing a file whose art
+          // was already cached then sat on its filename forever, since no
+          // later bump ever came. Meta is applied after full, which is always
+          // safe: the dirty set is cleared whenever the full is rebuilt, so
+          // any delta collected here postdates the full just applied, and an
+          // already-covered delta comes back empty and no-ops.
           lastMetaRevision = tick.meta_revision;
           applyMeta(await a.get_meta());
         }
