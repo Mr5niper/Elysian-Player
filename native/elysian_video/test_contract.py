@@ -33,14 +33,18 @@ def main() -> int:
     assert lib.lib.ely_abi_version() == ABI_VERSION
     print(f"abi version {ABI_VERSION} confirmed")
 
-    # fixtures: a fake video and a unicode-named one (the waveform lesson)
+    # fixtures: structurally valid MP4s, since a real demuxer must reject
+    # fake bytes (the one-byte fixtures were stub-shaped). The unicode name
+    # remains the waveform lesson. Audio is .m4a: v1 engines are MP4-family.
+    sys.path.insert(0, str(HERE.parent))
+    from make_fixture import write_mp4
     tmp = Path(tempfile.mkdtemp())
     vid = tmp / "clip.mp4"
-    vid.write_bytes(b"\x00")
+    write_mp4(vid, video=True)
     uni = tmp / "clip - Renée's 動画.mp4"
-    uni.write_bytes(b"\x00")
-    aud = tmp / "song.mp3"
-    aud.write_bytes(b"\x00")
+    write_mp4(uni, video=True)
+    aud = tmp / "song.m4a"
+    write_mp4(aud, video=False)
 
     p = lib.lib.ely_create_player()
     assert p, "create_player returned NULL"
