@@ -111,6 +111,11 @@ int player_prepare_pipeline(ElyPlayer* p) {
                             p->demux->channels))
             return 0;
         audio_out_set_volume(p->audio_out, p->volume);
+        /* A reset mid-play (seek, restart) re-opens the sink with its
+         * clock stopped; a PLAYING player needs it running again or the
+         * playhead freezes and end-of-media becomes unreachable. */
+        if (p->state == ELY_STATE_PLAYING)
+            audio_out_resume(p->audio_out);
         p->audio_ready = 1;
     }
     if (p->demux->has_video && !p->video_ready) {
@@ -181,9 +186,15 @@ int player_pipeline_drained(const ElyPlayer* p) {
 
 /* Stepped pipeline pump, paced by the playback clock: decode only what is
  * due within a small horizon so the engine plays through media in real
- * time, bounded per call so ABI getters stay non-blocking. Once the clock
- * reaches the duration the horizon opens to drain the tail, still under
- * the bound; if one call cannot finish the tail, the next one does. */
+ * time, bounded per call so ABI getters stay near-non-blocking. Known
+ * transitional limitation, accepted deliberately: when decode runs slower
+ * than real time (sanitizer builds; later, real codecs on slow machines),
+ * a single pump call can spend significant wall time catching up to a
+ * clock that keeps advancing. The threaded pipeline phase moves decode off
+ * the caller entirely and retires this pump; until then, tests pace their
+ * fixtures to the build. Once the clock reaches the duration the horizon
+ * opens to drain the tail, and if one call cannot finish it, the next
+ * one does. */
 int player_pump(ElyPlayer* p) {
     if (!p || p->state != ELY_STATE_PLAYING) return 0;
     if (!player_prepare_pipeline(p)) return -1;
@@ -253,14 +264,27 @@ void player_settle(ElyPlayer* p) {
         p->state = ELY_STATE_ERROR;
         return;
     }
-    /* Audio is master only when a real device clock exists; the synthetic
-     * sink reports none and the playback clock stays authoritative, which
-     * is what keeps wall-time position semantics intact until WASAPI. */
+    /* Audio is the master whenever the software (later: device) backend
+     * exposes a non-negative media-time clock; video-only media falls back
+     * to the playback clock. The end gate tolerates the universal case of
+     * an audio track ending slightly before the container duration: with
+     * the pipeline fully drained, a playhead within 100ms of the duration
+     * IS the natural end, or ENDED could never fire under audio master. */
     double device = audio_out_position(p->audio_out);
-    double pos = device >= 0.0
-        ? device
-        : clock_position(p->clock, p->info.duration, 0);
-    if (p->info.duration > 0.0 && pos >= p->info.duration &&
+    double wall = clock_position(p->clock, p->info.duration, 0);
+    double pos = (p->demux->has_audio && device >= 0.0) ? device : wall;
+    /* Both clocks must agree the media is over. The device playhead alone
+     * is not enough: a seek near the end drains the whole tail into the
+     * sink instantly, and the wall time the pump itself spends decoding
+     * would count against that queued audio, ending playback early. The
+     * playback clock measures pure elapsed time since the seek and gets
+     * NO tolerance: it can and must reach the full duration, so ENDED
+     * cannot arrive before the media's final moments have actually been
+     * lived through. The 0.1s tolerance applies only to the device
+     * playhead, whose audio track legitimately ends slightly before the
+     * container duration in nearly every real file. */
+    if (p->info.duration > 0.0 && pos >= p->info.duration - 0.1 &&
+        wall >= p->info.duration &&
         player_pipeline_drained(p)) {
         clock_pause(p->clock);
         clock_seek(p->clock, p->info.duration);

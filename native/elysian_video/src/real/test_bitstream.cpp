@@ -104,6 +104,40 @@ int main(int argc, char** argv) {
         printf("AAC ASC: parse, escape form and rejection correct\n");
     }
 
+    /* ---- AAC packet path: valid packet => non-silent PCM, malformed fails --- */
+    {
+        AacDecoder d;
+        const unsigned char asc[] = {0x12, 0x10};   /* LC, 44100, stereo */
+        assert(aac_init(&d, asc, 2, 44100, 2));
+
+        /* Minimal supported CPE-ish packet: element_id=1, tag=0, common_window=0,
+           then enough zero bits for two ICS parses to succeed structurally. */
+        const unsigned char pkt_bytes[] = { 0x20, 0x00, 0x00, 0x00 };
+        Packet pkt{};
+        pkt.data = (unsigned char*)pkt_bytes;
+        pkt.size = sizeof(pkt_bytes);
+        pkt.pts = 1.25;
+
+        PcmFrame out;
+        assert(aac_decode_packet(&d, &pkt, &out));
+        assert(out.frames == 1024);
+        assert(out.channels == 2);
+        int nonzero = 0;
+        for (float s : out.samples) {
+            if (s != 0.0f) { nonzero = 1; break; }
+        }
+        assert(nonzero && "AAC output must no longer be silent");
+        aac_free(&d);
+
+        Packet bad{};
+        bad.data = (unsigned char*)pkt_bytes;
+        bad.size = 0;
+        PcmFrame bad_out;
+        assert(!aac_decode_packet(&d, &bad, &bad_out));
+        printf("AAC packet path: non-silent valid output, malformed rejects\n");
+    }
+
+
     /* ---- real encoder ASC ------------------------------------------------ */
     if (argc > 1) {
         std::vector<unsigned char> asc = read_file(argv[1]);
@@ -145,6 +179,46 @@ int main(int argc, char** argv) {
         printf("avcC rejection: dimension mismatch, truncation, bad version\n");
         h264_free(&d);
     }
+
+    /* ---- H.264 packet path: structured output, malformed fails -------------- */
+    if (argc > 2) {
+        std::vector<unsigned char> avcc = read_file(argv[2]);
+        H264Decoder d;
+        assert(h264_init(&d, avcc.data(), avcc.size(), 320, 240));
+
+        /* one IDR slice NAL, MP4 length-prefixed */
+        std::vector<unsigned char> au = {
+            0x00, 0x00, 0x00, 0x04,   /* nal len */
+            0x65, 0xB8, 0x00, 0x00    /* tiny RBSP-shaped slice */
+        };
+        Packet pkt{};
+        pkt.data = au.data();
+        pkt.size = au.size();
+        pkt.pts = 0.5;
+        pkt.keyframe = 1;
+
+        VideoFrame out;
+        assert(h264_decode_packet(&d, &pkt, &out));
+        assert(out.width == 320 && out.height == 240);
+        assert(!out.pixels.empty());
+
+        unsigned char first = out.pixels[0];
+        int all_same = 1;
+        for (unsigned char b : out.pixels) {
+            if (b != first) { all_same = 0; break; }
+        }
+        assert(!all_same && "H.264 output must no longer be a flat tint fill");
+
+        std::vector<unsigned char> bad = { 0x00, 0x00, 0x00, 0x20, 0x65 };
+        Packet badpkt{};
+        badpkt.data = bad.data();
+        badpkt.size = bad.size();
+        VideoFrame badout;
+        assert(!h264_decode_packet(&d, &badpkt, &badout));
+        h264_free(&d);
+        printf("H.264 packet path: structured output, malformed rejects\n");
+    }
+
 
     printf("ALL BITSTREAM TESTS PASSED\n");
     return 0;

@@ -116,7 +116,8 @@ def _trak(track_id: int, mv_duration: int, handler: bytes, timescale: int,
     return box(b"trak", _tkhd(track_id, mv_duration, w, h) + mdia)
 
 
-def write_mp4(path, video: bool = True, seconds: float = 10.0) -> None:
+def write_mp4(path, video: bool = True, seconds: float = 10.0,
+              width: int = 1920, height: int = 1080) -> None:
     """Write a valid MP4 (or audio-only M4A shape) of the given length."""
     mv_timescale = 1000
     mv_duration = int(seconds * mv_timescale)
@@ -136,8 +137,8 @@ def write_mp4(path, video: bool = True, seconds: float = 10.0) -> None:
     tid = 1
     if video:
         traks += _trak(tid, mv_duration, b"vide", 30, vid_count,
-                       _avc1(1920, 1080), vid_count, 1, vid_size,
-                       vid_chunk, w=1920, h=1080, sync_every=30)
+                       _avc1(width, height), vid_count, 1, vid_size,
+                       vid_chunk, w=width, h=height, sync_every=30)
         tid += 1
     traks += _trak(tid, mv_duration, b"soun", 44100, aud_count * 1024,
                    _mp4a(44100, 2), aud_count, 1024, aud_size, aud_chunk)
@@ -148,16 +149,18 @@ def write_mp4(path, video: bool = True, seconds: float = 10.0) -> None:
     moov = box(b"moov", full(b"mvhd", 0, 0, mvhd_body) + traks)
 
     # Video samples are structurally valid MP4-form access units: a 4-byte
-    # NAL length prefix, a NAL header (IDR for sync samples, non-IDR
-    # otherwise), then padding. The AU walker in the H.264 seam parses
-    # these for real; zero-filled payloads would rightly be rejected.
+    # NAL length prefix, a NAL header, then a REAL slice header assembled
+    # for this fixture's own SPS (log2_max_frame_num 4, poc_type 0,
+    # log2_max_poc_lsb 4), then padding. The H.264 seam parses the slice
+    # header for real now; zero-filled payloads would rightly be rejected.
     payload = bytearray()
     if video:
         for i in range(vid_count):
-            nal_type = 0x65 if i % 30 == 0 else 0x41
+            idr = i % 30 == 0
             payload += struct.pack(">I", vid_size - 4)
-            payload += bytes([nal_type])
-            payload += b"\x00" * (vid_size - 5)
+            payload += _slice_nal(idr, frame_num=i % 16,
+                                  poc_lsb=(2 * i) % 16,
+                                  pad_to=vid_size - 4)
     payload += b"\x00" * (aud_count * aud_size)
     assert len(payload) == mdat_payload_size
 
@@ -271,3 +274,19 @@ def _avcc(w: int, h: int) -> bytes:
     out += struct.pack(">H", len(sps)) + sps
     out += bytes([1]) + struct.pack(">H", len(pps)) + pps
     return out
+
+
+def _slice_nal(idr: bool, frame_num: int, poc_lsb: int, pad_to: int) -> bytes:
+    """A NAL with a real slice header for the fixture SPS, zero-padded."""
+    bw = _BitWriter()
+    bw.ue(0)                     # first_mb_in_slice
+    bw.ue(2 if idr else 0)       # slice_type: I or P
+    bw.ue(0)                     # pps_id
+    bw.u(frame_num, 4)           # frame_num (log2_max_frame_num = 4)
+    bw.u(poc_lsb, 4)             # pic_order_cnt_lsb (log2 = 4)
+    if idr:
+        bw.ue(0)                 # idr_pic_id
+    bw.trailing()
+    nal = bytes([0x65 if idr else 0x41]) + _escape_rbsp(bw.bytes())
+    assert len(nal) <= pad_to
+    return nal + b"\x00" * (pad_to - len(nal))
