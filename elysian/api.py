@@ -796,6 +796,21 @@ class Api:
     def _do_nudge(self, delta: float) -> None:
         self._engine.nudge(float(delta))
 
+    def _do_video_target(self, hwnd: int, w: int, h: int) -> None:
+        """Worker-owned engine binding for the native video child window.
+
+        The bridge thread must never call into the engine: the stepped pump
+        can run decode work on the calling thread, which is exactly the
+        freeze this app's snapshot architecture exists to prevent. The host
+        layer moves the window itself and posts this for the engine half.
+        """
+        if hwnd:
+            self._engine.set_video_target(int(hwnd))
+            if w > 0 and h > 0:
+                self._engine.resize_video(int(w), int(h))
+        else:
+            self._engine.set_video_target(0)
+
     def _do_set_volume(self, value: float) -> None:
         # Touching the volume while muted unmutes, as the system mixer does;
         # otherwise the slider moves and nothing audible happens.
@@ -1094,6 +1109,7 @@ class Api:
     #: this set or HOST_PUBLIC is a mistake. See _assert_bridge_surface.
     JS_BRIDGE = frozenset({
         "get_tick", "get_full", "get_meta", "get_peaks",
+        "sync_video_slot",
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
@@ -1144,6 +1160,19 @@ class Api:
 
     def attach(self, window) -> None:
         self._window = window
+
+    def sync_video_slot(self, rect) -> None:
+        """Bridge entry point: the frontend reports where #video-slot sits.
+
+        A thin delegator; host.py injects _sync_video_slot_impl with the
+        actual window plumbing, keeping Api free of Win32 concerns and the
+        public surface honest under _assert_bridge_surface. Window moves
+        happen on the calling thread (message-based, safe); engine calls
+        are posted to the worker via _do_video_target.
+        """
+        impl = getattr(self, "_sync_video_slot_impl", None)
+        if callable(impl):
+            impl(rect)
 
     def set_maximized(self, flag: bool) -> None:
         """Called from pywebview's own window events, so the toggle stays

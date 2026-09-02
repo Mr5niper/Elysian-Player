@@ -17,6 +17,7 @@ from pathlib import Path
 from . import config, single_instance
 from . import paths as pathutil
 from .api import Api
+from .video_host import VideoHost
 
 from .logs import get as _get_logger
 
@@ -24,6 +25,33 @@ log = _get_logger("host")
 
 
 WEB_DIR = "elysian/web"
+
+
+def _native_hwnd(win) -> int:
+    """Best-effort extraction of the native top-level HWND from pywebview.
+
+    The WinForms backend exposes the Form as win.native with a .Handle;
+    other backends differ, so every candidate is tried and failure means
+    the video child window simply never appears, with the rest of the app
+    unaffected."""
+    for name in ("native", "gui", "window"):
+        obj = getattr(win, name, None)
+        if obj is None:
+            continue
+        for attr in ("Handle", "handle"):
+            hwnd = getattr(obj, attr, None)
+            if hwnd:
+                try:
+                    return int(hwnd)
+                except (TypeError, ValueError):
+                    continue
+    try:
+        import ctypes
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetForegroundWindow.restype = ctypes.c_void_p
+        return int(user32.GetForegroundWindow() or 0)
+    except Exception:
+        return 0
 
 
 def _index_path() -> str:
@@ -64,6 +92,7 @@ def run() -> int:
 
     api = Api()
     api._assert_bridge_surface()
+    video_host = VideoHost()
 
     webview.settings["ALLOW_DOWNLOADS"] = False
     webview.settings["OPEN_EXTERNAL_LINKS_IN_BROWSER"] = True
@@ -108,6 +137,42 @@ def run() -> int:
             log.error("could not bind the drop handler; dragging files onto "
                       "the window will not work", exc_info=True)
 
+        if video_host.available:
+            hwnd = _native_hwnd(win)
+            if hwnd:
+                video_host.attach_parent(hwnd)
+            else:
+                log.warning("no native window handle found; the video pane "
+                            "will stay a placeholder")
+
+        def _sync_video_slot_impl(rect):
+            """Runs on the JS bridge thread. Window operations only; the
+            engine half is posted to the Api worker, which owns every
+            engine call in this app."""
+            try:
+                if not rect or not isinstance(rect, dict):
+                    video_host.hide()
+                    api._post("video_target", 0, 0, 0)
+                    return
+                x = int(rect.get("x", 0))
+                y = int(rect.get("y", 0))
+                w = max(0, int(rect.get("width", 0)))
+                h = max(0, int(rect.get("height", 0)))
+                if w <= 0 or h <= 0:
+                    video_host.hide()
+                    api._post("video_target", 0, 0, 0)
+                    return
+                child = video_host.ensure_child()
+                if not child:
+                    return
+                video_host.move(x, y, w, h)
+                video_host.show()
+                api._post("video_target", child, w, h)
+            except Exception:
+                log.exception("could not sync the native video slot")
+
+        api._sync_video_slot_impl = _sync_video_slot_impl
+
         if lock is not None:
             def incoming(paths):
                 # Api owns add-and-play on its worker thread; no id comes
@@ -133,7 +198,12 @@ def run() -> int:
     # Win+Up, a title bar double-click, or the OS restoring the session.
     window.events.maximized += lambda: api.set_maximized(True)
     window.events.restored += lambda: api.set_maximized(False)
-    window.events.closing += lambda: api.close()
+    def _closing():
+        try:
+            video_host.destroy()
+        finally:
+            api.close()
+    window.events.closing += _closing
 
     icon = config.resource_path("icon.ico")
     start_kwargs = {"func": bind, "args": window}
