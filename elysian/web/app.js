@@ -43,6 +43,49 @@ function setClass(el, key, cls, on) {
   el.classList.toggle(cls, on);
 }
 
+/* ---------- native video slot ----------
+   The host binds a native child window over #video-slot (D.2). JS only
+   measures; all window and engine work happens on the Python side. */
+
+function slotRect() {
+  const el = $("video-slot");
+  if (!el || el.closest(".hidden")) return null;
+  const r = el.getBoundingClientRect();
+  if (!r.width || !r.height) return null;
+  /* getBoundingClientRect is CSS pixels; SetWindowPos wants physical
+     pixels. Under 125% or 150% display scaling the unscaled rect lands the
+     child at the wrong place and size, so scale by devicePixelRatio. */
+  const dpr = window.devicePixelRatio || 1;
+  return {
+    x: Math.round(r.left * dpr),
+    y: Math.round(r.top * dpr),
+    width: Math.round(r.width * dpr),
+    height: Math.round(r.height * dpr),
+  };
+}
+
+let lastSlotSig = null;
+
+async function syncVideoSlot() {
+  const a = api();
+  if (!a || typeof a.sync_video_slot !== "function") return;
+  const videoMode = state.media_type === "video" || state.has_video;
+  const rect = (videoMode && view === "now") ? slotRect() : null;
+  /* applyTick runs several times a second; identical rects must not cross
+     the bridge every time. The signature covers everything the host acts
+     on, so any real change still goes through immediately. */
+  const sig = rect
+    ? `${rect.x},${rect.y},${rect.width},${rect.height}` : "off";
+  if (sig === lastSlotSig) return;
+  lastSlotSig = sig;
+  try {
+    await a.sync_video_slot(rect);
+  } catch (_) {
+    /* host may be closing; resend on the next real change */
+    lastSlotSig = null;
+  }
+}
+
 /* ---------- views ---------- */
 
 function setView(name) {
@@ -54,6 +97,7 @@ function setView(name) {
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
+  syncVideoSlot();
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
@@ -882,6 +926,7 @@ function drawWave() {
 }
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
+  syncVideoSlot();
   // The visible row window is sized from the container at render time, and
   // only scrolling or a data change recomputed it. Growing the window
   // (maximise, or dragging the edge) left the rows sized for the old height,
@@ -917,6 +962,7 @@ function applyTick(s) {
   const videoMode = state.media_type === "video" || state.has_video;
   $("audio-pane").classList.toggle("hidden", videoMode);
   $("video-pane").classList.toggle("hidden", !videoMode);
+  syncVideoSlot();
 
   // Set an attribute on the existing path rather than replacing the node.
   // Any innerHTML write here destroys the element mid-click, and the browser
