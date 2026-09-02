@@ -164,7 +164,9 @@ ELY_API int ely_load(ElyPlayer* p, const wchar_t* path) {
 
     p->base_pos = 0.0;
     p->state = ELY_STATE_LOADED;
-    set_error(p, L"");
+    /* Deliberately no error-buffer clear: per contract, last_error keeps
+       describing the most recent FAILURE on this handle; success never
+       clears it. One rule, no special cases. */
     return ELY_OK;
 }
 

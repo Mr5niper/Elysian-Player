@@ -118,6 +118,60 @@ def main() -> int:
 
     lib.lib.ely_destroy_player(p)
 
+    # bad-state edges: every transition rejection the contract names
+    q = lib.lib.ely_create_player()
+    BAD_STATE = 11
+    assert lib.lib.ely_stop(q) == BAD_STATE, "stop on EMPTY"
+    assert lib.lib.ely_seek(q, 1.0) == BAD_STATE, "seek on EMPTY"
+    info2 = ElyMediaInfo()
+    info2.struct_size = ctypes.sizeof(ElyMediaInfo)
+    assert lib.lib.ely_get_media_info(q, ctypes.byref(info2)) == BAD_STATE, \
+        "media_info on EMPTY"
+    assert lib.lib.ely_load(q, str(vid)) == 0
+    assert lib.lib.ely_pause(q) == BAD_STATE, "pause on LOADED"
+    assert lib.lib.ely_resume(q) == BAD_STATE, "resume on LOADED"
+    print("bad-state edges: EMPTY and LOADED reject exactly as specified")
+
+    # play while PLAYING is an idempotent success that does not reset time
+    assert lib.lib.ely_play(q) == 0
+    time.sleep(0.2)
+    before = lib.lib.ely_get_position(q)
+    assert lib.lib.ely_play(q) == 0, "play while PLAYING must succeed"
+    assert lib.lib.ely_get_position(q) >= before - 0.01, \
+        "idempotent play must not rewind"
+    print("play while PLAYING: idempotent, position preserved")
+
+    # ENDED -> seek backward -> PAUSED, never silently playing
+    assert lib.lib.ely_seek(q, lib.lib.ely_get_duration(q)) == 0
+    time.sleep(0.05)
+    assert lib.lib.ely_is_finished(q)
+    assert lib.lib.ely_seek(q, 3.0) == 0
+    assert lib.lib.ely_get_state(q) == 3, "seek back from ENDED must pause"
+    assert abs(lib.lib.ely_get_position(q) - 3.0) < 0.01
+    print("ENDED then seek backward lands PAUSED at the target")
+
+    # unload returns to EMPTY from LOADED, PAUSED and ENDED alike
+    assert lib.lib.ely_unload(q) == 0 and lib.lib.ely_get_state(q) == 0
+    assert lib.lib.ely_load(q, str(vid)) == 0
+    assert lib.lib.ely_unload(q) == 0 and lib.lib.ely_get_state(q) == 0
+    assert lib.lib.ely_load(q, str(vid)) == 0
+    assert lib.lib.ely_play(q) == 0
+    assert lib.lib.ely_seek(q, lib.lib.ely_get_duration(q)) == 0
+    time.sleep(0.05)
+    assert lib.lib.ely_get_state(q) == 5
+    assert lib.lib.ely_unload(q) == 0 and lib.lib.ely_get_state(q) == 0
+    print("unload reaches EMPTY from PAUSED, LOADED and ENDED")
+
+    # error lifetime: success never clears the last failure message
+    assert lib.lib.ely_pause(q) == BAD_STATE            # plant a failure
+    planted = lib.lib.ely_get_last_error(q)
+    assert planted
+    assert lib.lib.ely_load(q, str(vid)) == 0           # success after it
+    assert lib.lib.ely_get_last_error(q) == planted, \
+        "success must not clear last_error"
+    print("last_error persists across success, as the contract locks")
+    lib.lib.ely_destroy_player(q)
+
     # Layer C: the shell-facing wrapper over the same library
     eng = VideoPlaybackEngine(lib_path)
     assert eng.available, eng.error
