@@ -457,8 +457,8 @@ class Api:
         # worker-side mutation must hold it for that read to be safe.
         with self._lock:
             added = self._playlist.add_paths(paths)
-            if added:
-                self._rebuild_bag()
+        if added and self._shuffle:
+            self._rebuild_bag()
         if added:
             self._bump()
             # Dropping several folders at once merges their counts. That is
@@ -521,8 +521,8 @@ class Api:
         # thread (get_meta), now that mutation itself is worker-only.
         with self._lock:
             added = self._playlist.add_paths(paths)
-            if added:
-                self._rebuild_bag()
+        if added and self._shuffle:
+            self._rebuild_bag()
         if added:
             self._bump()
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
@@ -575,8 +575,8 @@ class Api:
             return
         with self._lock:
             added = self._playlist.add_paths(found)
-            if added:
-                self._rebuild_bag()
+        if added and self._shuffle:
+            self._rebuild_bag()
         if added:
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
@@ -614,7 +614,10 @@ class Api:
         if self._current_id in ids:
             self._do_stop()
         self._playlist.remove_ids(ids)
-        self._rebuild_bag()
+        # Only worth reshuffling if shuffle is on. Correctness never depended
+        # on this rebuild anyway: _next_id skips ids that no longer exist.
+        if self._shuffle:
+            self._rebuild_bag()
         self._bump()
         self._set_status(f"Removed {len(ids)} track{'s' if len(ids) != 1 else ''}")
 
@@ -710,7 +713,12 @@ class Api:
 
     def _do_toggle_shuffle(self) -> None:
         self._shuffle = not self._shuffle
-        self._rebuild_bag()
+        if self._shuffle:
+            self._rebuild_bag()
+        else:
+            # No point generating a fresh random permutation nobody will draw
+            # from. Toggling back on rebuilds.
+            self._shuffle_bag = []
         self._bump()
 
     def _do_cycle_repeat(self) -> None:
@@ -742,7 +750,18 @@ class Api:
         return None
 
     def _rebuild_bag(self) -> None:
-        ids = [i for i in self._playlist.ids if i != self._current_id]
+        """Regenerate the shuffle draw order. Callers gate on self._shuffle,
+        so while shuffle is off the bag stays empty and add/remove/load paths
+        skip this entirely.
+
+        Only the shared reads happen under _lock; the filter and shuffle of
+        what can be a large id list run outside it, so bridge-thread readers
+        are held up for a copy, not a shuffle. The bag itself is worker-owned.
+        """
+        with self._lock:
+            current = self._current_id
+            ids = self._playlist.ids
+        ids = [i for i in ids if i != current]
         random.shuffle(ids)
         self._shuffle_bag = ids
 
@@ -835,7 +854,10 @@ class Api:
         paths = self._settings.get("playlist", [])
         if paths:
             self._playlist.add_paths(paths)
-            self._rebuild_bag()
+            # _shuffle was loaded from the same settings in __init__, so this
+            # honours the saved state rather than assuming shuffle is on.
+            if self._shuffle:
+                self._rebuild_bag()
         last = self._settings.get("last_path", "")
         if last:
             self._resume_at = float(
