@@ -67,8 +67,13 @@ class ElyMediaInfo(ctypes.Structure):
 
 
 def _default_candidates() -> list:
-    names = (["elysian_video.dll"] if os.name == "nt"
-             else ["libelysian_video.so", "elysian_video.so"])
+    # The real engine builds as elysian_video_real; the stub keeps the
+    # original name. Preferring the real one means a repo with both picks
+    # the engine that actually plays.
+    names = (["elysian_video_real.dll", "elysian_video.dll"]
+             if os.name == "nt"
+             else ["libelysian_video_real.so", "libelysian_video.so",
+                   "elysian_video.so"])
     roots = []
     if getattr(sys, "frozen", False):
         roots.append(Path(sys.executable).parent)

@@ -96,6 +96,10 @@ html, body {
 /* ---- now playing ---- */
 #view-now { justify-content: center; }
 #nowplaying { display: flex; gap: 24px; align-items: center; }
+/* The audio pane keeps the original art-plus-wave row layout inside it. */
+#audio-pane { flex: 1; min-width: 0; display: flex; gap: 24px; align-items: center; }
+#video-pane { flex: 1; min-width: 0; }
+#audio-pane.hidden, #video-pane.hidden { display: none; }
 #artwrap { flex-shrink: 0; text-align: center; width: 240px; }
 #art {
   width: 240px; height: 240px;
@@ -115,6 +119,27 @@ html, body {
   overflow: hidden; text-overflow: ellipsis;
 }
 #wave { flex: 1; height: 64px; min-width: 0; }
+
+/* The native child window binds over this area in D.2; until then it is the
+   layout anchor and reads as an idle screen, not a broken one. */
+#video-slot {
+  width: 100%;
+  height: min(60vh, 420px);
+  background: #000;
+  border-radius: 12px;
+}
+
+#video-title {
+  font-size: 14px; font-weight: 600; margin-top: 11px;
+  letter-spacing: 0.6px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+
+#video-artist {
+  font-size: 11px; color: var(--muted); letter-spacing: 1.2px;
+  margin-top: 2px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
 
 /* ---- playlist ---- */
 #listtools { display: flex; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }

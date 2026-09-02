@@ -12,6 +12,7 @@ import threading
 from pathlib import Path
 
 from ..models.track import Track
+from ..media import is_audio_path, is_video_path, media_kind_from_path
 
 from ..logs import get as _get_logger
 
@@ -20,21 +21,36 @@ log = _get_logger("scanner")
 
 
 def read_metadata(path: str) -> dict:
-    """Read tags for one file. Never raises."""
-    info = {"title": "", "artist": "", "album": "", "length": 0.0}
+    """Read metadata for one file. Never raises."""
+    info = {
+        "title": "",
+        "artist": "",
+        "album": "",
+        "length": 0.0,
+        "media_type": media_kind_from_path(path),
+        "has_video": is_video_path(path),
+        "width": 0,
+        "height": 0,
+    }
     try:
-        from mutagen import File
+        if is_audio_path(path):
+            from mutagen import File
 
-        meta = File(path, easy=True)
-        if meta is None:
-            return info
-        if meta.info is not None:
-            info["length"] = float(getattr(meta.info, "length", 0.0) or 0.0)
-        for key, field in (("title", "title"), ("artist", "artist"),
-                           ("album", "album")):
-            value = meta.get(key)
-            if value:
-                info[field] = str(value[0])
+            meta = File(path, easy=True)
+            if meta is None:
+                return info
+            if meta.info is not None:
+                info["length"] = float(getattr(meta.info, "length", 0.0) or 0.0)
+            for key, field in (("title", "title"), ("artist", "artist"),
+                               ("album", "album")):
+                value = meta.get(key)
+                if value:
+                    info[field] = str(value[0])
+        elif is_video_path(path):
+            # Part D keeps video metadata minimal: the title falls back to
+            # the filename below, and length/geometry are learned from the
+            # engine at play time.
+            info["has_video"] = True
     except Exception:
         log.warning("could not read tags from %s", path, exc_info=True)
     if not info["title"]:
@@ -165,7 +181,10 @@ class MetadataScanner:
             except Exception:
                 log.exception("scanner worker recovered from %s", path)
                 info = {"title": Path(path).stem, "artist": "",
-                        "album": "", "length": 0.0}
+                        "album": "", "length": 0.0,
+                        "media_type": media_kind_from_path(path),
+                        "has_video": is_video_path(path),
+                        "width": 0, "height": 0}
             self._results.put((track_id, info))
             with self._lock:
                 self._pending -= 1
@@ -186,4 +205,8 @@ def apply_metadata(track: Track, info: dict) -> None:
     track.artist = info.get("artist", "")
     track.album = info.get("album", "")
     track.length = info.get("length", 0.0)
+    track.media_type = info.get("media_type", track.media_type)
+    track.has_video = bool(info.get("has_video", False))
+    track.width = int(info.get("width", 0) or 0)
+    track.height = int(info.get("height", 0) or 0)
     track.scanned = True

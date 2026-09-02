@@ -10,6 +10,10 @@ class Track:
     artist: str = ""
     album: str = ""
     length: float = 0.0
+    media_type: str = "audio"
+    has_video: bool = False
+    width: int = 0
+    height: int = 0
     scanned: bool = field(default=False, compare=False)
 
     def __post_init__(self):
