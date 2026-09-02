@@ -95,15 +95,15 @@ html, body {
 
 /* ---- now playing ---- */
 #view-now { justify-content: center; }
-#nowplaying { display: flex; gap: 20px; align-items: center; }
-#artwrap { flex-shrink: 0; text-align: center; width: 126px; }
+#nowplaying { display: flex; gap: 24px; align-items: center; }
+#artwrap { flex-shrink: 0; text-align: center; width: 240px; }
 #art {
-  width: 126px; height: 126px;
-  border-radius: 9px;
+  width: 240px; height: 240px;
+  border-radius: 12px;
   background: var(--panel-2) center/cover no-repeat;
   display: flex; align-items: center; justify-content: center;
 }
-#art svg { width: 42px; height: 42px; stroke: var(--accent-dim); }
+#art svg { width: 64px; height: 64px; stroke: var(--accent-dim); }
 #np-title {
   font-size: 14px; font-weight: 600; margin-top: 11px;
   letter-spacing: 0.6px; white-space: nowrap;
@@ -114,7 +114,7 @@ html, body {
   margin-top: 2px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
-#wave { flex: 1; height: 92px; min-width: 0; }
+#wave { flex: 1; height: 64px; min-width: 0; }
 
 /* ---- playlist ---- */
 #listtools { display: flex; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
@@ -241,7 +241,13 @@ html, body {
 }
 #seek { flex: 1; min-width: 0; }
 #vol { width: 96px; flex-shrink: 0; }
-#volicon { width: 17px; height: 17px; stroke: var(--accent); flex-shrink: 0; margin-left: 6px; }
+#volicon {
+  width: 17px; height: 17px; stroke: var(--accent); flex-shrink: 0;
+  margin-left: 6px; cursor: pointer;
+}
+#volicon:hover { stroke: var(--accent-hi); }
+#volicon.muted { stroke: var(--muted); }
+#volicon.muted:hover { stroke: var(--text); }
 
 #status {
   font-size: 11px; color: var(--muted);
@@ -257,6 +263,36 @@ html, body {
   z-index: 50;
 }
 #drophint.show { display: flex; }
+
+/* ---- confirm dialog ----
+   An in-app dialog rather than window.confirm(): whether this embedding
+   renders native script dialogs is not something the app relies on anywhere,
+   and a confirm that silently returns false would make its caller look dead. */
+#modal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.55);
+  display: none; align-items: center; justify-content: center;
+  z-index: 60;
+}
+#modal.show { display: flex; }
+#modal-box {
+  background: var(--panel-2);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 10px;
+  padding: 22px 26px 18px;
+  min-width: 260px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+}
+#modal-text {
+  color: var(--text);
+  font-size: 13px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+#modal-buttons {
+  display: flex; gap: 10px; justify-content: center;
+}
+#modal-buttons .tbtn { min-width: 72px; }
 
 
 /* ---- press feedback ----
