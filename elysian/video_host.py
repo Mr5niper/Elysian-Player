@@ -17,6 +17,18 @@ Two deliberate departures from the naive version of this layer:
 * On non-Windows platforms this module imports cleanly and VideoHost is a
   no-op with available False, so the shell (and its tests) run anywhere
   even though the binding itself is Windows-only.
+
+A note on ctypes.wintypes gaps: it does not define every real Win32 type.
+LRESULT and HCURSOR are both absent (confirmed directly against the module,
+not assumed) even though they are ordinary Win32 types with real ABI
+meaning. Real Win32 headers define HCURSOR as a plain alias of HICON
+(`typedef HICON HCURSOR;` in winuser.h) and LRESULT as a pointer-sized
+signed integer identical in layout to LPARAM, so wintypes.HICON and
+wintypes.LPARAM stand in for them here; both are ordinary struct/argtype
+substitutions; and GetModuleHandleW gets an explicit HMODULE restype for
+the same reason, since ctypes silently assumes a 32-bit c_int return for
+any function whose restype was never set, which is not safe for a handle
+value on 64-bit Windows.
 """
 from __future__ import annotations
 
@@ -62,12 +74,14 @@ if IS_WINDOWS:
             ("cbWndExtra", ctypes.c_int),
             ("hInstance", wintypes.HINSTANCE),
             ("hIcon", wintypes.HICON),
-            ("hCursor", wintypes.HCURSOR),
+            ("hCursor", wintypes.HICON),   # HCURSOR: see module docstring
             ("hbrBackground", wintypes.HBRUSH),
             ("lpszMenuName", wintypes.LPCWSTR),
             ("lpszClassName", wintypes.LPCWSTR),
         ]
 
+    kernel32.GetModuleHandleW.argtypes = [wintypes.LPCWSTR]
+    kernel32.GetModuleHandleW.restype = wintypes.HMODULE
     user32.DefWindowProcW.argtypes = [wintypes.HWND, wintypes.UINT,
                                       wintypes.WPARAM, wintypes.LPARAM]
     user32.DefWindowProcW.restype = wintypes.LPARAM
@@ -91,6 +105,8 @@ if IS_WINDOWS:
     user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
                                     wintypes.WPARAM, wintypes.LPARAM]
     user32.PostMessageW.restype = wintypes.BOOL
+    user32.PostQuitMessage.argtypes = [ctypes.c_int]
+    user32.PostQuitMessage.restype = None
     user32.GetMessageW.argtypes = [ctypes.POINTER(wintypes.MSG),
                                    wintypes.HWND, wintypes.UINT,
                                    wintypes.UINT]
