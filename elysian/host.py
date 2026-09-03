@@ -42,14 +42,20 @@ def _native_hwnd(win) -> int:
             hwnd = getattr(obj, attr, None)
             if hwnd:
                 try:
-                    return int(hwnd)
+                    found = int(hwnd)
+                    log.debug("native top-level hwnd found via win.%s.%s: %r",
+                             name, attr, found)
+                    return found
                 except (TypeError, ValueError):
                     continue
     try:
         import ctypes
         user32 = ctypes.WinDLL("user32", use_last_error=True)
         user32.GetForegroundWindow.restype = ctypes.c_void_p
-        return int(user32.GetForegroundWindow() or 0)
+        found = int(user32.GetForegroundWindow() or 0)
+        log.debug("native top-level hwnd from GetForegroundWindow "
+                 "fallback: %r", found)
+        return found
     except Exception:
         return 0
 
@@ -145,12 +151,18 @@ def run() -> int:
                 log.warning("no native window handle found; the video pane "
                             "will stay a placeholder")
 
+        # Diagnostic only, DEBUG level (ELYSIAN_DEBUG=1): traces the exact
+        # rect/hwnd values flowing through the video-slot sync path, since
+        # this is the one part of the video pipeline that could never be
+        # exercised against a real Windows window during development.
+        # Safe to remove or quiet once the video pane is confirmed working.
         def _sync_video_slot_impl(rect):
             """Runs on the JS bridge thread. Window operations only; the
             engine half is posted to the Api worker, which owns every
             engine call in this app."""
             try:
                 if not rect or not isinstance(rect, dict):
+                    log.debug("sync_video_slot: no rect, hiding")
                     video_host.hide()
                     api._post("video_target", 0, 0, 0)
                     return
@@ -159,14 +171,20 @@ def run() -> int:
                 w = max(0, int(rect.get("width", 0)))
                 h = max(0, int(rect.get("height", 0)))
                 if w <= 0 or h <= 0:
+                    log.debug("sync_video_slot: zero-size rect %r, hiding",
+                             rect)
                     video_host.hide()
                     api._post("video_target", 0, 0, 0)
                     return
                 child = video_host.ensure_child()
                 if not child:
+                    log.debug("sync_video_slot: ensure_child() returned 0 "
+                             "for rect %r; video will stay black", rect)
                     return
                 video_host.move(x, y, w, h)
                 video_host.show()
+                log.debug("sync_video_slot: child=%r moved to (%d,%d,%d,%d), "
+                         "posting video_target", child, x, y, w, h)
                 api._post("video_target", child, w, h)
             except Exception:
                 log.exception("could not sync the native video slot")
