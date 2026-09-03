@@ -180,6 +180,8 @@ class VideoHost:
                     f"CreateWindowExW failed: {ctypes.get_last_error()}")
                 return
             self.child_hwnd = int(hwnd)
+            log.debug("video host child window created: hwnd=%r parent=%r",
+                     self.child_hwnd, self.parent_hwnd)
         finally:
             self._created.set()
 
@@ -190,7 +192,17 @@ class VideoHost:
         self.child_hwnd = 0
 
     def ensure_child(self) -> int:
-        if not self.available or not self.parent_hwnd:
+        if not self.available:
+            return 0
+        if not self.parent_hwnd:
+            # Silent before this line: nothing ever explained why the
+            # video pane stays black forever if attach_parent() was never
+            # given a real handle (host.py logs a warning at startup when
+            # _native_hwnd() fails, but that log line is easy to miss, and
+            # this is the exact point where that earlier failure becomes
+            # "no window, ever, no further trace").
+            log.warning("cannot create the video child window: no parent "
+                        "window handle was ever attached")
             return 0
         if self.child_hwnd and user32.IsWindow(self.child_hwnd):
             return self.child_hwnd
