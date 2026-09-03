@@ -1,14 +1,17 @@
-# Portable test build of the real engine (null decode/output backends).
-# The Windows DLL is produced by BUILD_DLL_REAL.bat.
+# Portable test build of the real engine, now FFmpeg-backed for demux and
+# decode. The Windows DLL is produced by BUILD_DLL_REAL.bat, which links
+# the same libraries by name against the bundled FFmpeg import libs.
 CXX ?= g++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fPIC -fvisibility=hidden
+FFMPEG_CFLAGS := $(shell pkg-config --cflags libavformat libavcodec libavutil libswscale libswresample)
+FFMPEG_LIBS := $(shell pkg-config --libs libavformat libavcodec libavutil libswscale libswresample)
 
 SRC = src/real/abi_exports.cpp src/real/player.cpp src/real/clock.cpp \
       src/real/queue.cpp src/real/mp4_demux.cpp src/real/aac_decode.cpp \
       src/real/h264_decode.cpp src/real/audio_out.cpp src/real/video_out.cpp
 
 libelysian_video_real.so: $(SRC) include/elysian_video.h
-	$(CXX) $(CXXFLAGS) -shared -o $@ $(SRC)
+	$(CXX) $(CXXFLAGS) $(FFMPEG_CFLAGS) -shared -o $@ $(SRC) $(FFMPEG_LIBS)
 
 clean:
 	rm -f libelysian_video_real.so

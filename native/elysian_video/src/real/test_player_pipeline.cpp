@@ -1,11 +1,19 @@
-/* test_player_pipeline.cpp - proves the Part C stepped pipeline through the
- * ABI while inspecting engine internals the ABI hides. Linked against the
- * engine objects directly (not the shared library):
+/* test_player_pipeline.cpp - proves the stepped pipeline through the ABI
+ * while inspecting engine internals the ABI hides. Part E: demux and
+ * decode are FFmpeg-backed now; the pipeline shape (queues, horizon-paced
+ * pump, drained-EOF gate) is unchanged and this file still tests exactly
+ * that shape, just against real decoded output instead of synthetic
+ * placeholder frames. Linked against the engine objects directly (not the
+ * shared library):
  *
- *   g++ -std=c++17 -O2 -o test_pipeline src/real/test_player_pipeline.cpp \
+ *   g++ -std=c++17 -O2 `pkg-config --cflags libavformat libavcodec \
+ *       libavutil libswscale libswresample` \
+ *       -o test_pipeline src/real/test_player_pipeline.cpp \
  *       src/real/abi_exports.cpp src/real/player.cpp src/real/clock.cpp \
  *       src/real/queue.cpp src/real/mp4_demux.cpp src/real/aac_decode.cpp \
- *       src/real/h264_decode.cpp src/real/audio_out.cpp src/real/video_out.cpp
+ *       src/real/h264_decode.cpp src/real/audio_out.cpp src/real/video_out.cpp \
+ *       `pkg-config --libs libavformat libavcodec libavutil libswscale \
+ *       libswresample`
  *   ./test_pipeline fixture.mp4
  */
 #define ELY_VIDEO_EXPORTS
@@ -184,7 +192,11 @@ int main(int argc, char** argv) {
     printf("video target: attach, detach and detached resize safe\n");
 
     /* queue pressure: with the target full, fill must neither drop a
-       sample nor advance the demux cursor to find that out */
+     * sample nor advance the demux past what it could not queue. There is
+     * no exposed per-track cursor to compare (that was the owned box-
+     * walker's own bookkeeping); the observable contract is behavioral:
+     * a full queue makes fill_queues a no-op, and the packet fill_queues
+     * could not place is still the next one peek_next_kind reports. */
     player_reset_pipeline(p);
     mp4_seek(p->demux, 0.0);
     while (p->video_q->count < p->video_q->cap) {
@@ -196,21 +208,19 @@ int main(int argc, char** argv) {
         assert(queue_push(p->video_q, dummy));
     }
     {
-        size_t vcur = p->demux->video.cursor;
-        size_t acur = p->demux->audio.cursor;
-        int kind = 0;
-        assert(mp4_peek_next_kind(p->demux, &kind));
-        if (kind == 2) {
+        int kind_before = 0, kind_after = 0;
+        assert(mp4_peek_next_kind(p->demux, &kind_before));
+        if (kind_before == ELY_MEDIA_VIDEO) {
             int filled = player_fill_queues(p, 16);
             assert(filled == 0 && "full target must stop the fill");
-            assert(p->demux->video.cursor == vcur &&
-                   p->demux->audio.cursor == acur &&
-                   "a full target must not cost consumed samples");
+            assert(mp4_peek_next_kind(p->demux, &kind_after) &&
+                  kind_after == kind_before &&
+                  "a full target must not cost the pending sample");
         }
         assert(p->video_q->count == p->video_q->cap && "no overfill");
     }
     player_reset_pipeline(p);
-    printf("queue pressure: bounded, and peek prevents consumed samples\n");
+    printf("queue pressure: bounded, and a full target costs nothing\n");
 
     /* failure escalation: malformed (zero-size) packets must fail decode
        repeatedly and promote the player to ERROR through settle */

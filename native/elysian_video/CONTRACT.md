@@ -1,6 +1,6 @@
 # elysian_video engine contract
 
-This document plus `include/elysian_video.h` is the frozen contract between the Elysian shell and the owned media engine. Implementations change behind it; the contract does not. `test_contract.py` is this document in executable form, and any implementation of the header must pass it.
+This document plus `include/elysian_video.h` is the frozen contract between the Elysian shell and the native media engine. Implementations change behind it; the contract does not. `test_contract.py` is this document in executable form, and any implementation of the header must pass it.
 
 ## Layering
 
@@ -36,7 +36,7 @@ The `ElyResult` values in the header are the complete v1 set: generic, bad argum
 
 ## Roadmap and the Phase 3 decision
 
-Phases follow the execution plan: contract (done), stub (done), engine infrastructure, MP4 demux, audio decode and output, video decode and render, validation, then shell integration. The code behind this ABI is owned: owned demux, owned decode, owned output, owned render. The ABI was frozen first so those internals can mature without changing the shell-facing contract. MP4 demux is already real; the remaining Part C work is replacing placeholder AAC/H.264 output paths and placeholder output backends with progressively more real owned implementations, while keeping the ABI unchanged.
+Phases follow the execution plan: contract (done), stub (done), engine infrastructure, MP4 demux, audio decode and output, video decode and render, validation, then shell integration; all done. The code behind this ABI is native: FFmpeg-backed demux and decode (libavformat/libavcodec/libswresample/libswscale), a software-clocked audio sink pending a device backend, and Win32 StretchDIBits video output. The ABI was frozen first so those internals could mature, and later change backend entirely, without touching the shell-facing contract - which is exactly what happened moving from owned to FFmpeg-backed internals. Only decode-side FFmpeg libraries are linked; nothing in the shipped engine depends on an encoder.
 
 ## Future extensions
 

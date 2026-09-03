@@ -2,39 +2,37 @@
 #include "../../include/elysian_video.h"
 
 #include <stdint.h>
-#include <stdio.h>
 #include <vector>
 
-/* Real ISO-BMFF (MP4/M4A/M4V/MOV) demuxer. Parses the moov box into
- * per-track sample tables and walks compressed samples in decode-time
- * order. No decoding: samples come out exactly as stored, with the codec
- * configuration record (avcC for H.264, AudioSpecificConfig for AAC)
- * extracted for the milestone 2 decoders.
+/* MP4-family demuxer, backed by FFmpeg's libavformat.
  *
- * v1 scope, per CONTRACT.md: local files, non-fragmented MP4, first audio
- * and first video track, no edit lists, no ctts (pts == dts) yet. */
-
-struct Mp4Sample {
-    uint64_t offset;     /* absolute file offset */
-    uint32_t size;
-    double dts;          /* seconds */
-    double duration;     /* seconds */
-    int keyframe;
-};
+ * Part E: replaces the hand-rolled ISO-BMFF box walker with
+ * avformat_open_input/avformat_find_stream_info. Scope is unchanged from
+ * the owned demuxer this replaces: MP4/M4V/MOV, first usable audio track,
+ * first usable video track, and only AAC audio / H.264 video are accepted
+ * as playable (matching what the decoders behind this ABI understand) -
+ * any other codec in an otherwise-valid container is treated the same as
+ * an absent track, not a hard failure, so an MP4 with an unsupported audio
+ * codec still plays its video.
+ *
+ * fmt_ctx and pending_pkt are opaque (void*) so this header, and everything
+ * that includes it (frame.h's siblings, player.h), stays free of libav*
+ * include paths; only mp4_demux.cpp needs them. */
 
 struct Mp4Track {
     int present = 0;
-    uint32_t timescale = 0;
-    double duration = 0.0;           /* seconds */
-    int width = 0, height = 0;       /* video */
-    int sample_rate = 0, channels = 0;  /* audio */
-    std::vector<Mp4Sample> samples;
-    std::vector<uint8_t> codec_config;  /* avcC box body or AAC ASC */
-    size_t cursor = 0;               /* next sample to hand out */
+    double duration = 0.0;              /* seconds */
+    int width = 0, height = 0;          /* video */
+    int sample_rate = 0, channels = 0;   /* audio */
+    std::vector<uint8_t> codec_config;   /* extradata: avcC body or AAC ASC */
 };
 
 struct Mp4Demux {
-    FILE* f;
+    void* fmt_ctx = nullptr;             /* AVFormatContext* */
+    void* pending_pkt = nullptr;         /* AVPacket*, one-packet lookahead */
+    int pending_kind = 0;                /* which track pending_pkt belongs to */
+    int audio_stream_index = -1;
+    int video_stream_index = -1;
     double duration;
     double frame_rate;
     int has_audio, has_video;
@@ -44,25 +42,24 @@ struct Mp4Demux {
     Mp4Track video;
 };
 
-/* Returns ELY_OK or an ElyResult error. Deviates from the skeleton's bool
- * on purpose: a real parser distinguishes not-an-MP4 (ELY_ERR_UNSUPPORTED)
- * from a damaged MP4 (ELY_ERR_BAD_CONTAINER) from an MP4 with no usable
- * track (ELY_ERR_BAD_STREAM), and the contract tests assert the classes. */
 int mp4_open(Mp4Demux* d, const wchar_t* path);
 void mp4_close(Mp4Demux* d);
 int mp4_fill_info(Mp4Demux* d, ElyMediaInfo* out);
 
-/* Position both track cursors at the given time; the video cursor snaps
- * back to the nearest preceding sync sample so a decoder can start clean. */
+/* Seeks both streams to the nearest preceding keyframe at or before the
+ * target and clears the lookahead packet, so the next read starts clean. */
 int mp4_seek(Mp4Demux* d, double seconds);
 
-/* Which track the next sample belongs to, WITHOUT advancing any cursor;
- * returns 0 at end of media. Lets the pump route to a queue and check its
- * capacity before consuming demux state. */
+/* Which track the next packet belongs to, WITHOUT consuming it; returns 0
+ * at end of stream. Buffers one packet internally so peeking never costs a
+ * read the caller might not want yet. */
 int mp4_peek_next_kind(Mp4Demux* d, int* out_kind);
 
-/* Next sample across both tracks in dts order; returns 0 at end of media.
- * out_kind is ELY_MEDIA_AUDIO or ELY_MEDIA_VIDEO. The sample's bytes are
- * read into buf (caller-sized); sizes above buf_cap fail with 0. */
-int mp4_next_sample(Mp4Demux* d, Mp4Sample* out, int* out_kind,
-                    uint8_t* buf, size_t buf_cap);
+/* Consumes the packet peek_next_kind saw (reading one if none was peeked),
+ * copying its encoded bytes into buf. Returns 0 at end of stream or if the
+ * packet is larger than buf_cap. out_kind is ELY_MEDIA_AUDIO or
+ * ELY_MEDIA_VIDEO; out_pts/out_duration are seconds; out_keyframe is 1 for
+ * a sync sample. */
+int mp4_next_sample(Mp4Demux* d, int* out_kind, uint8_t* buf, size_t buf_cap,
+                    size_t* out_size, double* out_pts, double* out_duration,
+                    int* out_keyframe);

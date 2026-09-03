@@ -149,23 +149,27 @@ int player_fill_queues(ElyPlayer* p, int max_packets) {
         if (target->count >= target->cap)
             break;
 
-        Mp4Sample s;
         int got_kind = 0;
-        if (!mp4_next_sample(p->demux, &s, &got_kind,
-                             p->demux_buf.data(), p->demux_buf.size())) {
+        size_t out_size = 0;
+        double out_pts = 0.0, out_duration = 0.0;
+        int out_keyframe = 0;
+        if (!mp4_next_sample(p->demux, &got_kind,
+                             p->demux_buf.data(), p->demux_buf.size(),
+                             &out_size, &out_pts, &out_duration,
+                             &out_keyframe)) {
             p->demux_eof = 1;
             break;
         }
         Packet pkt;
         memset(&pkt, 0, sizeof(pkt));
-        pkt.size = s.size;
-        pkt.data = (unsigned char*)malloc(s.size ? s.size : 1);
+        pkt.size = out_size;
+        pkt.data = (unsigned char*)malloc(out_size ? out_size : 1);
         if (!pkt.data) break;
-        memcpy(pkt.data, p->demux_buf.data(), s.size);
-        pkt.pts = s.dts;
-        pkt.duration = s.duration;
+        memcpy(pkt.data, p->demux_buf.data(), out_size);
+        pkt.pts = out_pts;
+        pkt.duration = out_duration;
         pkt.stream_kind = got_kind;
-        pkt.keyframe = s.keyframe;
+        pkt.keyframe = out_keyframe;
         if (!queue_push(target, pkt)) {
             packet_dispose(&pkt);
             break;
@@ -217,14 +221,34 @@ int player_pump(ElyPlayer* p) {
             Packet pkt;
             queue_pop(p->audio_q, &pkt);
             PcmFrame pcm;
-            if (aac_decode_packet(p->audio_dec, &pkt, &pcm)) {
+            /* Tri-state: a real decoder can accept a packet and produce no
+             * frame yet (encoder lookahead), which is not a failure and
+             * must not advance audio_failures. Only -1 (rejected packet)
+             * does. */
+            int rc = aac_decode_packet(p->audio_dec, &pkt, &pcm);
+            if (rc > 0) {
                 audio_out_write(p->audio_out, &pcm);
                 p->audio_failures = 0;
-            } else if (++p->audio_failures > 8) {
+            } else if (rc < 0 && ++p->audio_failures > 8) {
                 packet_dispose(&pkt);
                 return -1;
             }
             packet_dispose(&pkt);
+            did = 1;
+            work++;
+        } else if (p->demux_eof && p->audio_q->count == 0 &&
+                  p->demux->has_audio && !p->audio_eof) {
+            /* Demux is done and nothing is queued, but the decoder may
+             * still be holding buffered frames (B-frame-style reordering,
+             * or an encoder's final lookahead window); drain it one frame
+             * per pump call before declaring the audio track finished. */
+            PcmFrame pcm;
+            int rc = aac_decode_packet(p->audio_dec, nullptr, &pcm);
+            if (rc > 0) {
+                audio_out_write(p->audio_out, &pcm);
+            } else {
+                p->audio_eof = 1;
+            }
             did = 1;
             work++;
         }
@@ -233,21 +257,35 @@ int player_pump(ElyPlayer* p) {
             Packet pkt;
             queue_pop(p->video_q, &pkt);
             VideoFrame frame;
-            if (h264_decode_packet(p->video_dec, &pkt, &frame)) {
+            int rc = h264_decode_packet(p->video_dec, &pkt, &frame);
+            if (rc > 0) {
                 video_out_present(p->video_out, &frame);
                 p->video_failures = 0;
-            } else if (++p->video_failures > 8) {
+            } else if (rc < 0 && ++p->video_failures > 8) {
                 packet_dispose(&pkt);
                 return -1;
             }
             packet_dispose(&pkt);
             did = 1;
             work++;
+        } else if (p->demux_eof && p->video_q->count == 0 &&
+                  p->demux->has_video && !p->video_eof) {
+            VideoFrame frame;
+            int rc = h264_decode_packet(p->video_dec, nullptr, &frame);
+            if (rc > 0) {
+                video_out_present(p->video_out, &frame);
+            } else {
+                p->video_eof = 1;
+            }
+            did = 1;
+            work++;
         }
         if (!did) {
             if (p->demux_eof) {
-                if (p->audio_q->count == 0) p->audio_eof = 1;
-                if (p->video_q->count == 0) p->video_eof = 1;
+                if (p->audio_q->count == 0 && !p->demux->has_audio)
+                    p->audio_eof = 1;
+                if (p->video_q->count == 0 && !p->demux->has_video)
+                    p->video_eof = 1;
             }
             break;
         }

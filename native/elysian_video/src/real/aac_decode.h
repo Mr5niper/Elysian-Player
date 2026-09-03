@@ -3,36 +3,30 @@
 
 /* AAC access units in, PCM out, behind the unchanged four-function seam.
  *
- * Part C completion state: real ASC parsing and validation, real
- * raw_data_block structural parse for the supported elements (SCE and CPE
- * with their ics_info), and deterministic NON-SILENT PCM derived from the
- * parsed structure. Valid packets produce shaped output, malformed packets
- * fail. Full spectral decode (scalefactors, Huffman, inverse quant, IMDCT,
- * overlap-add) is the remaining owned-codec phase and lands in the state
- * fields below without touching the seam. */
+ * Part E: real spectral decode via FFmpeg's libavcodec AAC decoder, in
+ * place of the structure-driven synthetic PCM this replaces. ctx/frame are
+ * opaque (void*) so this header stays free of libav* include paths; only
+ * aac_decode.cpp needs them.
+ *
+ * decode_packet's return value is tri-state, not boolean, because a real
+ * decoder can legitimately accept a packet and produce no frame yet (an
+ * encoder's lookahead/buffering delay): 1 a frame is ready in *out, 0 the
+ * packet was consumed but no frame is ready yet (not a failure), -1 the
+ * packet was rejected as bad data. player.cpp's failure counter only
+ * advances on -1; a run of legitimate 0s must never trip it. Passing
+ * pkt == nullptr signals end of stream: the decoder drains whatever it is
+ * still holding, one frame per call, returning 0 once nothing is left. */
 struct AacDecoder {
     int ready = 0;
     int sample_rate = 0;
     int channels = 0;
-    std::vector<unsigned char> codec_config;
-
-    /* parsed AudioSpecificConfig */
-    int asc_object_type = 0;      /* 2 = AAC-LC */
-    int asc_rate_index = 0;
-    int asc_rate = 0;
-    int asc_channel_config = 0;
-
-    /* parsed frame state */
-    int frame_len = 1024;
-    int element_instance_tag = 0;
-    int common_window = 0;
-
-    std::vector<float> overlap[2];
-    int window_shape[2] = {0, 0};
-
-    /* scratch owned-state for the spectral pipeline */
-    std::vector<int> scalefactors[2];
-    std::vector<float> coeffs[2];
+    void* ctx = nullptr;     /* AVCodecContext* */
+    void* frame = nullptr;   /* AVFrame*, reused across calls */
+    void* swr = nullptr;     /* SwrContext*, converts to interleaved float */
+    /* Audio decode order equals presentation order (no B-frame-style
+     * reordering), so the pts of the most recently sent packet is a
+     * reliable stand-in for the pts of whatever frame comes out next. */
+    double last_sent_pts = 0.0;
 };
 
 int aac_init(AacDecoder* d, const unsigned char* asc, size_t asc_size,

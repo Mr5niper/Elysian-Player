@@ -1,157 +1,158 @@
 #include "aac_decode.h"
-#include "bitreader.h"
 
-#include <math.h>
-
-static const int kAacRates[16] = {
-    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050,
-    16000, 12000, 11025, 8000, 7350, 0, 0, 0
-};
-
-static int parse_asc(AacDecoder* d, const unsigned char* asc, size_t size) {
-    BitReader br;
-    br_init(&br, asc, size);
-    int object_type = (int)br_read(&br, 5);
-    if (object_type == 31) object_type = 32 + (int)br_read(&br, 6);
-    int rate_index = (int)br_read(&br, 4);
-    int rate = rate_index == 15 ? (int)br_read(&br, 24)
-             : rate_index < 13 ? kAacRates[rate_index] : 0;
-    int channel_config = (int)br_read(&br, 4);
-    if (!br_ok(&br) || rate <= 0) return 0;
-    d->asc_object_type = object_type;
-    d->asc_rate_index = rate_index;
-    d->asc_rate = rate;
-    d->asc_channel_config = channel_config;
-    return 1;
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/avutil.h>
+#include <libavutil/opt.h>
+#include <libswresample/swresample.h>
 }
 
-static int aac_parse_ics_info(BitReader* br, AacDecoder* d, int ch) {
-    (void)d; (void)ch;
-    br_read1(br);                 /* reserved */
-    int window_sequence = (int)br_read(br, 2);
-    int window_shape = (int)br_read1(br);
-    if (window_sequence == 2) {   /* EIGHT_SHORT_SEQUENCE */
-        br_read(br, 4);           /* max_sfb */
-        br_read(br, 7);           /* scale_factor_grouping */
-    } else {
-        br_read(br, 6);           /* max_sfb */
-        br_read1(br);             /* predictor_data_present */
-    }
-    return br_ok(br) ? window_shape : -1;
-}
+#include <string.h>
+#include <cmath>
 
-static int aac_parse_element(BitReader* br, AacDecoder* d, int element_id) {
-    d->element_instance_tag = (int)br_read(br, 4);
-
-    if (element_id == 0) { /* SCE */
-        int ws = aac_parse_ics_info(br, d, 0);
-        if (ws < 0) return 0;
-        d->window_shape[0] = ws;
-        return br_ok(br);
-    }
-
-    if (element_id == 1) { /* CPE */
-        d->common_window = (int)br_read1(br);
-        if (d->common_window) {
-            int ws = aac_parse_ics_info(br, d, 0);
-            if (ws < 0) return 0;
-            d->window_shape[0] = d->window_shape[1] = ws;
-            br_read(br, 2);       /* ms_mask_present */
-        } else {
-            int ws0 = aac_parse_ics_info(br, d, 0);
-            int ws1 = aac_parse_ics_info(br, d, 1);
-            if (ws0 < 0 || ws1 < 0) return 0;
-            d->window_shape[0] = ws0;
-            d->window_shape[1] = ws1;
-        }
-        return br_ok(br);
-    }
-
-    return 0;
-}
+/* AVCodecContext::channels/channel_layout were removed in newer FFmpeg in
+ * favor of AVChannelLayout; both this sandbox's 6.1 and any recent Windows
+ * LGPL shared build use the new field, so only that path is written. */
 
 int aac_init(AacDecoder* d, const unsigned char* asc, size_t asc_size,
              int sample_rate, int channels) {
-    if (!d || !asc || asc_size == 0 || sample_rate <= 0 || channels <= 0)
-        return 0;
-    if (!parse_asc(d, asc, asc_size))
-        return 0;
-    if (d->asc_object_type != 2) return 0;          /* AAC-LC only */
-    if (d->asc_channel_config < 1 || d->asc_channel_config > 2) return 0;
-    if (d->asc_rate != sample_rate) return 0;
-    if (d->asc_channel_config != channels) return 0;
+    if (!d) return 0;
+    aac_free(d);
+    if (sample_rate <= 0 || channels <= 0) return 0;
 
-    d->codec_config.assign(asc, asc + asc_size);
+    const AVCodec* codec = avcodec_find_decoder(AV_CODEC_ID_AAC);
+    if (!codec) return 0;
+    AVCodecContext* ctx = avcodec_alloc_context3(codec);
+    if (!ctx) return 0;
+
+    ctx->sample_rate = sample_rate;
+    av_channel_layout_default(&ctx->ch_layout, channels);
+    /* Same reasoning as h264_decode.cpp: packets are fed manually, so
+     * pkt_timebase must be set before open or frame pts comes back
+     * meaningless. */
+    ctx->pkt_timebase = AVRational{1, 1000000};
+
+    if (asc && asc_size > 0) {
+        ctx->extradata = (uint8_t*)av_mallocz(
+            asc_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (!ctx->extradata) { avcodec_free_context(&ctx); return 0; }
+        memcpy(ctx->extradata, asc, asc_size);
+        ctx->extradata_size = (int)asc_size;
+    }
+
+    if (avcodec_open2(ctx, codec, nullptr) < 0) {
+        avcodec_free_context(&ctx);
+        return 0;
+    }
+
+    AVFrame* frame = av_frame_alloc();
+    if (!frame) { avcodec_free_context(&ctx); return 0; }
+
+    d->ctx = ctx;
+    d->frame = frame;
+    d->swr = nullptr;   /* built lazily once the first real frame arrives,
+                          * when the decoder's actual output layout is
+                          * known rather than assumed from the container. */
+    d->ready = 1;
     d->sample_rate = sample_rate;
     d->channels = channels;
-    d->overlap[0].assign(1024, 0.0f);
-    d->overlap[1].assign(1024, 0.0f);
-    d->window_shape[0] = d->window_shape[1] = 0;
-    d->frame_len = 1024;
-    d->ready = 1;
     return 1;
 }
 
 void aac_flush(AacDecoder* d) {
-    if (!d) return;
-    d->overlap[0].assign(d->overlap[0].size(), 0.0f);
-    d->overlap[1].assign(d->overlap[1].size(), 0.0f);
-    d->scalefactors[0].clear();
-    d->scalefactors[1].clear();
-    d->coeffs[0].clear();
-    d->coeffs[1].clear();
+    if (!d || !d->ctx) return;
+    avcodec_flush_buffers(static_cast<AVCodecContext*>(d->ctx));
+}
+
+static int ensure_swr(AacDecoder* d, AVFrame* f) {
+    if (d->swr) return 1;
+    SwrContext* swr = nullptr;
+    AVChannelLayout out_layout;
+    av_channel_layout_default(&out_layout, d->channels);
+    int rc = swr_alloc_set_opts2(
+        &swr, &out_layout, AV_SAMPLE_FMT_FLT, d->sample_rate,
+        &f->ch_layout, (AVSampleFormat)f->format, f->sample_rate,
+        0, nullptr);
+    av_channel_layout_uninit(&out_layout);
+    if (rc < 0 || !swr) return 0;
+    if (swr_init(swr) < 0) { swr_free(&swr); return 0; }
+    d->swr = swr;
+    return 1;
 }
 
 int aac_decode_packet(AacDecoder* d, const Packet* pkt, PcmFrame* out) {
-    if (!d || !d->ready || !pkt || !out) return 0;
-    if (!pkt->data || pkt->size == 0) return 0;
+    if (!d || !d->ready || !out) return -1;
+    AVCodecContext* ctx = static_cast<AVCodecContext*>(d->ctx);
+    AVFrame* frame = static_cast<AVFrame*>(d->frame);
 
-    BitReader br;
-    br_init(&br, pkt->data, pkt->size);
+    if (pkt) {
+        if (!pkt->data || pkt->size == 0)
+            return -1;   /* explicit reject: zero-byte input is never valid */
+        AVPacket* avpkt = av_packet_alloc();
+        if (!avpkt) return -1;
+        if (av_new_packet(avpkt, (int)pkt->size) < 0) {
+            av_packet_free(&avpkt);
+            return -1;
+        }
+        memcpy(avpkt->data, pkt->data, pkt->size);
+        avpkt->pts = (int64_t)llround(pkt->pts * 1000000.0);
+        d->last_sent_pts = pkt->pts;
+        int send_rc = avcodec_send_packet(ctx, avpkt);
+        av_packet_free(&avpkt);
+        if (send_rc < 0 && send_rc != AVERROR(EAGAIN))
+            return -1;      /* rejected: bad data */
+    } else {
+        avcodec_send_packet(ctx, nullptr);   /* EOF drain signal */
+    }
 
-    int element_id = (int)br_read(&br, 3);         /* first syntactic element */
-    if (!br_ok(&br)) return 0;
-    if (element_id != 0 && element_id != 1) return 0;  /* SCE/CPE only */
+    int rc = avcodec_receive_frame(ctx, frame);
+    if (rc == AVERROR(EAGAIN)) return 0;     /* accepted, nothing ready yet */
+    if (rc == AVERROR_EOF) return 0;         /* fully drained */
+    if (rc < 0) return -1;
 
-    d->common_window = 0;
-    if (!aac_parse_element(&br, d, element_id)) return 0;
+    if (!ensure_swr(d, frame)) return -1;
+    SwrContext* swr = static_cast<SwrContext*>(d->swr);
 
-    /* Structural parse success -> deterministic non-silent PCM.
-     * This is still not full AAC spectral decode, but it is no longer a
-     * silence stub: valid packets produce shape, malformed packets fail.
-     */
-    const size_t frames = (size_t)d->frame_len;
+    int max_out = frame->nb_samples +
+        swr_get_delay(swr, frame->sample_rate) * d->sample_rate /
+        frame->sample_rate + 32;
+    out->samples.assign((size_t)max_out * d->channels, 0.0f);
+    uint8_t* out_planes[1] = {
+        reinterpret_cast<uint8_t*>(out->samples.data()) };
+    int converted = swr_convert(swr, out_planes, max_out,
+                                (const uint8_t**)frame->extended_data,
+                                frame->nb_samples);
+    if (converted < 0) { out->samples.clear(); return -1; }
+
+    out->frames = (size_t)converted;
     out->channels = d->channels;
     out->sample_rate = d->sample_rate;
-    out->frames = frames;
-    out->pts = pkt->pts;
-    out->samples.assign(frames * (size_t)d->channels, 0.0f);
-
-    double base_freq = (element_id == 0) ? 220.0 : 330.0;
-    base_freq += d->element_instance_tag * 20.0;
-    base_freq += d->common_window ? 15.0 : 0.0;
-
-    for (size_t i = 0; i < frames; i++) {
-        double t = (double)i / (double)d->sample_rate;
-        for (int ch = 0; ch < d->channels; ch++) {
-            double freq = base_freq + ch * 40.0 + d->window_shape[ch] * 10.0;
-            float s = (float)(0.08 * sin(2.0 * 3.141592653589793 * freq * t));
-            out->samples[i * (size_t)d->channels + (size_t)ch] = s;
-        }
-    }
+    out->samples.resize((size_t)converted * d->channels);
+    /* Audio decode order equals presentation order, so no reordering ever
+     * applies; frame->pts (microsecond pkt_timebase) is authoritative when
+     * present, and the last packet sent is the honest fallback rather than
+     * reporting 0.0 at a flush boundary. */
+    out->pts = (frame->pts != AV_NOPTS_VALUE)
+        ? (double)frame->pts / 1000000.0 : d->last_sent_pts;
     return 1;
 }
 
 void aac_free(AacDecoder* d) {
     if (!d) return;
+    if (d->swr) {
+        SwrContext* swr = static_cast<SwrContext*>(d->swr);
+        swr_free(&swr);
+    }
+    if (d->frame) {
+        AVFrame* f = static_cast<AVFrame*>(d->frame);
+        av_frame_free(&f);
+    }
+    if (d->ctx) {
+        AVCodecContext* c = static_cast<AVCodecContext*>(d->ctx);
+        avcodec_free_context(&c);
+    }
+    d->ctx = nullptr;
+    d->frame = nullptr;
+    d->swr = nullptr;
     d->ready = 0;
-    d->sample_rate = 0;
-    d->channels = 0;
-    d->codec_config.clear();
-    d->overlap[0].clear();
-    d->overlap[1].clear();
-    d->scalefactors[0].clear();
-    d->scalefactors[1].clear();
-    d->coeffs[0].clear();
-    d->coeffs[1].clear();
 }
