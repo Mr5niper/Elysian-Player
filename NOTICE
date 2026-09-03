@@ -1,0 +1,77 @@
+Elysian Player - Third-Party Notices
+=====================================
+
+This application links FFmpeg (https://ffmpeg.org) libraries as part of its
+native video engine (native/elysian_video). Specifically, the shipped
+engine links only:
+
+    avformat, avcodec, avutil, swscale, swresample
+
+all decode/demux-side libraries used for playback. The engine does NOT
+link libx264, libx265, or any other GPL-only encoder library, and does not
+encode media of any kind; none of that code is needed to play a file back,
+which is all this application does with FFmpeg.
+
+License
+-------
+FFmpeg itself is licensed under the GNU Lesser General Public License,
+version 3 (LGPLv3), PROVIDED it is built without the --enable-gpl or
+--enable-nonfree configure flags. The LGPLv3 permits this: dynamically
+linking an LGPL library into a non-(L)GPL application, without the
+application itself becoming subject to LGPL/GPL terms, as long as:
+
+  - the FFmpeg libraries remain separate, dynamically-linked components
+    (shared .dll files) that a user could in principle replace with a
+    modified or updated build of FFmpeg, and
+  - FFmpeg's own copyright notices and license text are preserved and
+    made available alongside the application, and
+  - the exact FFmpeg build used is one that was itself built under LGPL
+    terms (no GPL-only or nonfree components compiled in).
+
+BUILD_EXE.bat fetches such a build automatically: BtbN/FFmpeg-Builds'
+"win64-lgpl-shared" release, an actively-maintained, widely-used source of
+prebuilt Windows FFmpeg binaries. That project publishes exactly the
+build configuration used for each variant in its own repository:
+
+    https://github.com/BtbN/FFmpeg-Builds
+
+The full text of the LGPLv3 as it ships with that build is copied to
+FFMPEG_LICENSE.txt in this project's dist\ output alongside the exe. A
+static copy is also committed at third_party\FFMPEG_LICENSE.txt, so the
+license text is visible in this repository without needing to run a
+build first; it was saved directly from the same BtbN release this
+project fetches, not retyped.
+
+CRITICAL: do not change the FFmpeg build this project fetches or bundles
+to a "gpl-shared" or "nonfree-shared" variant, and do not add libx264,
+libx265, or other GPL-only or nonfree libraries to the native engine's
+link line. Either change would place the combined, distributed
+application under GPL terms (or worse, terms that forbid redistribution
+entirely for "nonfree" builds), which is a materially different
+obligation than what this project currently carries and ships under.
+
+Reproducibility note
+---------------------
+BUILD_EXE.bat downloads FFmpeg from a "latest" release tag that moves
+forward as the upstream project publishes new builds, which is convenient
+for a one-click build but means two builds run months apart may not link
+against byte-identical FFmpeg binaries. For a build you need to reproduce
+exactly or audit precisely, either:
+
+  - pin FFMPEG_ZIP_URL in BUILD_EXE.bat to a specific dated release tag
+    (e.g. an "autobuild-YYYY-MM-DD-HH-MM" tag) instead of "latest", or
+  - place your own pre-verified LGPL shared FFmpeg build at
+    third_party\ffmpeg yourself; BUILD_EXE.bat uses it as-is and skips
+    the download whenever that folder already contains
+    include\libavformat\avformat.h.
+
+Distributor responsibility
+----------------------------
+Whoever builds and distributes an exe from this repository is the party
+responsible for confirming, at the time of that build, that the FFmpeg
+binaries actually bundled are a genuine LGPL build with no GPL-only or
+nonfree components. This notice describes the intended, default
+configuration; it is not a substitute for checking that intent held for
+any specific build, and it is not legal advice. If your distribution has
+requirements beyond what is described here, consult someone who can
+advise on them for your specific situation.

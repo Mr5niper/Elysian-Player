@@ -248,3 +248,8 @@ Built with [pywebview](https://pywebview.flowrl.com/),
 [miniaudio](https://github.com/irmen/pyminiaudio),
 [mutagen](https://mutagen.readthedocs.io/) and
 [Pillow](https://python-pillow.org/).
+
+The native video engine links [FFmpeg](https://ffmpeg.org) (decode-side
+libraries only: avformat, avcodec, avutil, swscale, swresample), fetched
+and bundled as an LGPLv3 build by `BUILD_EXE.bat`. See [NOTICE](NOTICE)
+for what that means and what it does not.

@@ -23,6 +23,30 @@ __pycache__/
 # chose.
 *.m3u
 
+# ---- Native video engine build artifacts (MSVC) ----
+# BUILD_DLL.bat / BUILD_DLL_REAL.bat compile in native/elysian_video/
+# itself, and /LD leaves the .obj per source file plus the .exp/.lib pair
+# for the .dll right there alongside the sources that produce them. None
+# of it is ever tracked; only the sources are.
+native/elysian_video/*.dll
+native/elysian_video/*.obj
+native/elysian_video/*.exp
+native/elysian_video/*.lib
+native/elysian_video/*.pdb
+native/elysian_video/*.so
+
+# ---- Fetched FFmpeg SDK ----
+# BUILD_EXE.bat downloads and unpacks an LGPL shared FFmpeg build here
+# automatically (roughly 150-200MB unpacked); it never belongs in the
+# repo, and re-fetching it is exactly what makes third_party/ffmpeg/
+# reproducible from a clean checkout. The temp download/extract entries
+# guard against a build that fails partway through leaving them behind.
+# third_party/FFMPEG_LICENSE.txt, one level up from ffmpeg/ itself, is
+# unaffected and stays tracked.
+third_party/ffmpeg/
+third_party/ffmpeg_download.zip
+third_party/ffmpeg_extract/
+
 # ---- OS / editor cruft ----
 .DS_Store
 Thumbs.db
