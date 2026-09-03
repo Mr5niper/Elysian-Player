@@ -76,6 +76,17 @@ def _default_candidates() -> list:
                    "elysian_video.so"])
     roots = []
     if getattr(sys, "frozen", False):
+        # PyInstaller's onefile bootloader extracts everything embedded
+        # with --add-binary (this DLL and its FFmpeg runtime DLLs) to a
+        # temp directory named in sys._MEIPASS, NOT next to sys.executable
+        # - that path is only the exe's own location, which in onefile
+        # mode holds nothing but the bootloader stub itself. Checked first
+        # since it is the one onefile actually populates; sys.executable's
+        # parent stays as a fallback for a onedir build or a DLL placed by
+        # hand next to the exe during development.
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            roots.append(Path(meipass))
         roots.append(Path(sys.executable).parent)
     here = Path(__file__).resolve()
     roots.append(here.parents[2])                       # repo root

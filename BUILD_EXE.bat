@@ -9,10 +9,12 @@ setlocal enabledelayedexpansion
 ::  Now a genuine one-stop build: this script also locates a Visual Studio
 ::  C++ toolchain, ensures an LGPL SHARED FFmpeg build is present (fetching
 ::  one if third_party\ffmpeg is empty), builds elysian_video_real.dll,
-::  THEN does everything it already did (venv, pinned deps, PyInstaller),
-::  and finally copies the native DLL and its FFmpeg runtime DLLs into
-::  dist\ alongside the exe. See NOTICE at the repo root before changing
-::  anything about which FFmpeg build gets linked.
+::  THEN does everything it already did (venv, pinned deps, PyInstaller) -
+::  with the native DLL and its required FFmpeg runtime DLLs embedded
+::  straight into the same single exe via --add-binary, so the output
+::  stays one genuinely self-contained file, not an exe plus a folder of
+::  loose DLLs. See NOTICE at the repo root before changing anything about
+::  which FFmpeg build gets linked.
 ::
 ::  Put this .bat in the SAME folder as:
 ::     - run.py              (the entry point)
@@ -126,7 +128,7 @@ echo [INFO] Starting build process...
 :: vswhere.exe ships with every Visual Studio Installer since VS2017 at this
 :: fixed path, whether or not Visual Studio itself is installed, and is
 :: Microsoft's own documented way to locate an install from a script.
-echo [STEP 1/8] Locating a Visual Studio C++ toolchain...
+echo [STEP 1/7] Locating a Visual Studio C++ toolchain...
 set "VSWHERE=%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe"
 if not exist "%VSWHERE%" (
     echo [ERROR] vswhere.exe not found at "%VSWHERE%".
@@ -178,7 +180,7 @@ echo =======================================================
 :: variant. See NOTICE at the repo root for why: switching this to a
 :: "gpl-shared" or "nonfree-shared" build would change the license
 :: obligations of the whole shipped exe.
-echo [STEP 2/8] Ensuring an LGPL shared FFmpeg build is present...
+echo [STEP 2/7] Ensuring an LGPL shared FFmpeg build is present...
 set "FFMPEG_DIR=%CD%\third_party\ffmpeg"
 set "FFMPEG_ZIP_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
 
@@ -230,7 +232,7 @@ echo =======================================================
 :: ==========================================================================
 :: 3. Build the native video engine (elysian_video_real.dll)
 :: ==========================================================================
-echo [STEP 3/8] Building the native video engine...
+echo [STEP 3/7] Building the native video engine...
 pushd "native\elysian_video"
 call BUILD_DLL_REAL.bat
 set "DLL_RC=%errorlevel%"
@@ -249,7 +251,7 @@ echo =======================================================
 :: ==========================================================================
 :: 4. Create a CLEAN Virtual Environment
 :: ==========================================================================
-echo [STEP 4/8] Creating a clean virtual environment in '.venv'...
+echo [STEP 4/7] Creating a clean virtual environment in '.venv'...
 
 :: Always start from a fresh venv so a stale dependency version cannot
 :: silently persist across builds. What gets tested here has to be exactly
@@ -268,7 +270,7 @@ if errorlevel 1 (
 :: ==========================================================================
 :: 5. Activate Virtual Environment
 :: ==========================================================================
-echo [STEP 5/8] Activating virtual environment...
+echo [STEP 5/7] Activating virtual environment...
 call ".venv\Scripts\activate.bat"
 
 if not defined VIRTUAL_ENV (
@@ -283,7 +285,7 @@ if not defined VIRTUAL_ENV (
 :: pip itself is upgraded, but setuptools and wheel are deliberately NOT
 :: upgraded here. They are pinned in requirements.txt, and upgrading them
 :: first would just get them downgraded back a moment later.
-echo [STEP 6/8] Upgrading pip and installing pinned dependencies...
+echo [STEP 6/7] Upgrading pip and installing pinned dependencies...
 python -m pip install --upgrade pip >nul
 if errorlevel 1 (
     echo [ERROR] Failed to upgrade pip.
@@ -320,6 +322,12 @@ echo.
 ::    --collect-all  just_playback and miniaudio ship the miniaudio DLL, which
 ::                   is the audio backend. If this is missing, the app runs but
 ::                   nothing plays.
+::    --add-binary   elysian_video_real.dll plus its FFmpeg runtime DLLs,
+::                   discovered below and embedded into the same exe rather
+::                   than left as loose files next to it, so onefile stays
+::                   genuinely one file. bindings.py finds them at runtime
+::                   under sys._MEIPASS, where PyInstaller's bootloader
+::                   extracts everything --add-binary embedded.
 ::    --exclude-module  pywebview can drive Qt or GTK as well as WinForms, and
 ::                   PyInstaller bundles every backend it can find. Excluding
 ::                   the unused ones is what keeps this a ~40 MB exe. tkinter
@@ -327,7 +335,33 @@ echo.
 ::
 :: python -m PyInstaller is used rather than bare 'pyinstaller' so the build
 :: cannot accidentally pick up a PyInstaller from outside this venv.
-echo [STEP 7/8] Building the onefile executable with PyInstaller...
+echo [STEP 7/7] Building the onefile executable with PyInstaller...
+
+:: Every --add-binary destination is "." (the root of sys._MEIPASS at
+:: runtime), and every source is a fully resolved literal path discovered
+:: here rather than a glob handed to PyInstaller directly, so this works
+:: the same regardless of PyInstaller version. The FFmpeg DLLs carry a
+:: version number in their filename (avformat-63.dll and similar) that
+:: changes between builds, which is exactly why this is discovered fresh
+:: each run instead of hardcoded.
+set "ADD_BINARY="
+set "ADD_BINARY=!ADD_BINARY! --add-binary "native\elysian_video\elysian_video_real.dll;.""
+set "FFMPEG_DLL_COUNT=0"
+for %%P in (avformat avcodec avutil swscale swresample) do (
+    for %%F in ("%FFMPEG_DIR%\bin\%%P-*.dll") do (
+        set "ADD_BINARY=!ADD_BINARY! --add-binary "%%F;.""
+        set /a FFMPEG_DLL_COUNT+=1
+    )
+)
+if "!FFMPEG_DLL_COUNT!"=="0" (
+    echo [ERROR] No FFmpeg runtime DLLs found under "%FFMPEG_DIR%\bin".
+    echo         The FFmpeg build there may be static rather than shared,
+    echo         or its layout has changed; see NOTICE for what is expected.
+    goto :error
+)
+echo [INFO] Embedding elysian_video_real.dll plus !FFMPEG_DLL_COUNT! FFmpeg
+echo        runtime DLLs into the exe.
+
 python -m PyInstaller --onefile --windowed --clean --noconfirm --noupx ^
  --name "%EXE_NAME%" ^
  --icon "%ICON%" ^
@@ -340,6 +374,7 @@ python -m PyInstaller --onefile --windowed --clean --noconfirm --noupx ^
  --collect-submodules mutagen ^
  --hidden-import PIL.Image ^
  --hidden-import clr_loader ^
+ !ADD_BINARY! ^
  --exclude-module pygame ^
  --exclude-module dearpygui ^
  --exclude-module numpy ^
@@ -363,40 +398,14 @@ if not "!BUILD_RC!"=="0" (
     echo [ERROR] PyInstaller build failed. Scroll up for the error.
     goto :error
 )
-echo =======================================================
-
-:: ==========================================================================
-:: 8. Bundle the native engine and its FFmpeg runtime into dist\
-:: ==========================================================================
-:: bindings.py looks for elysian_video_real.dll next to sys.executable when
-:: frozen, i.e. right here in dist\, not inside the onefile archive - so
-:: these are copied as loose files, not embedded with --add-binary. The
-:: FFmpeg runtime DLLs sit alongside them for the same reason: Windows
-:: resolves elysian_video_real.dll's own dependencies by first checking the
-:: directory it was loaded from.
-echo [STEP 8/8] Bundling the native engine and its FFmpeg runtime into dist...
-if not exist "dist" (
-    echo [ERROR] "dist" was not created; the PyInstaller step must not have run.
-    goto :error
-)
-copy /y "native\elysian_video\elysian_video_real.dll" "dist\" >nul
-if errorlevel 1 (
-    echo [ERROR] Could not copy elysian_video_real.dll into dist\.
-    goto :error
-)
-copy /y "%FFMPEG_DIR%\bin\avformat-*.dll" "dist\" >nul
-copy /y "%FFMPEG_DIR%\bin\avcodec-*.dll" "dist\" >nul
-copy /y "%FFMPEG_DIR%\bin\avutil-*.dll" "dist\" >nul
-copy /y "%FFMPEG_DIR%\bin\swscale-*.dll" "dist\" >nul
-copy /y "%FFMPEG_DIR%\bin\swresample-*.dll" "dist\" >nul
-if exist "%FFMPEG_DIR%\LICENSE.txt" copy /y "%FFMPEG_DIR%\LICENSE.txt" "dist\FFMPEG_LICENSE.txt" >nul
-if exist "NOTICE" copy /y "NOTICE" "dist\NOTICE" >nul
-echo [INFO] Native engine and FFmpeg runtime bundled into dist\.
 
 echo.
 echo [SUCCESS] Build completed successfully.
-echo The single-file executable, elysian_video_real.dll, its FFmpeg runtime
-echo DLLs, and license notices are all in the '.\dist' directory.
+echo The single self-contained executable is in the '.\dist' directory
+echo ("%EXE_NAME%.exe") - the native video engine and its FFmpeg runtime
+echo are embedded inside it, not shipped as separate files alongside it.
+echo See NOTICE and third_party\FFMPEG_LICENSE.txt for what that engine
+echo links and under what license.
 goto :end
 
 :WrongVersion

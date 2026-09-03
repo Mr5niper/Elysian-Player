@@ -35,12 +35,19 @@ build configuration used for each variant in its own repository:
 
     https://github.com/BtbN/FFmpeg-Builds
 
-The full text of the LGPLv3 as it ships with that build is copied to
-FFMPEG_LICENSE.txt in this project's dist\ output alongside the exe. A
-static copy is also committed at third_party\FFMPEG_LICENSE.txt, so the
-license text is visible in this repository without needing to run a
-build first; it was saved directly from the same BtbN release this
-project fetches, not retyped.
+The FFmpeg DLLs stay dynamically linked even though the shipped exe is a
+single file: PyInstaller's --onefile mode embeds elysian_video_real.dll
+and the FFmpeg runtime DLLs inside the exe and extracts them to a
+temporary directory at startup, rather than loading them pre-placed next
+to a onedir build. They remain separate .dll files at that point,
+loaded the ordinary way, not statically linked into anything. The full
+text of the LGPLv3 as it ships with the fetched build is committed at
+third_party\FFMPEG_LICENSE.txt, saved directly from the same BtbN release
+this project fetches, not retyped, so the license text is visible in
+this repository without needing to run a build first. It is not
+separately embedded in the exe itself, since nothing in the application
+currently reads or displays it at runtime; the repository is where it
+lives.
 
 CRITICAL: do not change the FFmpeg build this project fetches or bundles
 to a "gpl-shared" or "nonfree-shared" variant, and do not add libx264,
