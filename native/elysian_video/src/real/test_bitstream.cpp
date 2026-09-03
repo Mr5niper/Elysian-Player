@@ -1,21 +1,34 @@
-/* test_bitstream.cpp - validates the C.3 bitstream foundations: the shared
- * bitreader, ASC parsing in the AAC seam, and avcC/SPS/PPS parsing in the
- * H.264 seam. Ground truth comes from three directions: hand-computed
- * values, the fixture generator's spec-valid bitstreams, and REAL encoder
- * output (FFmpeg's AAC encoder and libx264) stored in testdata/.
+/* test_bitstream.cpp - validates the decode seams (aac_decode, h264_decode)
+ * directly against real encoded bitstreams, bypassing the full player
+ * pipeline. Part E: FFmpeg now owns all bitstream parsing (ASC, avcC,
+ * SPS/PPS, slice headers), so this no longer exercises an owned bitreader
+ * or owned structural parser - both are gone. What stays true regardless
+ * of what sits behind the seam: valid packets must produce real, non-
+ * silent/non-flat output, and malformed ones must be rejected rather than
+ * crash or silently succeed.
  *
- *   g++ -std=c++17 -O2 -o test_bitstream src/real/test_bitstream.cpp \
- *       src/real/aac_decode.cpp src/real/h264_decode.cpp
- *   ./test_bitstream testdata/real_asc.bin testdata/real_avcc.bin
+ * Packets are pulled through this engine's own mp4_demux from real_av.mp4,
+ * the FFmpeg-muxed fixture already in testdata/, so what reaches the
+ * decoders here is exactly what the full pipeline would hand them.
+ *
+ *   g++ -std=c++17 -O2 `pkg-config --cflags libavformat libavcodec \
+ *       libavutil libswscale libswresample` -o test_bitstream \
+ *       src/real/test_bitstream.cpp src/real/aac_decode.cpp \
+ *       src/real/h264_decode.cpp src/real/mp4_demux.cpp \
+ *       `pkg-config --libs libavformat libavcodec libavutil libswscale \
+ *       libswresample`
+ *   ./test_bitstream testdata/real_asc.bin testdata/real_avcc.bin \
+ *       testdata/real_av.mp4
  */
-#include "bitreader.h"
 #include "aac_decode.h"
 #include "h264_decode.h"
+#include "mp4_demux.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <vector>
+#include <wchar.h>
 
 static std::vector<unsigned char> read_file(const char* path) {
     FILE* f = fopen(path, "rb");
@@ -29,196 +42,141 @@ static std::vector<unsigned char> read_file(const char* path) {
     return v;
 }
 
+/* Pulls the first real packet of the requested kind out of a real MP4
+ * through this engine's own demuxer, so decode tests exercise exactly what
+ * the pipeline would hand them, not a hand-built approximation. */
+static bool first_real_packet(const wchar_t* path, int want_kind,
+                              std::vector<unsigned char>* out_bytes,
+                              double* out_pts, int* out_keyframe) {
+    Mp4Demux d;
+    if (mp4_open(&d, path) != ELY_OK) return false;
+    static unsigned char buf[1 << 20];
+    int kind;
+    while (mp4_peek_next_kind(&d, &kind)) {
+        size_t size; double pts, dur; int kf;
+        if (!mp4_next_sample(&d, &kind, buf, sizeof(buf), &size, &pts, &dur,
+                             &kf)) {
+            break;
+        }
+        if (kind == want_kind) {
+            out_bytes->assign(buf, buf + size);
+            *out_pts = pts;
+            *out_keyframe = kf;
+            mp4_close(&d);
+            return true;
+        }
+    }
+    mp4_close(&d);
+    return false;
+}
+
 int main(int argc, char** argv) {
-    /* ---- bitreader: exact reads, Exp-Golomb, sticky exhaustion ---------- */
-    {
-        const uint8_t data[] = {0b10110100, 0b01100000};
-        BitReader br;
-        br_init(&br, data, 2);
-        assert(br_read1(&br) == 1);
-        assert(br_read(&br, 3) == 0b011);
-        assert(br_read(&br, 4) == 0b0100);
-        assert(br_read(&br, 3) == 0b011);
-        assert(br_ok(&br));
-        br_read(&br, 6);                       /* exhausts (5 left) */
-        assert(!br_ok(&br));
-        assert(br_read1(&br) == 0 && !br_ok(&br));  /* stays failed */
-    }
-    {
-        /* ue(v): 1 -> 0, 010 -> 1, 011 -> 2, 00100 -> 3; se follows */
-        const uint8_t data[] = {0b10100110, 0b01000000};
-        BitReader br;
-        br_init(&br, data, 2);
-        assert(br_ue(&br) == 0);
-        assert(br_ue(&br) == 1);
-        assert(br_ue(&br) == 2);
-        assert(br_ue(&br) == 3);
-        assert(br_ok(&br));
-    }
-    {
-        const uint8_t data[] = {0b01001110};   /* ue=1 -> se=1; ue=2 -> se=-1 */
-        BitReader br;
-        br_init(&br, data, 1);
-        assert(br_se(&br) == 1);
-        assert(br_se(&br) == -1);
-        assert(br_ok(&br));
-    }
-    printf("bitreader: reads, exp-golomb and exhaustion correct\n");
-
-    /* ---- AAC ASC: fixture-style, escape form, malformed ----------------- */
-    {
-        AacDecoder d;
-        const unsigned char asc[] = {0x12, 0x10};   /* LC, 44100, stereo */
-        assert(aac_init(&d, asc, 2, 44100, 2));
-        assert(d.asc_object_type == 2 && d.asc_rate == 44100 &&
-               d.asc_channel_config == 2);
-        aac_free(&d);
-
-        /* escape form: rate index 15, explicit 24-bit rate */
-        /* 5 bits type=2, 4 bits idx=15, 24 bits rate=44100, 4 bits ch=1 */
-        AacDecoder e;
-        {
-            uint64_t bits = 0;
-            int n = 0;
-            auto put = [&](uint32_t v, int c) {
-                bits = (bits << c) | v;
-                n += c;
-            };
-            put(2, 5); put(15, 4); put(44100, 24); put(1, 4);
-            put(0, (8 - (n % 8)) % 8);
-            n += (8 - (n % 8)) % 8;
-            unsigned char buf[8];
-            for (int i = 0; i < n / 8; i++)
-                buf[i] = (unsigned char)(bits >> (n - 8 * (i + 1)));
-            assert(aac_init(&e, buf, (size_t)(n / 8), 44100, 1));
-            assert(e.asc_rate == 44100 && e.asc_rate_index == 15);
-            aac_free(&e);
-        }
-
-        /* rejections: HE-AAC object type, rate mismatch, truncation */
-        AacDecoder r;
-        const unsigned char he[] = {0x2B, 0x10};    /* object type 5 */
-        assert(!aac_init(&r, he, 2, 44100, 2));
-        assert(!aac_init(&r, asc, 2, 48000, 2));    /* container disagrees */
-        assert(!aac_init(&r, asc, 1, 44100, 2));    /* truncated */
-        printf("AAC ASC: parse, escape form and rejection correct\n");
+    if (argc < 4) {
+        fprintf(stderr,
+               "usage: test_bitstream real_asc.bin real_avcc.bin real_av.mp4\n");
+        return 2;
     }
 
-    /* ---- AAC packet path: valid packet => non-silent PCM, malformed fails --- */
+    /* ---- AAC: real ASC parses, real packet decodes non-silent --------- */
     {
-        AacDecoder d;
-        const unsigned char asc[] = {0x12, 0x10};   /* LC, 44100, stereo */
-        assert(aac_init(&d, asc, 2, 44100, 2));
-
-        /* Minimal supported CPE-ish packet: element_id=1, tag=0, common_window=0,
-           then enough zero bits for two ICS parses to succeed structurally. */
-        const unsigned char pkt_bytes[] = { 0x20, 0x00, 0x00, 0x00 };
-        Packet pkt{};
-        pkt.data = (unsigned char*)pkt_bytes;
-        pkt.size = sizeof(pkt_bytes);
-        pkt.pts = 1.25;
-
-        PcmFrame out;
-        assert(aac_decode_packet(&d, &pkt, &out));
-        assert(out.frames == 1024);
-        assert(out.channels == 2);
-        int nonzero = 0;
-        for (float s : out.samples) {
-            if (s != 0.0f) { nonzero = 1; break; }
-        }
-        assert(nonzero && "AAC output must no longer be silent");
-        aac_free(&d);
-
-        Packet bad{};
-        bad.data = (unsigned char*)pkt_bytes;
-        bad.size = 0;
-        PcmFrame bad_out;
-        assert(!aac_decode_packet(&d, &bad, &bad_out));
-        printf("AAC packet path: non-silent valid output, malformed rejects\n");
-    }
-
-
-    /* ---- real encoder ASC ------------------------------------------------ */
-    if (argc > 1) {
         std::vector<unsigned char> asc = read_file(argv[1]);
         AacDecoder d;
         assert(aac_init(&d, asc.data(), asc.size(), 44100, 2) &&
-               "the real FFmpeg-encoder ASC must parse");
-        assert(d.asc_object_type == 2 && d.asc_rate == 44100 &&
-               d.asc_channel_config == 2);
+               "the real FFmpeg-encoder ASC must be accepted");
+        printf("real encoder ASC (%zu bytes): accepted\n", asc.size());
+
+        wchar_t wpath[2048];
+        mbstowcs(wpath, argv[3], 2047);
+        wpath[2047] = 0;
+        std::vector<unsigned char> pkt_bytes;
+        double pts; int kf;
+        assert(first_real_packet(wpath, ELY_MEDIA_AUDIO, &pkt_bytes, &pts,
+                                 &kf) && "real_av.mp4 must carry audio");
+
+        Packet pkt{};
+        pkt.data = pkt_bytes.data();
+        pkt.size = pkt_bytes.size();
+        pkt.pts = pts;
+        PcmFrame out;
+        int rc = 0;
+        /* A real decoder can legitimately need a few packets before its
+         * first frame (encoder priming); feed a handful and require at
+         * least one to produce real, non-silent audio. */
+        for (int i = 0; i < 8 && rc <= 0; i++) {
+            rc = aac_decode_packet(&d, &pkt, &out);
+            if (rc <= 0) {
+                assert(first_real_packet(wpath, ELY_MEDIA_AUDIO, &pkt_bytes,
+                                         &pts, &kf));
+                pkt.data = pkt_bytes.data();
+                pkt.size = pkt_bytes.size();
+                pkt.pts = pts;
+            }
+        }
+        assert(rc > 0 && "a real AAC packet must eventually decode");
+        assert(out.frames > 0);
+        int nonzero = 0;
+        for (float s : out.samples) if (s != 0.0f) { nonzero = 1; break; }
+        assert(nonzero && "real AAC decode must not be silent");
+        printf("real AAC packet decodes to non-silent PCM (%zu frames)\n",
+              out.frames);
+
+        /* malformed: garbage bytes must be rejected, not crash */
+        unsigned char garbage[8] = {0xFF, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
+        Packet bad{};
+        bad.data = garbage;
+        bad.size = sizeof(garbage);
+        PcmFrame bad_out;
+        int bad_rc = aac_decode_packet(&d, &bad, &bad_out);
+        assert(bad_rc < 0 && "garbage AAC data must be rejected, not accepted");
+        printf("malformed AAC packet rejected cleanly\n");
         aac_free(&d);
-        printf("real encoder ASC (%zu bytes): parsed as LC/44100/stereo\n",
-               asc.size());
     }
 
-    /* ---- real libx264 avcC ------------------------------------------------ */
-    if (argc > 2) {
+    /* ---- H.264: real avcC parses, real IDR decodes non-flat ------------ */
+    {
         std::vector<unsigned char> avcc = read_file(argv[2]);
         H264Decoder d;
         assert(h264_init(&d, avcc.data(), avcc.size(), 320, 240) &&
-               "the real libx264 avcC must parse");
-        assert(d.have_sps && d.have_pps);
-        assert(d.sps.width == 320 && d.sps.height == 240);
-        assert(d.sps.profile_idc == 66 || d.sps.profile_idc == 77 ||
-               d.sps.profile_idc == 100);
-        assert(d.nal_length_size == 4);
-        printf("real libx264 avcC: SPS %dx%d profile %d, PPS %s\n",
-               d.sps.width, d.sps.height, d.sps.profile_idc,
-               d.pps.entropy_cabac ? "CABAC" : "CAVLC");
+               "the real libx264 avcC must be accepted");
+        printf("real libx264 avcC (%zu bytes): accepted\n", avcc.size());
 
-        /* container/bitstream disagreement must be rejected */
-        H264Decoder bad;
-        assert(!h264_init(&bad, avcc.data(), avcc.size(), 640, 480));
+        wchar_t wpath[2048];
+        mbstowcs(wpath, argv[3], 2047);
+        wpath[2047] = 0;
+        std::vector<unsigned char> pkt_bytes;
+        double pts; int kf;
+        assert(first_real_packet(wpath, ELY_MEDIA_VIDEO, &pkt_bytes, &pts,
+                                 &kf) && "real_av.mp4 must carry video");
+        assert(kf && "the first video packet in a file must be a keyframe");
 
-        /* malformed: truncated record, wrong version */
-        H264Decoder t;
-        assert(!h264_init(&t, avcc.data(), 6, 320, 240));
-        std::vector<unsigned char> wrong = avcc;
-        wrong[0] = 2;
-        assert(!h264_init(&t, wrong.data(), wrong.size(), 320, 240));
-        printf("avcC rejection: dimension mismatch, truncation, bad version\n");
-        h264_free(&d);
-    }
-
-    /* ---- H.264 packet path: structured output, malformed fails -------------- */
-    if (argc > 2) {
-        std::vector<unsigned char> avcc = read_file(argv[2]);
-        H264Decoder d;
-        assert(h264_init(&d, avcc.data(), avcc.size(), 320, 240));
-
-        /* one IDR slice NAL, MP4 length-prefixed */
-        std::vector<unsigned char> au = {
-            0x00, 0x00, 0x00, 0x04,   /* nal len */
-            0x65, 0xB8, 0x00, 0x00    /* tiny RBSP-shaped slice */
-        };
         Packet pkt{};
-        pkt.data = au.data();
-        pkt.size = au.size();
-        pkt.pts = 0.5;
-        pkt.keyframe = 1;
-
+        pkt.data = pkt_bytes.data();
+        pkt.size = pkt_bytes.size();
+        pkt.pts = pts;
+        pkt.keyframe = kf;
         VideoFrame out;
-        assert(h264_decode_packet(&d, &pkt, &out));
+        assert(h264_decode_packet(&d, &pkt, &out) > 0 &&
+              "a real IDR packet must decode on the first call");
         assert(out.width == 320 && out.height == 240);
         assert(!out.pixels.empty());
-
         unsigned char first = out.pixels[0];
         int all_same = 1;
-        for (unsigned char b : out.pixels) {
-            if (b != first) { all_same = 0; break; }
-        }
-        assert(!all_same && "H.264 output must no longer be a flat tint fill");
+        for (unsigned char b : out.pixels) if (b != first) { all_same = 0; break; }
+        assert(!all_same && "real decoded video must not be a flat fill");
+        printf("real H.264 IDR decodes to non-flat %dx%d pixels\n",
+              out.width, out.height);
 
-        std::vector<unsigned char> bad = { 0x00, 0x00, 0x00, 0x20, 0x65 };
-        Packet badpkt{};
-        badpkt.data = bad.data();
-        badpkt.size = bad.size();
-        VideoFrame badout;
-        assert(!h264_decode_packet(&d, &badpkt, &badout));
+        /* malformed: garbage NAL bytes must be rejected, not crash */
+        unsigned char garbage[6] = {0x65, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+        Packet bad{};
+        bad.data = garbage;
+        bad.size = sizeof(garbage);
+        VideoFrame bad_out;
+        int bad_rc = h264_decode_packet(&d, &bad, &bad_out);
+        assert(bad_rc < 0 && "garbage H.264 data must be rejected, not accepted");
+        printf("malformed H.264 packet rejected cleanly\n");
         h264_free(&d);
-        printf("H.264 packet path: structured output, malformed rejects\n");
     }
-
 
     printf("ALL BITSTREAM TESTS PASSED\n");
     return 0;

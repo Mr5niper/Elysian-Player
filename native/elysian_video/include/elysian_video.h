@@ -1,6 +1,6 @@
-/* elysian_video.h - the frozen ABI between the Elysian shell and the owned
+/* elysian_video.h - the frozen ABI between the Elysian shell and the native
  * media engine. This header IS the contract: implementations may change
- * behind it (stub, then progressively more complete owned codecs/output),
+ * behind it (stub, owned codecs, or FFmpeg-backed, as has now happened),
  * callers may
  * not assume anything not written here or in CONTRACT.md.
  *

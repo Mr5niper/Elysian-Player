@@ -26,7 +26,9 @@ struct PcmFrame {
 };
 
 struct VideoFrame {
-    std::vector<unsigned char> pixels;  /* RGBA */
+    /* BGRA, not RGBA: matches Win32's 32bpp DIB byte order directly, so
+     * video_out's StretchDIBits path needs no channel swap per frame. */
+    std::vector<unsigned char> pixels;
     int width = 0;
     int height = 0;
     int stride = 0;
