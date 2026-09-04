@@ -10,6 +10,8 @@ extern "C" {
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 /* ---- path conversion --------------------------------------------------
@@ -50,6 +52,27 @@ static std::string wide_to_utf8(const wchar_t* w) {
 #endif
 }
 
+/* Existence check on the ORIGINAL wide path, not the UTF-8-converted one.
+ * The previous version of this file called narrow fopen() on the UTF-8
+ * bytes directly - on Windows, the narrow CRT interprets a const char*
+ * according to the process's ANSI code page, not as UTF-8, unless the
+ * process has opted into the UTF-8 code page via an app manifest, which
+ * this project does not do. A filename with real non-ASCII characters
+ * (the exact case the ABI's own wchar_t-only rule exists to protect,
+ * per elysian_video.h's own comment on why narrow paths are unsafe here)
+ * could misreport as missing, or in principle resolve to the wrong file
+ * entirely, exactly the class of bug this project has already been
+ * burned by once before with waveform reading on non-ASCII filenames.
+ * _waccess() takes the wide path directly, with no conversion at all. */
+static bool path_exists(const wchar_t* wpath, const std::string& utf8) {
+#ifdef _WIN32
+    return _waccess(wpath, 0) == 0;
+#else
+    (void)wpath;
+    return access(utf8.c_str(), F_OK) == 0;
+#endif
+}
+
 static void free_track(Mp4Track& t) {
     t = Mp4Track();
 }
@@ -86,9 +109,10 @@ int mp4_open(Mp4Demux* d, const wchar_t* path) {
 
     /* File existence is checked directly rather than inferred from
      * avformat's error code, which is not guaranteed to be ENOENT for
-     * every "no such file" case across platforms/protocols. */
-    FILE* probe_fp = fopen(utf8.c_str(), "rb");
-    if (!probe_fp) return ELY_ERR_NOT_FOUND;
+     * every "no such file" case across platforms/protocols. Checked on
+     * the wide path; see path_exists()'s own comment for why the narrow
+     * CRT is not safe for this. */
+    if (!path_exists(path, utf8)) return ELY_ERR_NOT_FOUND;
 
     /* Probe the container signature BEFORE a full open, so a truncated or
      * corrupt MP4 (whose ftyp signature still matches the family) can be
@@ -97,8 +121,17 @@ int mp4_open(Mp4Demux* d, const wchar_t* path) {
      * the same "won't open" outcome, and a damaged real file would
      * misreport as UNSUPPORTED instead of BAD_CONTAINER. */
     unsigned char probe_buf[4096];
-    size_t probe_len = fread(probe_buf, 1, sizeof(probe_buf), probe_fp);
-    fclose(probe_fp);
+    size_t probe_len = 0;
+    {
+#ifdef _WIN32
+        FILE* probe_fp = _wfopen(path, L"rb");
+#else
+        FILE* probe_fp = fopen(utf8.c_str(), "rb");
+#endif
+        if (!probe_fp) return ELY_ERR_NOT_FOUND;
+        probe_len = fread(probe_buf, 1, sizeof(probe_buf), probe_fp);
+        fclose(probe_fp);
+    }
 
     AVProbeData pd;
     memset(&pd, 0, sizeof(pd));
@@ -240,11 +273,15 @@ int mp4_seek(Mp4Demux* d, double seconds) {
     int64_t target = (int64_t)(seconds / av_q2d(s->time_base));
     int rc = av_seek_frame(fmt, stream_idx, target, AVSEEK_FLAG_BACKWARD);
     if (rc < 0) return 0;
-    /* Flush FFmpeg's own internal demux-side buffering for every stream,
-     * not just the one seeked on, or a stale packet from before the seek
-     * can surface on the other track. */
-    for (unsigned i = 0; i < fmt->nb_streams; i++)
-        avformat_flush(fmt);
+    /* avformat_flush() operates on the whole AVFormatContext, not per
+     * stream - the previous version of this called it once per stream
+     * index in a loop, which is harmless (idempotent) but was calling
+     * the identical operation redundantly nb_streams times for no
+     * reason. One call already flushes every stream's internal demux-
+     * side buffering, which is what actually matters: without it, a
+     * stale packet read before the seek can surface on the other
+     * track after it. */
+    avformat_flush(fmt);
     return 1;
 }
 

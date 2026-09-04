@@ -3,10 +3,27 @@
  * decode are FFmpeg-backed now; the pipeline shape (queues, horizon-paced
  * pump, drained-EOF gate) is unchanged and this file still tests exactly
  * that shape, just against real decoded output instead of synthetic
- * placeholder frames. Linked against the engine objects directly (not the
- * shared library):
+ * placeholder frames.
  *
- *   g++ -std=c++17 -O2 `pkg-config --cflags libavformat libavcodec \
+ * Threading note (the reason nearly every block below is now wrapped in
+ * player_guard(p)): a background pump thread owns calling player_settle()
+ * on its own cadence now, independent of any caller (see player.h's own
+ * note on why). That thread touches exactly the same ElyPlayer internals
+ * this file peeks at directly - queues, decoder-ready flags, VideoOut's
+ * retained frame, the demuxer's cursor - none of which are ABI-exposed or
+ * otherwise synchronized. Every ABI call already takes ctl_mu internally
+ * (mutating calls) or is lock-free by design (getters, which read only
+ * the published atomic snapshot); this file's OWN direct internal touches
+ * need the same lock explicitly, via player_guard(p), or they race the
+ * pump thread exactly the way ThreadSanitizer will report if that lock is
+ * missing anywhere. The one rule that must never be broken: never call a
+ * MUTATING ABI function (ely_play/pause/resume/stop/seek/load/unload/
+ * set_video_hwnd/resize_video/set_volume) while already holding a guard
+ * taken in this file - ctl_mu is not recursive, and that would deadlock.
+ * Lock-free getters (ely_get_state and friends) are always safe to call
+ * whether or not a guard is currently held.
+ *
+ *   g++ -std=c++17 -O2 -pthread `pkg-config --cflags libavformat libavcodec \
  *       libavutil libswscale libswresample` \
  *       -o test_pipeline src/real/test_player_pipeline.cpp \
  *       src/real/abi_exports.cpp src/real/player.cpp src/real/clock.cpp \
@@ -54,81 +71,121 @@ int main(int argc, char** argv) {
 
     /* pump for a moment of real time: packets must flow into both outputs */
     for (int i = 0; i < 6; i++) { sleep_ms(50); ely_get_state(p); }
-    assert(p->audio_out->writes > 0 && "PCM must reach the audio sink");
-    assert(audio_out_position(p->audio_out) >= 0.0 &&
-           "audio backend must expose a non-negative clock now");
-    assert(p->video_out->presents > 0 && "frames must reach the presenter");
-    assert(p->video_out->last.width == p->demux->width &&
-           p->video_out->last.stride == p->demux->width * 4);
-    double pos = ely_get_position(p);
-    assert(pos > 0.15 && "position advances on the clock");
-    /* presented frames track the clock within the pump lookahead, in real
-       and sanitizer builds alike */
-    assert(p->video_out->last_pts >= 0.0 &&
-           p->video_out->last_pts <= pos + 0.6);
-    printf("pipeline flows: %zu PCM writes, %zu presented frames, pos %.2f\n",
-           p->audio_out->writes, p->video_out->presents, pos);
+    double pos;
+    {
+        auto guard = player_guard(p);
+        assert(p->audio_out->writes > 0 && "PCM must reach the audio sink");
+        assert(audio_out_position(p->audio_out) >= 0.0 &&
+               "audio backend must expose a non-negative clock now");
+        assert(p->video_out->presents > 0 && "frames must reach the presenter");
+        assert(p->video_out->last.width == p->demux->width &&
+               p->video_out->last.stride == p->demux->width * 4);
+        pos = ely_get_position(p);   /* lock-free; safe while already held */
+        assert(pos > 0.15 && "position advances on the clock");
+        /* presented frames track the clock within the pump lookahead, in
+           real and sanitizer builds alike */
+        assert(p->video_out->last_pts >= 0.0 &&
+               p->video_out->last_pts <= pos + 0.6);
+        printf("pipeline flows: %zu PCM writes, %zu presented frames, pos %.2f\n",
+              p->audio_out->writes, p->video_out->presents, pos);
+    }
 
     /* presented frames keep pace with the clock, not with call count */
-    size_t before = p->video_out->presents;
-    double last_before = p->video_out->last_pts;
-    for (int i = 0; i < 50; i++) ely_get_state(p);   /* burst of calls */
-    double t1 = ely_get_position(p);
-    /* Frames presented during the burst may include catch-up on any
-       backlog (instrumented builds run the pump slower than the clock),
-       but must never exceed the frames actually due between the last
-       presented timestamp and now plus the pump lookahead. A call-paced
-       pump would present ~50 here; the due-window bound stays well under
-       that in the uninstrumented build and scales honestly under ASAN. */
-    size_t allowed = (size_t)((t1 + 0.6 - last_before) * 30.0) + 4;
-    assert(p->video_out->presents - before <= allowed &&
-           "pump must be paced by the clock, not by call frequency");
-    printf("pump is clock-paced: burst of 50 calls presented %zu frames\n",
-           p->video_out->presents - before);
+    size_t before_wv;
+    double last_before;
+    {
+        auto guard = player_guard(p);
+        before_wv = p->video_out->presents;
+        last_before = p->video_out->last_pts;
+    }
+    for (int i = 0; i < 50; i++) ely_get_state(p);   /* burst of calls, lock-free */
+    double t1 = ely_get_position(p);                 /* lock-free */
+    {
+        auto guard = player_guard(p);
+        /* Frames presented during the burst may include catch-up on any
+           backlog (instrumented builds run the pump slower than the clock),
+           but must never exceed the frames actually due between the last
+           presented timestamp and now plus the pump lookahead. A call-paced
+           pump would present ~50 here; the due-window bound stays well
+           under that in the uninstrumented build and scales honestly under
+           ASAN. */
+        size_t allowed = (size_t)((t1 + 0.6 - last_before) * 30.0) + 4;
+        assert(p->video_out->presents - before_wv <= allowed &&
+               "pump must be paced by the clock, not by call frequency");
+        printf("pump is clock-paced: burst of 50 calls presented %zu frames\n",
+              p->video_out->presents - before_wv);
+    }
 
     /* pause freezes; queues survive; nothing new decodes */
     assert(ely_pause(p) == 0);
-    size_t wa = p->audio_out->writes, wv = p->video_out->presents;
+    size_t wa, wv;
+    {
+        auto guard = player_guard(p);
+        wa = p->audio_out->writes;
+        wv = p->video_out->presents;
+    }
     sleep_ms(150);
     ely_get_state(p);
-    assert(p->audio_out->writes == wa && p->video_out->presents == wv);
+    {
+        auto guard = player_guard(p);
+        assert(p->audio_out->writes == wa && p->video_out->presents == wv);
+    }
     printf("pause: pipeline holds still\n");
 
     {
-        double p0 = audio_out_position(p->audio_out);
+        double p0, p1;
+        {
+            auto guard = player_guard(p);
+            p0 = audio_out_position(p->audio_out);
+        }
         sleep_ms(80);
-        double p1 = audio_out_position(p->audio_out);
+        {
+            auto guard = player_guard(p);
+            p1 = audio_out_position(p->audio_out);
+        }
         assert(p1 - p0 < 0.01 && "paused audio clock must freeze");
         printf("audio clock freezes while paused\n");
     }
 
     /* seek flushes queues and decoders, stays paused, resumes cleanly */
     assert(ely_seek(p, 5.0) == 0);
-    assert(p->audio_q->count == 0 && p->video_q->count == 0 &&
-           "seek must flush the packet queues");
-    assert(!p->demux_eof);
-    assert(ely_get_state(p) == 3);              /* still PAUSED */
+    {
+        auto guard = player_guard(p);
+        assert(p->audio_q->count == 0 && p->video_q->count == 0 &&
+               "seek must flush the packet queues");
+        assert(!p->demux_eof);
+    }
+    assert(ely_get_state(p) == 3);              /* still PAUSED, lock-free */
     assert(ely_resume(p) == 0);
     sleep_ms(120);
     ely_get_state(p);
-    assert(p->video_out->last_pts >= 5.0 - 0.2 &&
-           "presented frames must come from after the seek target");
-    printf("seek: flushed, resumed, presenting from %.2f\n",
-           p->video_out->last_pts);
+    {
+        auto guard = player_guard(p);
+        assert(p->video_out->last_pts >= 5.0 - 0.2 &&
+               "presented frames must come from after the seek target");
+        printf("seek: flushed, resumed, presenting from %.2f\n",
+              p->video_out->last_pts);
+    }
 
     /* drained EOF: seek near the end, ENDED only once everything drains */
     assert(ely_seek(p, ely_get_duration(p) - 1.0) == 0);
     assert(!ely_is_finished(p));
     sleep_ms(1150);
     assert(ely_is_finished(p) && "must end at natural EOF");
-    assert(player_pipeline_drained(p) && "ENDED requires a drained pipeline");
-    assert(p->demux_eof && p->audio_eof && p->video_eof);
-    assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    {
+        auto guard = player_guard(p);
+        assert(player_pipeline_drained(p) && "ENDED requires a drained pipeline");
+        assert(p->demux_eof && p->audio_eof && p->video_eof);
+        assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    }
     printf("EOF: ENDED only with demux EOF and drained queues\n");
 
     /* restart from ENDED resets the pipeline and plays again */
     assert(ely_play(p) == 0);
-    assert(!p->demux_eof && "restart must rewind the demux pump");
+    {
+        auto guard = player_guard(p);
+        assert(!p->demux_eof && "restart must rewind the demux pump");
+    }
     sleep_ms(80);
     ely_get_state(p);
     assert(ely_get_position(p) < 0.5);
@@ -136,7 +193,10 @@ int main(int argc, char** argv) {
 
     /* stop keeps media loaded, clears the pipeline */
     assert(ely_stop(p) == 0);
-    assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    {
+        auto guard = player_guard(p);
+        assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    }
     assert(ely_get_duration(p) > 0.0);
     printf("stop: pipeline cleared, media retained\n");
 
@@ -149,9 +209,12 @@ int main(int argc, char** argv) {
         assert(ely_play(p) == 0);
         sleep_ms(120);
         ely_get_state(p);
-        assert(p->audio_out->writes > 0);
-        assert(p->video_out->presents == 0 &&
-               "audio-only media must not touch the presenter");
+        {
+            auto guard = player_guard(p);
+            assert(p->audio_out->writes > 0);
+            assert(p->video_out->presents == 0 &&
+                  "audio-only media must not touch the presenter");
+        }
         assert(ely_seek(p, ely_get_duration(p) - 0.6) == 0);
         assert(ely_play(p) == 0);
         sleep_ms(800);
@@ -167,7 +230,10 @@ int main(int argc, char** argv) {
     sleep_ms(60);
     assert(ely_stop(p) == 0);
     assert(ely_stop(p) == 0 && "second stop must be safe");
-    assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    {
+        auto guard = player_guard(p);
+        assert(p->audio_q->count == 0 && p->video_q->count == 0);
+    }
     assert(ely_get_duration(p) > 0.0);
     printf("repeated stop: safe, queues empty, media retained\n");
 
@@ -175,18 +241,27 @@ int main(int argc, char** argv) {
     assert(ely_play(p) == 0);
     sleep_ms(60);
     ely_get_state(p);
-    player_reset_pipeline(p);
-    assert(p->audio_q->count == 0 && p->video_q->count == 0);
-    assert(p->demux_eof == 0 && p->audio_eof == 0 && p->video_eof == 0);
-    assert(p->audio_failures == 0 && p->video_failures == 0);
+    {
+        auto guard = player_guard(p);
+        player_reset_pipeline(p);
+        assert(p->audio_q->count == 0 && p->video_q->count == 0);
+        assert(p->demux_eof == 0 && p->audio_eof == 0 && p->video_eof == 0);
+        assert(p->audio_failures == 0 && p->video_failures == 0);
+    }
     printf("explicit reset: counts and flags all cleared\n");
     assert(ely_stop(p) == 0);
 
     /* detached video target safety */
     assert(ely_set_video_hwnd(p, (void*)0x1) == 0);
-    assert(p->video_out->attached == 1);
+    {
+        auto guard = player_guard(p);
+        assert(p->video_out->attached == 1);
+    }
     assert(ely_set_video_hwnd(p, NULL) == 0);
-    assert(p->video_out->attached == 0);
+    {
+        auto guard = player_guard(p);
+        assert(p->video_out->attached == 0);
+    }
     assert(ely_resize_video(p, 640, 360) == 0 &&
            "resize with no target stays a legal no-op");
     printf("video target: attach, detach and detached resize safe\n");
@@ -196,18 +271,21 @@ int main(int argc, char** argv) {
      * no exposed per-track cursor to compare (that was the owned box-
      * walker's own bookkeeping); the observable contract is behavioral:
      * a full queue makes fill_queues a no-op, and the packet fill_queues
-     * could not place is still the next one peek_next_kind reports. */
-    player_reset_pipeline(p);
-    mp4_seek(p->demux, 0.0);
-    while (p->video_q->count < p->video_q->cap) {
-        Packet dummy;
-        memset(&dummy, 0, sizeof(dummy));
-        dummy.data = (unsigned char*)malloc(1);
-        dummy.size = 1;
-        dummy.stream_kind = 2;
-        assert(queue_push(p->video_q, dummy));
-    }
+     * could not place is still the next one peek_next_kind reports.
+     * Entirely internal-touching, so held under one guard start to
+     * finish: no ABI mutating call happens anywhere in this block. */
     {
+        auto guard = player_guard(p);
+        player_reset_pipeline(p);
+        mp4_seek(p->demux, 0.0);
+        while (p->video_q->count < p->video_q->cap) {
+            Packet dummy;
+            memset(&dummy, 0, sizeof(dummy));
+            dummy.data = (unsigned char*)malloc(1);
+            dummy.size = 1;
+            dummy.stream_kind = 2;
+            assert(queue_push(p->video_q, dummy));
+        }
         int kind_before = 0, kind_after = 0;
         assert(mp4_peek_next_kind(p->demux, &kind_before));
         if (kind_before == ELY_MEDIA_VIDEO) {
@@ -218,29 +296,32 @@ int main(int argc, char** argv) {
                   "a full target must not cost the pending sample");
         }
         assert(p->video_q->count == p->video_q->cap && "no overfill");
+        player_reset_pipeline(p);
     }
-    player_reset_pipeline(p);
     printf("queue pressure: bounded, and a full target costs nothing\n");
 
     /* failure escalation: malformed (zero-size) packets must fail decode
        repeatedly and promote the player to ERROR through settle */
     assert(ely_play(p) == 0);
-    for (int i = 0; i < 12; i++) {
-        Packet bad;
-        memset(&bad, 0, sizeof(bad));
-        bad.data = (unsigned char*)malloc(1);
-        bad.size = 0;                       /* malformed: no bytes */
-        bad.stream_kind = 1;
-        bad.pts = 0.0;                      /* always due */
-        assert(queue_push(p->audio_q, bad));
+    {
+        auto guard = player_guard(p);
+        for (int i = 0; i < 12; i++) {
+            Packet bad;
+            memset(&bad, 0, sizeof(bad));
+            bad.data = (unsigned char*)malloc(1);
+            bad.size = 0;                       /* malformed: no bytes */
+            bad.stream_kind = 1;
+            bad.pts = 0.0;                      /* always due */
+            assert(queue_push(p->audio_q, bad));
+        }
     }
-    for (int i = 0; i < 4 && ely_get_state(p) != 6; i++) sleep_ms(10);
+    for (int i = 0; i < 40 && ely_get_state(p) != 6; i++) sleep_ms(20);
     assert(ely_get_state(p) == 6 && "repeated decode failure must ERROR");
     assert(wcslen(ely_get_last_error(p)) > 0);
     assert(ely_unload(p) == 0 && ely_get_state(p) == 0 &&
            "unload must recover from ERROR");
     printf("failure escalation: ERROR after repeated decode failure, "
-           "unload recovers\n");
+          "unload recovers\n");
 
     /* real-world file: FFmpeg-muxed, libx264+AAC, end to end */
     if (argc > 3) {
@@ -258,12 +339,15 @@ int main(int argc, char** argv) {
                "real avcC and ASC must satisfy the parsing decoders");
         sleep_ms(150);
         ely_get_state(p);
-        assert(p->audio_out->writes > 0 && p->video_out->presents > 0);
-        assert(ely_get_position(p) > 0.05);
-        assert(p->video_out->bytes_presented > 0 &&
-               "video presenter must track real presented bytes");
-        assert(p->video_out->cleared == 0);
-        printf("video presenter tracks bytes and clear state\n");
+        {
+            auto guard = player_guard(p);
+            assert(p->audio_out->writes > 0 && p->video_out->presents > 0);
+            assert(ely_get_position(p) > 0.05);   /* lock-free */
+            assert(p->video_out->bytes_presented > 0 &&
+                  "video presenter must track real presented bytes");
+            assert(p->video_out->cleared == 0);
+            printf("video presenter tracks bytes and clear state\n");
+        }
         assert(ely_stop(p) == 0);
         printf("real-world MP4 (libx264 + AAC): loads, plays, flows\n");
     }
