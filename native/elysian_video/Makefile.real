@@ -2,7 +2,7 @@
 # decode. The Windows DLL is produced by BUILD_DLL_REAL.bat, which links
 # the same libraries by name against the bundled FFmpeg import libs.
 CXX ?= g++
-CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fPIC -fvisibility=hidden
+CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra -fPIC -fvisibility=hidden -pthread
 FFMPEG_CFLAGS := $(shell pkg-config --cflags libavformat libavcodec libavutil libswscale libswresample)
 FFMPEG_LIBS := $(shell pkg-config --libs libavformat libavcodec libavutil libswscale libswresample)
 

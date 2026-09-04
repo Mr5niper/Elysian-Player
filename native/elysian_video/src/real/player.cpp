@@ -7,6 +7,7 @@
 #include "video_out.h"
 #include "queue.h"
 
+#include <chrono>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -23,11 +24,69 @@ void player_set_error(ElyPlayer* p, const wchar_t* msg) {
     p->last_error[255] = 0;
 }
 
+std::unique_lock<std::mutex> player_guard(ElyPlayer* p) {
+    return std::unique_lock<std::mutex>(p->ctl_mu);
+}
+
+/* Called only while holding ctl_mu: by the pump thread once per settle-and-
+ * publish cycle, and by every mutating ABI call right before it returns, so
+ * a getter called immediately afterward on any thread sees the fresh value
+ * rather than waiting for the pump thread's own next wake. */
+void player_publish_locked(ElyPlayer* p) {
+    p->pub_state.store(p->state, std::memory_order_relaxed);
+    p->pub_playing.store(p->state == ELY_STATE_PLAYING ? 1 : 0,
+                         std::memory_order_relaxed);
+    p->pub_paused.store(p->state == ELY_STATE_PAUSED ? 1 : 0,
+                        std::memory_order_relaxed);
+    p->pub_finished.store(p->state == ELY_STATE_ENDED ? 1 : 0,
+                          std::memory_order_relaxed);
+    double pos = 0.0;
+    if (p->state != ELY_STATE_EMPTY && p->state != ELY_STATE_STOPPED)
+        pos = clock_position(p->clock, p->info.duration, 1);
+    p->pub_position.store(pos, std::memory_order_relaxed);
+}
+
+/* Runs forever on its own thread, from player_create() to player_destroy().
+ * Sleeps (lock released) between steps via wait_for, so a caller's
+ * mutating ABI call is never blocked longer than one in-flight settle
+ * pass. 5ms while playing keeps the existing horizon-paced pump in
+ * player_pump() well fed without spinning; 50ms while idle costs nothing
+ * anyone would notice and keeps last_error/state visible promptly after
+ * an external change. */
+static void player_thread_main(ElyPlayer* p) {
+    std::unique_lock<std::mutex> lock(p->ctl_mu);
+    while (!p->stop_requested) {
+        if (p->state == ELY_STATE_PLAYING) {
+            player_settle(p);
+            player_publish_locked(p);
+            p->ctl_cv.wait_for(lock, std::chrono::milliseconds(5));
+        } else {
+            player_publish_locked(p);
+            p->ctl_cv.wait_for(lock, std::chrono::milliseconds(50));
+        }
+    }
+}
+
+static void player_start_thread(ElyPlayer* p) {
+    p->stop_requested = false;
+    p->pump_thread = std::thread(player_thread_main, p);
+}
+
+static void player_stop_thread(ElyPlayer* p) {
+    {
+        std::lock_guard<std::mutex> lock(p->ctl_mu);
+        p->stop_requested = true;
+    }
+    p->ctl_cv.notify_all();
+    if (p->pump_thread.joinable())
+        p->pump_thread.join();
+}
+
 ElyPlayer* player_create(void) {
     ElyPlayer* p = new (std::nothrow) ElyPlayer();
     if (!p) return NULL;
     p->state = ELY_STATE_EMPTY;
-    p->volume = 1.0f;
+    p->pub_volume.store(1.0f, std::memory_order_relaxed);
     p->hwnd = NULL;
     p->target_w = p->target_h = 0;
     p->last_error[0] = 0;
@@ -59,11 +118,17 @@ ElyPlayer* player_create(void) {
     p->audio_eof = p->video_eof = 0;
     p->audio_failures = p->video_failures = 0;
     clock_reset(p->clock, 0.0);
+    player_publish_locked(p);   /* no lock needed yet: nothing else exists */
+    player_start_thread(p);
     return p;
 }
 
 void player_destroy(ElyPlayer* p) {
     if (!p) return;
+    /* Must stop and join the pump thread before touching anything it
+     * might still be using, or this is a use-after-free race against the
+     * thread's own in-flight settle/pump call. */
+    player_stop_thread(p);
     player_reset_pipeline(p);          /* frees queued packet payloads */
     if (p->demux) mp4_close(p->demux);
     if (p->audio_out) audio_out_close(p->audio_out);
@@ -110,7 +175,8 @@ int player_prepare_pipeline(ElyPlayer* p) {
         if (!audio_out_open(p->audio_out, p->demux->sample_rate,
                             p->demux->channels))
             return 0;
-        audio_out_set_volume(p->audio_out, p->volume);
+        audio_out_set_volume(p->audio_out,
+                             p->pub_volume.load(std::memory_order_relaxed));
         /* A reset mid-play (seek, restart) re-opens the sink with its
          * clock stopped; a PLAYING player needs it running again or the
          * playhead freezes and end-of-media becomes unreachable. */
@@ -190,15 +256,21 @@ int player_pipeline_drained(const ElyPlayer* p) {
 
 /* Stepped pipeline pump, paced by the playback clock: decode only what is
  * due within a small horizon so the engine plays through media in real
- * time, bounded per call so ABI getters stay near-non-blocking. Known
- * transitional limitation, accepted deliberately: when decode runs slower
+ * time, bounded per call so a single call cannot run forever. Called only
+ * from the pump thread now (via player_settle(), from player_thread_main),
+ * never from a getter - see player.h's own note on why that distinction
+ * exists. Known transitional limitation, unchanged from before this
+ * threading fix and still accepted deliberately: when decode runs slower
  * than real time (sanitizer builds; later, real codecs on slow machines),
  * a single pump call can spend significant wall time catching up to a
- * clock that keeps advancing. The threaded pipeline phase moves decode off
- * the caller entirely and retires this pump; until then, tests pace their
- * fixtures to the build. Once the clock reaches the duration the horizon
- * opens to drain the tail, and if one call cannot finish it, the next
- * one does. */
+ * clock that keeps advancing. That wall time used to block whichever
+ * caller happened to trigger it; now it only ever blocks the pump thread
+ * itself, whose only job is exactly this, and other callers proceed as
+ * soon as they can acquire ctl_mu after the current step. The threaded
+ * demux/decode/render split described in the wider engine rewrite plan
+ * retires this pump entirely; until then, tests pace their fixtures to
+ * the build. Once the clock reaches the duration the horizon opens to
+ * drain the tail, and if one call cannot finish it, the next one does. */
 int player_pump(ElyPlayer* p) {
     if (!p || p->state != ELY_STATE_PLAYING) return 0;
     if (!player_prepare_pipeline(p)) return -1;
