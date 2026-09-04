@@ -29,6 +29,18 @@ substitutions; and GetModuleHandleW gets an explicit HMODULE restype for
 the same reason, since ctypes silently assumes a 32-bit c_int return for
 any function whose restype was never set, which is not safe for a handle
 value on 64-bit Windows.
+
+Z-order note: move() and show() force this window to the top of its
+Z-order among its own siblings (WS_CHILD windows sharing the same parent)
+on every call, rather than leaving Z-order untouched as an earlier version
+of this file did. pywebview's WinForms backend adds its WebView2 control
+directly to the host Form's Controls collection, which makes WebView2's
+own HWND a direct child of the same Form HWND this window also attaches
+to - true Z-order siblings, not unrelated windows. A child window is not
+guaranteed to stay above a sibling added or repainted later purely from
+creation order, and this class of app (a raw child HWND that must stay
+visually above a browser control hosted in the same parent) is exactly
+where relying on default Z-order has been the wrong assumption.
 """
 from __future__ import annotations
 
@@ -55,8 +67,10 @@ if IS_WINDOWS:
     WS_CLIPCHILDREN = 0x02000000
     SW_HIDE = 0
     SW_SHOWNA = 8            # show without stealing activation
-    SWP_NOZORDER = 0x0004
+    HWND_TOP = 0             # SetWindowPos special value, not a real handle
     SWP_NOACTIVATE = 0x0010
+    SWP_NOSIZE = 0x0001
+    SWP_NOMOVE = 0x0002
     WM_CLOSE = 0x0010
     WM_DESTROY = 0x0002
     BLACK_BRUSH = 4
@@ -182,6 +196,14 @@ class VideoHost:
             self.child_hwnd = int(hwnd)
             log.debug("video host child window created: hwnd=%r parent=%r",
                      self.child_hwnd, self.parent_hwnd)
+            # Forced immediately on creation too, not just on the next
+            # move()/show(): a window that starts out behind WebView2's own
+            # HWND has nothing else promoting it to the front until the
+            # first geometry update, which is one extra frame of "nothing
+            # visible yet" at minimum, and depending on timing might not
+            # happen before the first real video frame is presented.
+            user32.SetWindowPos(self.child_hwnd, HWND_TOP, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
         finally:
             self._created.set()
 
@@ -229,13 +251,20 @@ class VideoHost:
 
     def move(self, x: int, y: int, w: int, h: int) -> None:
         if self.ensure_child():
-            user32.SetWindowPos(self.child_hwnd, None,
+            # HWND_TOP, not SWP_NOZORDER: forces this window back to the
+            # front of its Z-order siblings on every reposition, rather
+            # than trusting whatever order it happened to end up in. See
+            # the module docstring's Z-order note for why that trust was
+            # misplaced.
+            user32.SetWindowPos(self.child_hwnd, HWND_TOP,
                                 int(x), int(y), int(w), int(h),
-                                SWP_NOZORDER | SWP_NOACTIVATE)
+                                SWP_NOACTIVATE)
 
     def show(self) -> None:
         if self.ensure_child():
             user32.ShowWindow(self.child_hwnd, SW_SHOWNA)
+            user32.SetWindowPos(self.child_hwnd, HWND_TOP, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def hide(self) -> None:
         if self.available and self.child_hwnd \
