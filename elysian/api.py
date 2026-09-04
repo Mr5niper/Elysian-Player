@@ -100,15 +100,9 @@ class Api:
         # to communicate a couple of dozen changed rows.
         self._dirty: set[int] = set()
         self._meta_revision = 0
-        # Diagnostic only: throttles the native-engine state/error log added
-        # while chasing the video pipeline. Safe to leave in place afterward,
-        # it costs nothing when nothing is playing video and logs at most
-        # once a second when something is.
-        self._last_video_diag = 0.0
         # Throttles how often the worker loop touches the native engine at
         # all (see _run's own comment on ENGINE_POLL_INTERVAL for why this
-        # exists). Kept separate from _last_video_diag: that one throttles
-        # a debug log, unrelated to whether the engine gets called.
+        # exists).
         self._last_engine_poll = 0.0
 
         self._snapshot: dict = {
@@ -173,47 +167,11 @@ class Api:
                     else:
                         self._ensure_art(track)
                         self._ensure_peaks(track)
-                    self._log_video_diag(track)
                     self._rebuild_snapshot()
             except Exception:
                 # An invariant failure here would otherwise repeat silently
                 # every 40ms forever.
                 log.exception("worker maintenance pass failed")
-
-    def _log_video_diag(self, track) -> None:
-        """Diagnostic only, throttled to once a second: makes the native
-        engine's own ely_get_state()/ely_get_last_error() visible in the log
-        while a video plays, since nothing previously asked the engine
-        anything beyond position/duration. Both ABI calls already existed;
-        this only wires them to the log. Safe to remove once the video
-        pipeline is confirmed working end to end."""
-        if track is None or not track.has_video or not self._engine.active:
-            return
-        now = time.monotonic()
-        if now - self._last_video_diag < 1.0:
-            return
-        self._last_video_diag = now
-        stats = self._engine.native_stats()
-        if stats is None:
-            log.debug(
-                "video diag: native_state=%s pos=%.2f dur=%.2f "
-                "native_last_error=%r stats=unavailable",
-                self._engine.native_state_name, self._engine.position,
-                self._engine.duration, self._engine.native_last_error)
-        else:
-            log.debug(
-                "video diag: native_state=%s pos=%.2f dur=%.2f "
-                "native_last_error=%r audio_ready=%d video_ready=%d "
-                "audio_writes=%d video_presents=%d video_bytes=%d "
-                "video_attached=%d audio_failures=%d video_failures=%d "
-                "demux_eof=%d audio_eof=%d video_eof=%d",
-                self._engine.native_state_name, self._engine.position,
-                self._engine.duration, self._engine.native_last_error,
-                stats.audio_ready, stats.video_ready, stats.audio_writes,
-                stats.video_presents, stats.video_bytes,
-                stats.video_attached, stats.audio_failures,
-                stats.video_failures, stats.demux_eof, stats.audio_eof,
-                stats.video_eof)
 
     def _dispatch(self, cmd) -> None:
         name, args = cmd[0], cmd[1:]
