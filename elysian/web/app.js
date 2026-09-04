@@ -47,20 +47,57 @@ function setClass(el, key, cls, on) {
    The host binds a native child window over #video-slot (D.2). JS only
    measures; all window and engine work happens on the Python side. */
 
+/* The current track's real pixel dimensions, learned from the engine at
+   play time and carried on the track row ever since (Api._do_play_id).
+   null if unknown, e.g. before the first play of a video has completed. */
+function currentVideoAspect() {
+  const t = state.tracks.find((x) => x.id === state.current_id);
+  if (t && t.width > 0 && t.height > 0) return t.width / t.height;
+  return null;
+}
+
 function slotRect() {
   const el = $("video-slot");
   if (!el || el.closest(".hidden")) return null;
   const r = el.getBoundingClientRect();
   if (!r.width || !r.height) return null;
+
+  /* #video-slot is a fixed CSS box (full width, capped height), not the
+     video's own shape, so filling it outright stretches the picture
+     non-uniformly - most visible maximised, where the box grows much
+     wider while its height stays capped. The native window is sized to
+     the largest rect of the video's own aspect ratio that fits inside the
+     slot, centered, with the slot's own black background showing through
+     on whichever sides do not fill (letterboxed or pillarboxed, matching
+     how any normal video player sizes its picture). aspect is null before
+     the first play of a video has told the shell its real dimensions;
+     the slot's own box is used unmodified until then, which is only ever
+     the empty placeholder state anyway, so there is nothing to distort
+     yet regardless. */
+  let { left, top, width, height } = r;
+  const aspect = currentVideoAspect();
+  if (aspect) {
+    const boxAspect = width / height;
+    if (aspect > boxAspect) {
+      const fitHeight = width / aspect;
+      top += (height - fitHeight) / 2;
+      height = fitHeight;
+    } else if (aspect < boxAspect) {
+      const fitWidth = height * aspect;
+      left += (width - fitWidth) / 2;
+      width = fitWidth;
+    }
+  }
+
   /* getBoundingClientRect is CSS pixels; SetWindowPos wants physical
      pixels. Under 125% or 150% display scaling the unscaled rect lands the
      child at the wrong place and size, so scale by devicePixelRatio. */
   const dpr = window.devicePixelRatio || 1;
   return {
-    x: Math.round(r.left * dpr),
-    y: Math.round(r.top * dpr),
-    width: Math.round(r.width * dpr),
-    height: Math.round(r.height * dpr),
+    x: Math.round(left * dpr),
+    y: Math.round(top * dpr),
+    width: Math.round(width * dpr),
+    height: Math.round(height * dpr),
   };
 }
 
