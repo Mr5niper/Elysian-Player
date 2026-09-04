@@ -106,6 +106,40 @@ def find_library(explicit: str | None = None) -> str | None:
     return None
 
 
+def _add_dll_search_dirs(lib_path: str) -> None:
+    """Make elysian_video_real.dll's own dependencies findable.
+
+    Since Python 3.8, ctypes' DLL loader on Windows no longer implicitly
+    searches a loaded DLL's own directory for its dependencies (Windows'
+    own "safe DLL search mode" hardening); os.add_dll_directory() is the
+    replacement, and it has to be called before the WinDLL() call below,
+    not after.
+
+    Two directories are added, covering both places the FFmpeg runtime
+    DLLs can legitimately be: next to the engine DLL itself (true for a
+    frozen build, since PyInstaller's onefile bootloader extracts
+    elysian_video_real.dll and its FFmpeg runtime DLLs into the same
+    _MEIPASS temp directory), and third_party/ffmpeg/bin at the repo root
+    (true when running from source, since nothing else ever copies the
+    fetched FFmpeg build's DLLs anywhere near the engine DLL - BUILD_EXE.bat
+    only ever embeds them into the frozen exe). Missing directories and
+    Windows' own rejection of a bad path are both non-fatal: the
+    subsequent WinDLL() call surfaces its own real error either way, which
+    is what actually matters to the caller.
+    """
+    if os.name != "nt" or not hasattr(os, "add_dll_directory"):
+        return
+    candidates = [Path(lib_path).resolve().parent]
+    here = Path(__file__).resolve()
+    candidates.append(here.parents[2] / "third_party" / "ffmpeg" / "bin")
+    for d in candidates:
+        try:
+            if d.is_dir():
+                os.add_dll_directory(str(d))
+        except OSError:
+            pass
+
+
 class NativeLib:
     """Owns the loaded library and the raw call surface.
 
@@ -114,6 +148,7 @@ class NativeLib:
     """
 
     def __init__(self, lib_path: str):
+        _add_dll_search_dirs(lib_path)
         loader = ctypes.WinDLL if os.name == "nt" else ctypes.CDLL
         self.path = lib_path
         self.lib = loader(lib_path)
