@@ -79,6 +79,11 @@ class Api:
         # to communicate a couple of dozen changed rows.
         self._dirty: set[int] = set()
         self._meta_revision = 0
+        # Diagnostic only: throttles the native-engine state/error log added
+        # while chasing the video pipeline. Safe to leave in place afterward,
+        # it costs nothing when nothing is playing video and logs at most
+        # once a second when something is.
+        self._last_video_diag = 0.0
 
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
@@ -138,11 +143,31 @@ class Api:
                 else:
                     self._ensure_art(track)
                     self._ensure_peaks(track)
+                self._log_video_diag(track)
                 self._rebuild_snapshot()
             except Exception:
                 # An invariant failure here would otherwise repeat silently
                 # every 40ms forever.
                 log.exception("worker maintenance pass failed")
+
+    def _log_video_diag(self, track) -> None:
+        """Diagnostic only, throttled to once a second: makes the native
+        engine's own ely_get_state()/ely_get_last_error() visible in the log
+        while a video plays, since nothing previously asked the engine
+        anything beyond position/duration. Both ABI calls already existed;
+        this only wires them to the log. Safe to remove once the video
+        pipeline is confirmed working end to end."""
+        if track is None or not track.has_video or not self._engine.active:
+            return
+        now = time.monotonic()
+        if now - self._last_video_diag < 1.0:
+            return
+        self._last_video_diag = now
+        log.debug(
+            "video diag: native_state=%s pos=%.2f dur=%.2f "
+            "native_last_error=%r",
+            self._engine.native_state_name, self._engine.position,
+            self._engine.duration, self._engine.native_last_error)
 
     def _dispatch(self, cmd) -> None:
         name, args = cmd[0], cmd[1:]

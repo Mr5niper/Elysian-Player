@@ -81,6 +81,21 @@ class MediaController:
     def height(self) -> int:
         return self._video.height if self._kind == "video" else 0
 
+    @property
+    def native_state_name(self) -> str:
+        """Diagnostic passthrough: the video engine's own ely_get_state(),
+        empty string when the current track is not video (nothing native
+        to report; the audio engine has no equivalent internal states)."""
+        if self._kind != "video":
+            return ""
+        return getattr(self._video, "native_state_name", "")
+
+    @property
+    def native_last_error(self) -> str:
+        if self._kind != "video":
+            return ""
+        return getattr(self._video, "native_last_error", "")
+
     def set_video_target(self, hwnd: int) -> None:
         self._video.set_video_target(hwnd)
 

@@ -12,7 +12,7 @@ Not wired into Api yet, deliberately: the plan integrates the shell only
 after the engine behind the frozen ABI is proven.
 """
 from .. import logs
-from .bindings import (ElyMediaInfo, MEDIA_VIDEO, NativeLib,
+from .bindings import (ElyMediaInfo, MEDIA_VIDEO, NativeLib, STATE_NAMES,
                        VideoEngineError, find_library)
 
 log = logs.get("video")
@@ -157,6 +157,27 @@ class VideoPlaybackEngine:
         if not self.available:
             return 0.0
         return float(self._lib.lib.ely_get_duration(self._handle))
+
+    @property
+    def native_state_name(self) -> str:
+        """The engine's own ely_get_state(), by name.
+
+        Diagnostic only: lets the shell log what the native pipeline is
+        actually doing (playing cleanly vs. promoted to ERROR after
+        repeated decode failure) without needing a native rebuild to add
+        visibility, since this ABI call already existed.
+        """
+        if not self.available or not self._handle:
+            return "UNAVAILABLE"
+        return STATE_NAMES.get(
+            self._lib.lib.ely_get_state(self._handle), "?")
+
+    @property
+    def native_last_error(self) -> str:
+        """The engine's own ely_get_last_error(). Empty string if none set."""
+        if not self.available or not self._handle:
+            return ""
+        return self._lib.lib.ely_get_last_error(self._handle) or ""
 
     # -- media geometry, for the shell's future video pane ----------------------
 
