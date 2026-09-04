@@ -30,24 +30,55 @@ WEB_DIR = "elysian/web"
 def _native_hwnd(win) -> int:
     """Best-effort extraction of the native top-level HWND from pywebview.
 
-    The WinForms backend exposes the Form as win.native with a .Handle;
-    other backends differ, so every candidate is tried and failure means
-    the video child window simply never appears, with the rest of the app
-    unaffected."""
+    The WinForms backend sets win.native to the pythonnet-wrapped WinForms
+    Form itself (confirmed against pywebview's own source: "self.
+    pywebview_window.native = self" in its winforms backend), and that
+    Form's .Handle is a .NET System.IntPtr, not a plain Python int - it
+    has to be converted with .ToInt64()/.ToInt32() before int() will do
+    anything useful with it. Calling bare int(hwnd) on the IntPtr object
+    directly silently raised here, meaning every real run fell all the
+    way through to the GetForegroundWindow fallback below - functional
+    by coincidence when the player happens to be focused at that exact
+    moment, and wrong the instant it is not (DevTools, opened by
+    ELYSIAN_DEBUG=1, is a real example of another window that can hold
+    focus at just the wrong moment)."""
     for name in ("native", "gui", "window"):
         obj = getattr(win, name, None)
         if obj is None:
             continue
         for attr in ("Handle", "handle"):
-            hwnd = getattr(obj, attr, None)
-            if hwnd:
-                try:
-                    found = int(hwnd)
-                    log.debug("native top-level hwnd found via win.%s.%s: %r",
-                             name, attr, found)
+            handle = getattr(obj, attr, None)
+            if not handle:
+                continue
+            for conv in ("ToInt64", "ToInt32"):
+                method = getattr(handle, conv, None)
+                if callable(method):
+                    try:
+                        found = int(method())
+                        if found:
+                            log.debug(
+                                "native top-level hwnd found via "
+                                "win.%s.%s.%s(): %r", name, attr, conv,
+                                found)
+                            return found
+                    except (TypeError, ValueError):
+                        continue
+            # Not a .NET IntPtr after all (a different backend, or a
+            # pywebview version that already hands back a plain int) -
+            # the original bare conversion still covers that case.
+            try:
+                found = int(handle)
+                if found:
+                    log.debug(
+                        "native top-level hwnd found via win.%s.%s "
+                        "(plain int): %r", name, attr, found)
                     return found
-                except (TypeError, ValueError):
-                    continue
+            except (TypeError, ValueError):
+                continue
+    log.debug("primary hwnd lookup (win.native/gui/window .Handle) found "
+              "nothing usable; falling back to GetForegroundWindow, which "
+              "is only correct if the player window truly has focus right "
+              "now")
     try:
         import ctypes
         user32 = ctypes.WinDLL("user32", use_last_error=True)
