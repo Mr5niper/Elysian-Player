@@ -170,7 +170,7 @@ echo [INFO] MSVC toolchain ready from "%VSINSTALL%".
 echo =======================================================
 
 :: ==========================================================================
-:: 2. Ensure an LGPL SHARED FFmpeg build is present
+:: 2. Ensure an LGPL SHARED FFmpeg build is present, and miniaudio.h
 :: ==========================================================================
 :: A pinned, moving "latest" tag from a well-known, actively-maintained
 :: Windows FFmpeg build project (BtbN/FFmpeg-Builds). It floats to whatever
@@ -180,7 +180,7 @@ echo =======================================================
 :: variant. See NOTICE at the repo root for why: switching this to a
 :: "gpl-shared" or "nonfree-shared" build would change the license
 :: obligations of the whole shipped exe.
-echo [STEP 2/7] Ensuring an LGPL shared FFmpeg build is present...
+echo [STEP 2/7] Ensuring FFmpeg and miniaudio.h are present...
 set "FFMPEG_DIR=%CD%\third_party\ffmpeg"
 set "FFMPEG_ZIP_URL=https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl-shared.zip"
 
@@ -225,6 +225,43 @@ if exist "%FFMPEG_DIR%\include\libavformat\avformat.h" (
 
 if not exist "%FFMPEG_DIR%\include\libavformat\avformat.h" (
     echo [ERROR] FFmpeg still not found at "%FFMPEG_DIR%" after the ensure step.
+    goto :error
+)
+
+:: miniaudio is a single vendored header (native\elysian_video\
+:: third_party\miniaudio.h), used by audio_out.cpp for the real audio
+:: device backend. It is one plain-text file, not an archive, so this is
+:: just a direct download rather than the fetch/extract/move dance FFmpeg
+:: needs above. Pinned to a commit SHA rather than a tag or branch name
+:: for the same reproducibility reason as everything else fetched here: a
+:: tag can in principle be moved or deleted, a commit SHA cannot. See
+:: native\elysian_video\third_party\MINIAUDIO_README.txt for the exact
+:: version this points at, why, and how to place the file by hand if this
+:: ever fails (no network, GitHub unreachable).
+set "MINIAUDIO_DIR=%CD%\native\elysian_video\third_party"
+set "MINIAUDIO_URL=https://raw.githubusercontent.com/mackron/miniaudio/9634bedb5b5a2ca38c1ee7108a9358a4e233f14d/miniaudio.h"
+
+if exist "%MINIAUDIO_DIR%\miniaudio.h" (
+    echo [INFO] Found existing miniaudio.h; not re-downloading.
+) else (
+    echo [INFO] Downloading miniaudio.h:
+    echo        %MINIAUDIO_URL%
+    if not exist "%MINIAUDIO_DIR%" mkdir "%MINIAUDIO_DIR%"
+    curl -L --fail -o "%MINIAUDIO_DIR%\miniaudio.h" "%MINIAUDIO_URL%"
+    if errorlevel 1 (
+        echo [ERROR] Download failed. Check your network connection, or
+        echo         place miniaudio.h yourself at "%MINIAUDIO_DIR%" - see
+        echo         MINIAUDIO_README.txt next to where it belongs for the
+        echo         exact URL and version.
+        del "%MINIAUDIO_DIR%\miniaudio.h" >nul 2>&1
+        goto :error
+    )
+    echo [INFO] miniaudio.h ready at "%MINIAUDIO_DIR%".
+)
+
+if not exist "%MINIAUDIO_DIR%\miniaudio.h" (
+    echo [ERROR] miniaudio.h still not found at "%MINIAUDIO_DIR%" after the
+    echo         ensure step.
     goto :error
 )
 echo =======================================================

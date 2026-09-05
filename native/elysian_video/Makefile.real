@@ -10,8 +10,12 @@ SRC = src/real/abi_exports.cpp src/real/player.cpp src/real/clock.cpp \
       src/real/queue.cpp src/real/mp4_demux.cpp src/real/aac_decode.cpp \
       src/real/h264_decode.cpp src/real/audio_out.cpp src/real/video_out.cpp
 
+# -ldl: miniaudio dlopen's the real backend library (libasound.so.2,
+# libpulse.so, etc.) at runtime rather than linking it directly, which is
+# what lets one build support multiple backends without a hard dependency
+# on any of them being present at compile time.
 libelysian_video_real.so: $(SRC) include/elysian_video.h
-	$(CXX) $(CXXFLAGS) $(FFMPEG_CFLAGS) -shared -o $@ $(SRC) $(FFMPEG_LIBS)
+	$(CXX) $(CXXFLAGS) $(FFMPEG_CFLAGS) -shared -o $@ $(SRC) $(FFMPEG_LIBS) -ldl
 
 clean:
 	rm -f libelysian_video_real.so
