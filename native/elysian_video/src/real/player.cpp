@@ -10,6 +10,7 @@
 #include <chrono>
 #include <stdlib.h>
 #include <string.h>
+#include <utility>
 #include <wchar.h>
 
 static void clear_info(ElyMediaInfo* info) {
@@ -280,6 +281,23 @@ int player_pump(ElyPlayer* p) {
     if (p->info.duration > 0.0 && now >= p->info.duration)
         horizon = 1e30;                     /* drain the tail */
 
+    /* Frame dropping: decoding stays eager (H.264 inter-frame prediction
+     * means skipping a due frame's decode would corrupt every frame that
+     * depends on it), but PRESENTING every decoded frame the moment it is
+     * ready is what made playback visibly flash/stutter whenever decode
+     * fell even briefly behind real time: catching up inside one pump
+     * call meant several frames got painted within milliseconds of each
+     * other, one clean update's worth of screen time compressed into a
+     * burst, followed by a stall until the next due frame. Only the
+     * newest frame decoded in this call is worth actually painting; it
+     * is buffered here and presented once, after the loop below has
+     * caught up as far as it is going to for this call, instead of once
+     * per decode. Audio gets no equivalent treatment: dropped audio is an
+     * audible gap, not a smoother picture, so every decoded PCM chunk
+     * still writes to the sink unconditionally, exactly as before. */
+    VideoFrame pending_frame;
+    bool have_pending_frame = false;
+
     int work = 0;
     int guard = 2048;
     while (guard-- > 0) {
@@ -331,7 +349,8 @@ int player_pump(ElyPlayer* p) {
             VideoFrame frame;
             int rc = h264_decode_packet(p->video_dec, &pkt, &frame);
             if (rc > 0) {
-                video_out_present(p->video_out, &frame);
+                pending_frame = std::move(frame);
+                have_pending_frame = true;
                 p->video_failures = 0;
             } else if (rc < 0 && ++p->video_failures > 8) {
                 packet_dispose(&pkt);
@@ -345,7 +364,8 @@ int player_pump(ElyPlayer* p) {
             VideoFrame frame;
             int rc = h264_decode_packet(p->video_dec, nullptr, &frame);
             if (rc > 0) {
-                video_out_present(p->video_out, &frame);
+                pending_frame = std::move(frame);
+                have_pending_frame = true;
             } else {
                 p->video_eof = 1;
             }
@@ -362,6 +382,8 @@ int player_pump(ElyPlayer* p) {
             break;
         }
     }
+    if (have_pending_frame)
+        video_out_present(p->video_out, &pending_frame);
     return work;
 }
 
