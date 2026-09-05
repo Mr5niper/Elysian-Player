@@ -47,6 +47,15 @@ third_party/ffmpeg/
 third_party/ffmpeg_download.zip
 third_party/ffmpeg_extract/
 
+# ---- Fetched miniaudio.h ----
+# BUILD_EXE.bat downloads this single vendored header automatically (see
+# its "Ensure FFmpeg and miniaudio.h" step), pinned to a specific commit;
+# re-fetching it is what makes native/elysian_video/third_party/
+# reproducible from a clean checkout, the same reasoning as third_party/
+# ffmpeg/ above. MINIAUDIO_README.txt, alongside it in the same folder,
+# is unaffected and stays tracked.
+native/elysian_video/third_party/miniaudio.h
+
 # ---- OS / editor cruft ----
 .DS_Store
 Thumbs.db
