@@ -16,5 +16,8 @@ struct VideoOut {
 int video_out_attach(VideoOut* v, void* hwnd);
 void video_out_detach(VideoOut* v);
 int video_out_resize(VideoOut* v, int w, int h);
-int video_out_present(VideoOut* v, const VideoFrame* frame);
+/* Non-const: moves the caller's frame into the retained buffer instead of
+ * copying it. See the comment on the definition in video_out.cpp for why
+ * this is safe with player_pump()'s only call site. */
+int video_out_present(VideoOut* v, VideoFrame* frame);
 void video_out_clear(VideoOut* v);

@@ -86,15 +86,15 @@ int aac_decode_packet(AacDecoder* d, const Packet* pkt, PcmFrame* out) {
     AVFrame* frame = static_cast<AVFrame*>(d->frame);
 
     if (pkt) {
-        if (!pkt->data || pkt->size == 0)
+        if (pkt->data.empty())
             return -1;   /* explicit reject: zero-byte input is never valid */
         AVPacket* avpkt = av_packet_alloc();
         if (!avpkt) return -1;
-        if (av_new_packet(avpkt, (int)pkt->size) < 0) {
+        if (av_new_packet(avpkt, (int)pkt->data.size()) < 0) {
             av_packet_free(&avpkt);
             return -1;
         }
-        memcpy(avpkt->data, pkt->data, pkt->size);
+        memcpy(avpkt->data, pkt->data.data(), pkt->data.size());
         avpkt->pts = (int64_t)llround(pkt->pts * 1000000.0);
         d->last_sent_pts = pkt->pts;
         int send_rc = avcodec_send_packet(ctx, avpkt);

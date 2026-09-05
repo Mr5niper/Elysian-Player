@@ -227,20 +227,21 @@ int player_fill_queues(ElyPlayer* p, int max_packets) {
             p->demux_eof = 1;
             break;
         }
+        /* One copy here is unavoidable: demux_buf is a reused scratch
+         * buffer refilled by mp4_next_sample on every call, so the bytes
+         * it holds right now must land somewhere that outlives the next
+         * call before this loop continues. Packet's own vector no longer
+         * needs a paired malloc/free the way a raw pointer did; this
+         * assign is the same one copy the old malloc+memcpy pair did,
+         * just through a container that manages its own lifetime. */
         Packet pkt;
-        memset(&pkt, 0, sizeof(pkt));
-        pkt.size = out_size;
-        pkt.data = (unsigned char*)malloc(out_size ? out_size : 1);
-        if (!pkt.data) break;
-        memcpy(pkt.data, p->demux_buf.data(), out_size);
+        pkt.data.assign(p->demux_buf.data(), p->demux_buf.data() + out_size);
         pkt.pts = out_pts;
         pkt.duration = out_duration;
         pkt.stream_kind = got_kind;
         pkt.keyframe = out_keyframe;
-        if (!queue_push(target, pkt)) {
-            packet_dispose(&pkt);
+        if (!queue_push(target, std::move(pkt)))
             break;
-        }
         filled++;
     }
     return filled;
@@ -260,7 +261,7 @@ int player_pipeline_drained(const ElyPlayer* p) {
  * time, bounded per call so a single call cannot run forever. Called only
  * from the pump thread now (via player_settle(), from player_thread_main),
  * never from a getter - see player.h's own note on why that distinction
- * exists. Known transitional limitation, unchanged from before this
+ * exists. Known transitional limitation, unchanged from before the
  * threading fix and still accepted deliberately: when decode runs slower
  * than real time (sanitizer builds; later, real codecs on slow machines),
  * a single pump call can spend significant wall time catching up to a
@@ -271,7 +272,17 @@ int player_pipeline_drained(const ElyPlayer* p) {
  * demux/decode/render split described in the wider engine rewrite plan
  * retires this pump entirely; until then, tests pace their fixtures to
  * the build. Once the clock reaches the duration the horizon opens to
- * drain the tail, and if one call cannot finish it, the next one does. */
+ * drain the tail, and if one call cannot finish it, the next one does.
+ *
+ * Presents every decoded video frame immediately, one call to
+ * video_out_present() per decoded frame. A frame-dropping variant of this
+ * (buffer only the newest frame per pump() call, present once) was tried
+ * and reported to make playback visibly slower and worse, not better, and
+ * was reverted without a confirmed root cause - not something to retry
+ * blindly a second time. Decoupling decode from presentation properly
+ * (a real decoded-frame queue with explicit stale-frame dropping against
+ * the playback clock) is real, worthwhile future work, flagged
+ * separately rather than attempted again here. */
 int player_pump(ElyPlayer* p) {
     if (!p || p->state != ELY_STATE_PLAYING) return 0;
     if (!player_prepare_pipeline(p)) return -1;
@@ -280,23 +291,6 @@ int player_pump(ElyPlayer* p) {
     double horizon = now + 0.5;
     if (p->info.duration > 0.0 && now >= p->info.duration)
         horizon = 1e30;                     /* drain the tail */
-
-    /* Frame dropping: decoding stays eager (H.264 inter-frame prediction
-     * means skipping a due frame's decode would corrupt every frame that
-     * depends on it), but PRESENTING every decoded frame the moment it is
-     * ready is what made playback visibly flash/stutter whenever decode
-     * fell even briefly behind real time: catching up inside one pump
-     * call meant several frames got painted within milliseconds of each
-     * other, one clean update's worth of screen time compressed into a
-     * burst, followed by a stall until the next due frame. Only the
-     * newest frame decoded in this call is worth actually painting; it
-     * is buffered here and presented once, after the loop below has
-     * caught up as far as it is going to for this call, instead of once
-     * per decode. Audio gets no equivalent treatment: dropped audio is an
-     * audible gap, not a smoother picture, so every decoded PCM chunk
-     * still writes to the sink unconditionally, exactly as before. */
-    VideoFrame pending_frame;
-    bool have_pending_frame = false;
 
     int work = 0;
     int guard = 2048;
@@ -349,8 +343,7 @@ int player_pump(ElyPlayer* p) {
             VideoFrame frame;
             int rc = h264_decode_packet(p->video_dec, &pkt, &frame);
             if (rc > 0) {
-                pending_frame = std::move(frame);
-                have_pending_frame = true;
+                video_out_present(p->video_out, &frame);
                 p->video_failures = 0;
             } else if (rc < 0 && ++p->video_failures > 8) {
                 packet_dispose(&pkt);
@@ -364,8 +357,7 @@ int player_pump(ElyPlayer* p) {
             VideoFrame frame;
             int rc = h264_decode_packet(p->video_dec, nullptr, &frame);
             if (rc > 0) {
-                pending_frame = std::move(frame);
-                have_pending_frame = true;
+                video_out_present(p->video_out, &frame);
             } else {
                 p->video_eof = 1;
             }
@@ -382,8 +374,6 @@ int player_pump(ElyPlayer* p) {
             break;
         }
     }
-    if (have_pending_frame)
-        video_out_present(p->video_out, &pending_frame);
     return work;
 }
 

@@ -63,9 +63,14 @@ void h264_flush(H264Decoder* d) {
 static int ensure_sws(H264Decoder* d, AVFrame* f) {
     SwsContext* sws = static_cast<SwsContext*>(d->sws);
     if (sws) return 1;
+    /* SWS_BICUBIC over the previous SWS_BILINEAR: a real, standalone
+     * contributor to soft-looking scaled output, independent of the GDI
+     * presentation path's own scaling quality. Costs somewhat more CPU
+     * per frame than bilinear; if that turns out to matter on real
+     * hardware this is a one-flag revert, not a structural change. */
     sws = sws_getContext(f->width, f->height, (AVPixelFormat)f->format,
                          d->width, d->height, AV_PIX_FMT_BGRA,
-                         SWS_BILINEAR, nullptr, nullptr, nullptr);
+                         SWS_BICUBIC, nullptr, nullptr, nullptr);
     if (!sws) return 0;
     d->sws = sws;
     return 1;
@@ -77,15 +82,15 @@ int h264_decode_packet(H264Decoder* d, const Packet* pkt, VideoFrame* out) {
     AVFrame* frame = static_cast<AVFrame*>(d->frame);
 
     if (pkt) {
-        if (!pkt->data || pkt->size == 0)
+        if (pkt->data.empty())
             return -1;   /* explicit reject: zero-byte input is never valid */
         AVPacket* avpkt = av_packet_alloc();
         if (!avpkt) return -1;
-        if (av_new_packet(avpkt, (int)pkt->size) < 0) {
+        if (av_new_packet(avpkt, (int)pkt->data.size()) < 0) {
             av_packet_free(&avpkt);
             return -1;
         }
-        memcpy(avpkt->data, pkt->data, pkt->size);
+        memcpy(avpkt->data, pkt->data.data(), pkt->data.size());
         avpkt->pts = (int64_t)llround(pkt->pts * 1000000.0);
         avpkt->flags = pkt->keyframe ? AV_PKT_FLAG_KEY : 0;
         d->last_sent_pts = pkt->pts;
