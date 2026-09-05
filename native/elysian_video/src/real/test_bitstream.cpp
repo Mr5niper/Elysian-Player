@@ -94,8 +94,7 @@ int main(int argc, char** argv) {
                                  &kf) && "real_av.mp4 must carry audio");
 
         Packet pkt{};
-        pkt.data = pkt_bytes.data();
-        pkt.size = pkt_bytes.size();
+        pkt.data = pkt_bytes;
         pkt.pts = pts;
         PcmFrame out;
         int rc = 0;
@@ -107,8 +106,7 @@ int main(int argc, char** argv) {
             if (rc <= 0) {
                 assert(first_real_packet(wpath, ELY_MEDIA_AUDIO, &pkt_bytes,
                                          &pts, &kf));
-                pkt.data = pkt_bytes.data();
-                pkt.size = pkt_bytes.size();
+                pkt.data = pkt_bytes;
                 pkt.pts = pts;
             }
         }
@@ -123,8 +121,7 @@ int main(int argc, char** argv) {
         /* malformed: garbage bytes must be rejected, not crash */
         unsigned char garbage[8] = {0xFF, 0x00, 0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0x01};
         Packet bad{};
-        bad.data = garbage;
-        bad.size = sizeof(garbage);
+        bad.data.assign(garbage, garbage + sizeof(garbage));
         PcmFrame bad_out;
         int bad_rc = aac_decode_packet(&d, &bad, &bad_out);
         assert(bad_rc < 0 && "garbage AAC data must be rejected, not accepted");
@@ -150,8 +147,7 @@ int main(int argc, char** argv) {
         assert(kf && "the first video packet in a file must be a keyframe");
 
         Packet pkt{};
-        pkt.data = pkt_bytes.data();
-        pkt.size = pkt_bytes.size();
+        pkt.data = pkt_bytes;
         pkt.pts = pts;
         pkt.keyframe = kf;
         VideoFrame out;
@@ -169,8 +165,7 @@ int main(int argc, char** argv) {
         /* malformed: garbage NAL bytes must be rejected, not crash */
         unsigned char garbage[6] = {0x65, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
         Packet bad{};
-        bad.data = garbage;
-        bad.size = sizeof(garbage);
+        bad.data.assign(garbage, garbage + sizeof(garbage));
         VideoFrame bad_out;
         int bad_rc = h264_decode_packet(&d, &bad, &bad_out);
         assert(bad_rc < 0 && "garbage H.264 data must be rejected, not accepted");

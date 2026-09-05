@@ -280,9 +280,7 @@ int main(int argc, char** argv) {
         mp4_seek(p->demux, 0.0);
         while (p->video_q->count < p->video_q->cap) {
             Packet dummy;
-            memset(&dummy, 0, sizeof(dummy));
-            dummy.data = (unsigned char*)malloc(1);
-            dummy.size = 1;
+            dummy.data.assign(1, 0);
             dummy.stream_kind = 2;
             assert(queue_push(p->video_q, dummy));
         }
@@ -307,9 +305,8 @@ int main(int argc, char** argv) {
         auto guard = player_guard(p);
         for (int i = 0; i < 12; i++) {
             Packet bad;
-            memset(&bad, 0, sizeof(bad));
-            bad.data = (unsigned char*)malloc(1);
-            bad.size = 0;                       /* malformed: no bytes */
+            /* data stays empty on purpose: this is the malformed,
+             * zero-byte case the decoder must reject every time. */
             bad.stream_kind = 1;
             bad.pts = 0.0;                      /* always due */
             assert(queue_push(p->audio_q, bad));

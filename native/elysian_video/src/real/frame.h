@@ -4,17 +4,29 @@
 
 /* The one shared definition of the pipeline's data types. The Part C plan
  * defined Packet in three headers at once, which cannot compile; everything
- * includes this instead. Ownership rule for Packet.data: allocated by the
- * demux pump in player.cpp, freed by whoever pops it from a queue, and
- * player_reset_pipeline frees anything still queued. */
+ * includes this instead. */
 
 struct Packet {
-    unsigned char* data;
-    size_t size;
-    double pts;
-    double duration;
-    int stream_kind;    /* 1 audio, 2 video, matching ElyMediaKind */
-    int keyframe;
+    /* Owning, move-friendly buffer, replacing a previous raw malloc'd
+     * unsigned char* with manual free() lifetime management. That
+     * required every caller to remember to free it exactly once
+     * (packet_dispose existed specifically to centralize that), and
+     * offered no way to hand a packet to a queue or a decoder without an
+     * explicit malloc+memcpy at each step. A std::vector needs none of
+     * that: default construction, destruction, and moves are all
+     * automatic and correct for free, and every remaining copy in this
+     * pipeline (still one demux-to-packet copy in player_fill_queues,
+     * still one packet-to-AVPacket copy in the decoders - see the
+     * comments at each of those sites for why those two specifically are
+     * not eliminated here) is now an explicit, visible std::vector copy
+     * or assign call rather than a raw memcpy that could as easily have
+     * been a use-after-free or a double-free with the old ownership
+     * model. */
+    std::vector<unsigned char> data;
+    double pts = 0.0;
+    double duration = 0.0;
+    int stream_kind = 0;    /* 1 audio, 2 video, matching ElyMediaKind */
+    int keyframe = 0;
 };
 
 struct PcmFrame {

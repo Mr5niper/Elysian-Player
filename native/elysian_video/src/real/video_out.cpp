@@ -23,6 +23,20 @@ static void paint(VideoOut* v) {
     HDC hdc = GetDC(hwnd);
     if (!hdc) return;
 
+    /* HALFTONE gives StretchDIBits a real interpolated scale instead of
+     * its default nearest-neighbor-ish COLORONCOLOR behavior, which is a
+     * real, standalone contributor to soft/blocky-looking scaled video,
+     * independent of anything the decoder does. SetBrushOrgEx is required
+     * immediately after selecting HALFTONE per Microsoft's own
+     * documentation (it resets the dithering origin GDI uses internally
+     * for the mode); omitting it is a common mistake that leaves the
+     * stretch mode set but subtly misaligned. Cheap enough to always set
+     * before every blit rather than tracking whether it is already
+     * selected on this HDC, since GetDC can hand back a fresh HDC state
+     * on some drivers. */
+    SetStretchBltMode(hdc, HALFTONE);
+    SetBrushOrgEx(hdc, 0, 0, nullptr);
+
     BITMAPINFO bmi;
     ZeroMemory(&bmi, sizeof(bmi));
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -73,12 +87,20 @@ int video_out_resize(VideoOut* v, int w, int h) {
     return 1;
 }
 
-int video_out_present(VideoOut* v, const VideoFrame* frame) {
+int video_out_present(VideoOut* v, VideoFrame* frame) {
+    /* Non-const: takes ownership of the caller's frame via move rather
+     * than copying it. player_pump()'s only call site (a locally-owned,
+     * never-reused VideoFrame right before this call returns) makes this
+     * safe - the caller has nothing left to do with *frame afterward
+     * either way. Full BGRA frame copies here were a real, avoidable
+     * cost on every single presented frame; this removes one of the two
+     * copies in that path entirely (decode's own output buffer is the
+     * other, unavoidable one). */
     if (!v || !frame) return 0;
-    v->last = *frame;
     v->last_pts = frame->pts;
     v->presents++;
     v->bytes_presented += frame->pixels.size();
+    v->last = std::move(*frame);
     v->cleared = 0;
 #ifdef _WIN32
     paint(v);
