@@ -883,9 +883,9 @@ let libArt = {};                 // "artist\u0000album" -> data url or ""
 let libArtSeq = 0;               // last sequence collected from the backend
 let libArtRevision = -1;
 let libArtSeen = new Set();      // already asked for, so no repeats
-let libArtObserver = null;
 let libCards = new Map();        // album key -> its card element
 let libGridSig = "";             // what the grid currently shows
+let libArtWaiting = false;       // covers asked for but not yet collected
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -1048,33 +1048,57 @@ function artKey(card) {
   return `${card.dataset.artist || ""}\u0000${card.dataset.album || ""}`;
 }
 
+/* Tells the backend which albums are on screen, nearest the top of the
+   view first, whenever that changes. It resolves exactly those and throws
+   away anything queued for cards that have scrolled away.
+
+   An observer was queueing every card it passed, so the covers being
+   looked at waited behind a hundred albums already scrolled past. What
+   matters is what is on screen now. */
+const ART_AHEAD = 400;           // px beyond the view to prepare
+let libArtTimer = 0;
+
+function visibleAlbumKeys() {
+  const grid = $("libgrid");
+  const top = grid.scrollTop - ART_AHEAD;
+  const bottom = grid.scrollTop + grid.clientHeight + ART_AHEAD;
+  const wanted = [];
+  for (const [key, card] of libCards) {
+    if (libArt[key] !== undefined) continue;
+    const y = card.offsetTop;
+    if (y + card.offsetHeight < top || y > bottom) continue;
+    wanted.push([Math.abs(y - grid.scrollTop), key]);
+  }
+  // Nearest the top of the view first, so the row being looked at is
+  // resolved before the ones above and below it.
+  wanted.sort((a, b) => a[0] - b[0]);
+  return wanted.map((w) => w[1]);
+}
+
+function reportVisibleArt() {
+  const a = api();
+  if (!a || typeof a.library_visible_art !== "function") return;
+  if (libView !== "albums" || libDetail || libShowFolders) return;
+  const keys = visibleAlbumKeys();
+  if (!keys.length) return;
+  keys.forEach((k) => libArtSeen.add(k));
+  libArtWaiting = true;
+  a.library_visible_art(keys);
+  schedule();
+}
+
 function watchLibArt() {
-  if (libArtObserver) libArtObserver.disconnect();
   libCards = new Map();
   $("libgrid").querySelectorAll(".libcard").forEach((c) =>
     libCards.set(artKey(c), c));
-  const a = api();
-  if (!a || typeof a.library_request_art !== "function") return;
-  libArtObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const card = entry.target;
-      const key = artKey(card);
-      if (libArtSeen.has(key)) continue;
-      libArtSeen.add(key);
-      a.library_request_art(card.dataset.album || "", card.dataset.artist || "");
-    }
-    // Far enough ahead that covers are usually resolved before a card is
-    // actually on screen, which is what stops scrolling waiting on them.
-  }, { root: $("libgrid"), rootMargin: "900px" });
-  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
-    libArtObserver.observe(c));
+  reportVisibleArt();
 }
 
-/* Paints the cards named in `keys`, or every card when given nothing.
-   Walking the whole grid for each arriving cover is what made scrolling a
-   large library expensive: the work should be proportional to the covers
-   that arrived, not to the size of the library. */
+$("libgrid").addEventListener("scroll", () => {
+  clearTimeout(libArtTimer);
+  libArtTimer = setTimeout(reportVisibleArt, 90);
+}, { passive: true });
+
 function paintLibArt(keys) {
   const grid = $("libgrid");
   if (keys && keys.length) {
@@ -1416,6 +1440,7 @@ function applyLibraryTick(tick) {
         if (!(key in libArt)) libArtSeen.delete(key);
       }
       paintLibArt(keys);
+      libArtWaiting = visibleAlbumKeys().length > 0;
       if (libDetail && libDetail.kind === "album") renderLibCover();
     }).catch(() => {});
   }
@@ -1629,6 +1654,9 @@ function pollInterval() {
   if (visibleMissing()) return POLL_FILLING;
   // A library request is in flight, or a scan is filling the index.
   if (libPending > 0 || libScanning) return POLL_FILLING;
+  // Covers are collected on the poll, so a resolved one would otherwise
+  // wait up to a second before it appeared.
+  if (libArtWaiting) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }

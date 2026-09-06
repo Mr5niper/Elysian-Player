@@ -108,8 +108,12 @@ class Api:
         self._library_art_seq = 0
         self._library_art_revision = 0
         self._library_art_pending = set()
-        self._art_pool = ThreadPoolExecutor(
-            max_workers=4, thread_name_prefix="elysian-lib-art")
+        # Covers are resolved by a fixed set of workers reading one queue,
+        # not by a pool taking whatever was submitted first. What matters is
+        # the cards on screen now: a queue that cannot be reordered means
+        # they wait behind every album already scrolled past.
+        self._art_queue: queue.Queue = queue.Queue()
+        self._art_workers = []
         # The playlist scanner consults the index before opening a file. A
         # track the library already knows costs a local lookup instead of a
         # tag read over a share, which is the expensive thing the whole
@@ -1091,19 +1095,24 @@ class Api:
                                 "title": title, "items": items,
                                 "revision": self._library_detail_revision}
 
-    def _do_library_art(self, album, album_artist) -> None:
-        key = f"{album_artist}\u0000{album}"
-        if key in self._library_art or key in self._library_art_pending:
+    def _start_art_workers(self) -> None:
+        if self._art_workers:
             return
-        self._library_art_pending.add(key)
+        for i in range(4):
+            t = threading.Thread(target=self._art_worker,
+                                 name=f"elysian-lib-art-{i}", daemon=True)
+            t.start()
+            self._art_workers.append(t)
 
-        def work():
+    def _art_worker(self) -> None:
+        while not self._closing:
+            try:
+                key, album, artist = self._art_queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
             url = None
             try:
-                # First track with a usable image wins. Albums whose opening
-                # track happens to be untagged still get a cover from a
-                # later one rather than showing the placeholder forever.
-                for path in self._library.album_paths(album, album_artist):
+                for path in self._library.album_paths(album, artist):
                     url = self._art.data_url(path)
                     if url:
                         break
@@ -1112,18 +1121,43 @@ class Api:
                 url = None
             self._post("library_art_ready", key, url)
 
-        # A small pool rather than a thread per album: scrolling a large
-        # library asks for covers faster than they can be decoded, and one
-        # thread each would mean hundreds of them competing.
-        self._art_pool.submit(work)
+    def _do_library_visible_art(self, keys) -> None:
+        """Resolve exactly these albums next, in this order.
+
+        Called whenever the visible cards change. The queue is emptied
+        first: work for cards that have scrolled away is not worth doing
+        ahead of what is on screen, and leaving it there is what made
+        covers appear long after they were needed.
+        """
+        while True:
+            try:
+                dropped = self._art_queue.get_nowait()
+            except queue.Empty:
+                break
+            self._library_art_pending.discard(dropped[0])
+        self._start_art_workers()
+        for key in keys or []:
+            if key in self._library_art or key in self._library_art_pending:
+                continue
+            artist, _, album = str(key).partition("\u0000")
+            self._library_art_pending.add(key)
+            self._art_queue.put((key, album, artist))
+
+    def _do_library_art(self, album, album_artist) -> None:
+        key = f"{album_artist}\u0000{album}"
+        if key in self._library_art or key in self._library_art_pending:
+            return
+        self._library_art_pending.add(key)
+        self._start_art_workers()
+        self._art_queue.put((key, album, album_artist))
 
     def _forget_art_misses(self) -> None:
         """Drop remembered "this album has no cover" answers.
 
         A miss is only true for the tracks indexed at the time it was
-        asked. Folders are committed one at a time, so an album can be
-        half indexed when its card first appears, and the track carrying
-        the artwork may not have arrived yet. Keeping that answer meant the
+        asked. Folders are committed one at a time, so an album can be half
+        indexed when its card first appears and the track carrying the
+        artwork may not have arrived yet. Keeping that answer meant the
         cover never appeared however much of the album turned up later.
         Successful lookups are kept: those cannot become wrong.
         """
@@ -1209,6 +1243,11 @@ class Api:
 
     def library_request_art(self, album, album_artist="") -> None:
         self._post("library_art", str(album or ""), str(album_artist or ""))
+
+    def library_visible_art(self, keys) -> None:
+        """The albums on screen right now, nearest the view first."""
+        self._post("library_visible_art",
+                   [str(k) for k in (keys or []) if k])
 
     def library_get_art(self, since=0) -> dict:
         """Covers resolved after the caller's last sequence number.
@@ -1401,7 +1440,7 @@ class Api:
             log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
-        self._art_pool.shutdown(wait=False)
+
         self._engine.stop()
 
     def _flush_persisted(self) -> None:
@@ -1452,7 +1491,7 @@ class Api:
         "library_request_detail", "library_get_state",
         "library_get_browser", "library_get_detail",
         "library_enqueue", "library_play",
-        "library_request_art", "library_get_art",
+        "library_request_art", "library_visible_art", "library_get_art",
     })
 
     #: Public for the host process only, never called from JavaScript, but
