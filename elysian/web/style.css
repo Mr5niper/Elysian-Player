@@ -321,3 +321,115 @@ html, body {
 
 /* Rows still waiting on a tag read from the network. */
 .row .r-artist:empty::after { content: ""; }
+
+/* ---- library ----
+   Reuses the same tokens as the playlist so the two panes read as one
+   application: same row height, same accent, same muted grey. */
+#view-library { display: flex; flex-direction: column; min-height: 0; }
+
+#libtools {
+  display: flex; gap: 8px; align-items: center;
+  margin-bottom: 8px; flex-shrink: 0;
+}
+#libtabs { display: flex; gap: 4px; }
+.libtab {
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  padding: 6px 12px; color: var(--muted); font-size: 12px;
+  font-family: inherit; cursor: default; white-space: nowrap;
+}
+.libtab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.libtab.active { border-color: var(--accent); color: var(--accent-hi); }
+#libfilter {
+  flex: 1; min-width: 0; background: rgba(0,0,0,0.28);
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 7px 11px; color: var(--text); font-size: 12px;
+  font-family: inherit; outline: none; user-select: text;
+}
+#libfilter:focus { border-color: var(--accent); }
+#libfilter::placeholder { color: #6a6a74; }
+
+#libcrumb {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px; flex-shrink: 0; font-size: 13px;
+}
+#libcrumb.hidden { display: none; }
+#libcrumb .spacer { flex: 1; }
+#libcrumb-title {
+  font-weight: 500; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Album and artist tiles. content-visibility keeps a large grid cheap
+   without the virtualisation the track list needs, since a library pane
+   holds thousands of entries rather than tens of thousands. */
+#libgrid {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  display: grid; gap: 12px; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  padding-right: 4px;
+}
+#libgrid.hidden { display: none; }
+/* Artists and genres render as rows, so the grid columns are dropped.
+   A class, not an inline style, or it would override .hidden above. */
+#libgrid.aslist { display: block; }
+#libgrid::-webkit-scrollbar { width: 9px; }
+#libgrid::-webkit-scrollbar-track { background: transparent; }
+#libgrid::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
+#libgrid::-webkit-scrollbar-thumb:hover { background: #4a3a42; }
+
+.libcard {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 196px;
+  border-radius: 9px; padding: 10px; background: rgba(255,255,255,0.03);
+}
+.libcard:hover { background: rgba(255,255,255,0.07); }
+.libcard:active { background: rgba(192,57,47,0.20); }
+.libcard .art {
+  width: 100%; aspect-ratio: 1 / 1; border-radius: 7px;
+  background: var(--panel-2); display: flex;
+  align-items: center; justify-content: center; margin-bottom: 8px;
+}
+.libcard .art svg { width: 34px; height: 34px; stroke: var(--accent-dim); }
+.libcard .t1, .libcard .t2 {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.libcard .t1 { font-size: 12.5px; font-weight: 500; }
+.libcard .t2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* Rows for the artist and genre lists, and for a selected album. */
+#libtracks {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  position: relative;
+}
+#libtracks.hidden { display: none; }
+#libtracks::-webkit-scrollbar { width: 9px; }
+#libtracks::-webkit-scrollbar-track { background: transparent; }
+#libtracks::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
+.librow {
+  display: grid; align-items: center; gap: 10px; height: 30px;
+  grid-template-columns: 34px minmax(0,1fr) minmax(0,0.6fr) minmax(0,0.5fr) 46px;
+  padding: 0 10px; border-radius: 7px; font-size: 12.5px;
+}
+.librow:hover { background: rgba(255,255,255,0.05); }
+.librow.selected { background: rgba(192,57,47,0.18); }
+.librow .n, .librow .d { color: var(--muted); font-size: 11px; }
+.librow .n { text-align: center; }
+.librow .d { text-align: right; }
+.librow .a, .librow .al { color: var(--muted); }
+.librow .t, .librow .a, .librow .al {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+#libempty {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px; color: var(--muted); text-align: center;
+}
+#libempty.hidden { display: none; }
+#libempty svg { width: 34px; height: 34px; stroke: #4a3a42; }
+
+#libstat {
+  flex-shrink: 0; font-size: 11px; color: var(--muted);
+  padding-top: 8px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}

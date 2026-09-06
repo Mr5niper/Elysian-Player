@@ -58,10 +58,7 @@ class DiscoveryProvider:
         self._cache: dict[str, list[str]] = {}
 
     def search_roots(self, seed_path: str) -> list[Path]:
-        # pathutil.absolute, not Path.resolve(): resolve() follows symlinks
-        # on the filesystem, an extra round trip per call on a network share
-        # and against the abspath-only rule in paths.py.
-        seed = Path(pathutil.absolute(seed_path))
+        seed = Path(seed_path).resolve()
         roots = []
         album = seed.parent
         if not _too_shallow(album):

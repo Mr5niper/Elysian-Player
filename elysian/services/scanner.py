@@ -19,29 +19,94 @@ log = _get_logger("scanner")
 
 
 
+def _first(value, default=""):
+    """mutagen's easy interface returns lists; take the first entry."""
+    if not value:
+        return default
+    if isinstance(value, (list, tuple)):
+        return str(value[0]) if value[0] is not None else default
+    return str(value)
+
+
+def _number(value) -> int:
+    """Track and disc tags are often "3/12", and year is often a full date."""
+    raw = _first(value, "").strip()
+    if not raw:
+        return 0
+    head = raw.split("/")[0].split("-")[0].strip()
+    digits = "".join(c for c in head if c.isdigit())
+    if not digits:
+        return 0
+    try:
+        return int(digits)
+    except ValueError:
+        return 0
+
+
+def _raw(meta, frame: str) -> str:
+    """Raw ID3 frame, for containers whose easy interface omits them."""
+    try:
+        got = meta.get(frame)
+    except Exception:
+        return ""
+    if got is None:
+        return ""
+    return _first(getattr(got, "text", got), "")
+
+
+#: Everything one file yields. The library stores all of it, the playlist
+#: view uses a subset; one reader means a track scanned for either purpose
+#: is usable by the other.
+EMPTY_METADATA = {
+    "title": "", "artist": "", "album": "", "length": 0.0,
+    "album_artist": "", "genre": "", "track_number": 0,
+    "disc_number": 0, "year": 0,
+}
+
+
 def read_metadata(path: str) -> dict:
     """Read tags for one file. Never raises."""
-    info = {"title": "", "artist": "", "album": "", "length": 0.0}
+    info = dict(EMPTY_METADATA)
     try:
         from mutagen import File
 
         meta = File(path, easy=True)
         if meta is None:
+            info["title"] = Path(path).stem
             return info
         if meta.info is not None:
             info["length"] = float(getattr(meta.info, "length", 0.0) or 0.0)
-        for key, field in (("title", "title"), ("artist", "artist"),
-                           ("album", "album")):
-            value = meta.get(key)
-            if value:
-                info[field] = str(value[0])
+        for tag, field in (("title", "title"), ("artist", "artist"),
+                           ("album", "album"), ("genre", "genre")):
+            info[field] = _first(meta.get(tag), "")
+        # WAV carries ID3 too, but mutagen's easy interface exposes raw
+        # frame names for it rather than the friendly ones, so the lookups
+        # above come back empty and the tags are silently lost. Fall back to
+        # the frames directly when that happens.
+        if not any((info["title"], info["artist"], info["album"])):
+            _frames = {"title": "TIT2", "artist": "TPE1", "album": "TALB",
+                       "genre": "TCON"}
+            for field, frame in _frames.items():
+                if not info[field]:
+                    got = meta.get(frame)
+                    if got is not None:
+                        info[field] = _first(getattr(got, "text", got), "")
+        # Spelled two different ways depending on the container; try both
+        # rather than losing it on one format.
+        info["album_artist"] = (_first(meta.get("albumartist"), "")
+                                or _first(meta.get("album artist"), "")
+                                or _raw(meta, "TPE2"))
+        info["track_number"] = _number(meta.get("tracknumber")
+                                       or _raw(meta, "TRCK"))
+        info["disc_number"] = _number(meta.get("discnumber")
+                                      or _raw(meta, "TPOS"))
+        info["year"] = _number(meta.get("date") or meta.get("year")
+                               or _raw(meta, "TDRC"))
     except Exception:
         log.warning("could not read tags from %s", path, exc_info=True)
     if not info["title"]:
         info["title"] = Path(path).stem
     return info
-
-
 class MetadataScanner:
     """Owns a single worker thread and a result queue."""
 
@@ -58,6 +123,9 @@ class MetadataScanner:
         self._seq = itertools.count()
         self._results: queue.Queue = queue.Queue()
         self._threads: list[threading.Thread] = []
+        #: Optional callable(path) -> metadata dict or None.
+        #: Set by Api to the library index.
+        self.resolver = None
         self._stop = threading.Event()
         self._pending = 0
         self._lock = threading.Lock()
@@ -161,7 +229,15 @@ class MetadataScanner:
             # with four workers a handful of bad files would end all scanning
             # for the session with no trace.
             try:
-                info = read_metadata(path)
+                # A resolver (the library index) answers from a local
+                # database in microseconds. Only fall through to opening
+                # the file when it has never been seen.
+                info = None
+                resolver = self.resolver
+                if resolver is not None:
+                    info = resolver(path)
+                if info is None:
+                    info = read_metadata(path)
             except Exception:
                 log.exception("scanner worker recovered from %s", path)
                 info = {"title": Path(path).stem, "artist": "",

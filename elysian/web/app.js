@@ -49,7 +49,9 @@ function setView(name) {
   view = name;
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
-  $("panel-title").textContent = name === "now" ? "Now playing" : "Playlist";
+  $("view-library").classList.toggle("hidden", name !== "library");
+  $("panel-title").textContent =
+    name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
@@ -57,6 +59,9 @@ function setView(name) {
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
   if (name === "playlists") renderWindow(false);
+  // Ask for the pane's contents the first time it is opened, rather than
+  // querying a database nobody is looking at on startup.
+  if (name === "library") libraryOpened();
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -848,6 +853,252 @@ document.addEventListener("keydown", (e) => {
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
 
+
+/* ---------- library ----------
+   Browsing never blocks: the frontend asks for a view, Python runs the
+   query off its worker, and the result is collected on a revision bump
+   the same way playlist metadata already is. Three counters rather than
+   one, so opening an album does not refetch the album grid and a finished
+   scan does not refetch either unless it changed something.
+
+   The grid is not virtualised like the track list. A library holds
+   thousands of albums where a playlist holds tens of thousands of rows,
+   and content-visibility keeps offscreen cards off the layout budget
+   without the machinery that the track list genuinely needs. */
+
+let libView = "albums";          // albums | artists | genres
+let libItems = [];               // browser results, unfiltered
+let libDetail = null;            // {kind, key, title, items} when drilled in
+let libSelected = new Set();     // paths selected in a detail list
+let libOpened = false;
+let libRevision = -1;
+// Requests made but not yet collected. The poll drops to once a second
+// when paused, which is exactly when someone is browsing, so a click on
+// Artists could sit for a full second before anything appeared.
+let libPending = 0;
+let libScanning = false;
+let libBrowserRevision = -1;
+let libDetailRevision = -1;
+
+const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function libraryOpened() {
+  const a = api();
+  if (!a) return;
+  if (!libOpened) {
+    libOpened = true;
+    libPending++;
+    a.library_request_browser(libView);
+    schedule();
+  }
+  renderLibrary();
+}
+
+function libFiltered() {
+  const needle = $("libfilter").value.trim().toLowerCase();
+  if (!needle) return libItems;
+  return libItems.filter((it) => {
+    const hay = libView === "albums"
+      ? `${it.album} ${it.album_artist}`
+      : (libView === "artists" ? it.artist : it.genre);
+    return (hay || "").toLowerCase().includes(needle);
+  });
+}
+
+const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
+
+function renderLibrary() {
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const crumb = $("libcrumb");
+  const empty = $("libempty");
+  const showingDetail = libDetail !== null;
+
+  crumb.classList.toggle("hidden", !showingDetail);
+  if (showingDetail) {
+    $("libcrumb-title").textContent = libDetail.title || "";
+    grid.classList.add("hidden");
+    tracks.classList.remove("hidden");
+    empty.classList.add("hidden");
+    renderLibTracks(libDetail.items);
+    return;
+  }
+
+  tracks.classList.add("hidden");
+  const rows = libFiltered();
+  const bare = rows.length === 0;
+  empty.classList.toggle("hidden", !bare);
+  grid.classList.toggle("hidden", bare);
+  if (bare) return;
+
+  if (libView === "albums") {
+    // Toggle a class rather than an inline display, which would win over
+    // the .hidden rule and leave the grid showing behind the track list.
+    grid.classList.remove("aslist");
+    grid.innerHTML = rows.map((it, i) => `
+      <div class="libcard" data-i="${i}">
+        <div class="art">${DISC_ICON}</div>
+        <div class="t1">${esc(it.album)}</div>
+        <div class="t2">${esc(it.album_artist)}${it.year ? " &middot; " + it.year : ""}</div>
+      </div>`).join("");
+  } else {
+    // Artists and genres are a list rather than a grid: there is no
+    // artwork to show, and a name reads better on one line than boxed.
+    grid.classList.add("aslist");
+    grid.innerHTML = rows.map((it, i) => {
+      const name = libView === "artists" ? it.artist : it.genre;
+      const sub = libView === "artists"
+        ? `${fmtCount(it.tracks, "track", "tracks")}, ${fmtCount(it.albums, "album", "albums")}`
+        : fmtCount(it.tracks, "track", "tracks");
+      return `<div class="librow" data-i="${i}">
+        <div class="n"></div><div class="t">${esc(name)}</div>
+        <div class="a">${sub}</div><div class="al"></div>
+        <div class="d">${fmt(it.duration || 0)}</div></div>`;
+    }).join("");
+  }
+}
+
+function renderLibTracks(items) {
+  $("libtracks").innerHTML = items.map((t) => `
+    <div class="librow" data-path="${esc(t.path)}">
+      <div class="n">${t.track_number || ""}</div>
+      <div class="t">${esc(t.title)}</div>
+      <div class="a">${esc(t.artist)}</div>
+      <div class="al">${esc(t.album)}</div>
+      <div class="d">${fmt(t.duration || 0)}</div>
+    </div>`).join("");
+  paintLibSelection();
+}
+
+function paintLibSelection() {
+  $("libtracks").querySelectorAll(".librow").forEach((row) =>
+    row.classList.toggle("selected", libSelected.has(row.dataset.path)));
+}
+
+function libChosenPaths() {
+  if (!libDetail) return [];
+  if (libSelected.size) {
+    return libDetail.items.map((t) => t.path).filter((p) => libSelected.has(p));
+  }
+  return libDetail.items.map((t) => t.path);
+}
+
+function setLibView(name) {
+  if (libView === name) return;
+  libView = name;
+  libDetail = null;
+  libSelected.clear();
+  document.querySelectorAll(".libtab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.lib === name));
+  const a = api();
+  if (a) {
+    libPending++;
+    a.library_request_browser(name);
+    schedule();
+  }
+}
+
+/* ---- library wiring ---- */
+
+document.querySelectorAll(".libtab").forEach((b) =>
+  b.addEventListener("click", () => setLibView(b.dataset.lib)));
+
+$("libfilter").addEventListener("input", () => renderLibrary());
+
+$("libgrid").addEventListener("click", (e) => {
+  const card = e.target.closest(".libcard, .librow");
+  if (!card) return;
+  const item = libFiltered()[Number(card.dataset.i)];
+  if (!item) return;
+  const a = api();
+  if (!a) return;
+  libSelected.clear();
+  libPending++;
+  if (libView === "albums") a.library_request_detail("album", item.album, item.album_artist);
+  else if (libView === "artists") a.library_request_detail("artist", item.artist, "");
+  else a.library_request_detail("genre", item.genre, "");
+  schedule();
+});
+
+$("libtracks").addEventListener("click", (e) => {
+  const row = e.target.closest(".librow");
+  if (!row) return;
+  const path = row.dataset.path;
+  if (e.ctrlKey) {
+    libSelected.has(path) ? libSelected.delete(path) : libSelected.add(path);
+  } else {
+    libSelected = new Set([path]);
+  }
+  paintLibSelection();
+});
+
+$("libtracks").addEventListener("dblclick", (e) => {
+  const row = e.target.closest(".librow");
+  if (!row) return;
+  const a = api();
+  if (a) a.library_play([row.dataset.path]);
+});
+
+$("lib-back").addEventListener("click", () => {
+  libDetail = null;
+  libSelected.clear();
+  renderLibrary();
+});
+$("lib-queue").addEventListener("click", () => {
+  const a = api();
+  if (a) a.library_enqueue(libChosenPaths());
+});
+$("lib-play").addEventListener("click", () => {
+  const a = api();
+  if (a) a.library_play(libChosenPaths());
+});
+$("lib-add").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
+$("lib-add-empty").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
+$("lib-rescan").addEventListener("click", () => { const a = api(); if (a) a.library_rescan(); });
+
+function applyLibraryTick(tick) {
+  const a = api();
+  if (!a) return;
+  libScanning = !!tick.library_scanning;
+  if (!libOpened) return;
+  if (tick.library_browser_revision !== libBrowserRevision) {
+    libBrowserRevision = tick.library_browser_revision;
+    if (libPending > 0) libPending--;
+    a.library_get_browser().then((b) => {
+      if (!b) return;
+      libView = b.view || libView;
+      libItems = b.items || [];
+      document.querySelectorAll(".libtab").forEach((x) =>
+        x.classList.toggle("active", x.dataset.lib === libView));
+      libDetail = null;
+      renderLibrary();
+    }).catch(() => {});
+  }
+  if (tick.library_detail_revision !== libDetailRevision) {
+    libDetailRevision = tick.library_detail_revision;
+    if (libPending > 0) libPending--;
+    a.library_get_detail().then((d) => {
+      if (!d || !d.kind) return;
+      libDetail = d;
+      libSelected.clear();
+      renderLibrary();
+    }).catch(() => {});
+  }
+  if (tick.library_revision !== libRevision) {
+    libRevision = tick.library_revision;
+    a.library_get_state().then((st) => {
+      if (!st) return;
+      const bits = [
+        fmtCount(st.tracks || 0, "track", "tracks"),
+        fmtCount(st.albums || 0, "album", "albums"),
+        fmtCount(st.artists || 0, "artist", "artists"),
+      ];
+      if ((st.roots || []).length) bits.push(fmtCount(st.roots.length, "folder", "folders"));
+      $("libstat").textContent = bits.join("   |   ");
+    }).catch(() => {});
+  }
+}
+
 /* ---------- waveform ---------- */
 
 function drawWave() {
@@ -1039,6 +1290,8 @@ function pollInterval() {
   if (document.hidden) return POLL_HIDDEN;
   // Something on screen is still blank: collect updates quickly.
   if (visibleMissing()) return POLL_FILLING;
+  // A library request is in flight, or a scan is filling the index.
+  if (libPending > 0 || libScanning) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }
@@ -1107,6 +1360,7 @@ async function poll() {
         // Resync: if the reader says it has nothing left, it has nothing
         // left, whatever the local counter thinks.
         if ((tick.scan_pending || 0) === 0) scanOutstanding = 0;
+        applyLibraryTick(tick);
         if (view === "now" && !state.peaks.length && ++peakTick % 4 === 0) {
           const p = await a.get_peaks();
           if (p && p.length) { state.peaks = p; prev.waveSig = null; drawWave(); }
