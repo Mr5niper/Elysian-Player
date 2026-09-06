@@ -871,6 +871,7 @@ let libView = "albums";          // albums | artists | genres
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
 let libSelected = new Set();     // paths selected in a detail list
+let libAnchor = null;            // where a shift range measures from
 let libOpened = false;
 let libRevision = -1;
 // Requests made but not yet collected. The poll drops to once a second
@@ -1156,6 +1157,7 @@ function setLibView(name) {
   libView = name;
   libDetail = null;
   libSelected.clear();
+  libAnchor = null;
   document.querySelectorAll(".libtab").forEach((b) =>
     b.classList.toggle("active", b.dataset.lib === name));
   const a = api();
@@ -1188,6 +1190,7 @@ $("libgrid").addEventListener("click", (e) => {
   const a = api();
   if (!a) return;
   libSelected.clear();
+  libAnchor = null;
   libPending++;
   if (libView === "albums") a.library_request_detail("album", item.album, item.album_artist);
   else if (libView === "artists") a.library_request_detail("artist", item.artist, "");
@@ -1195,14 +1198,49 @@ $("libgrid").addEventListener("click", (e) => {
   schedule();
 });
 
+/* Same rules as the playlist, so selection behaves the same wherever you
+   are: plain click replaces and sets the anchor, ctrl toggles one row and
+   moves it, shift takes the run from the anchor, ctrl+shift adds that run.
+   The anchor does not move on a shift click, so a range can be widened and
+   narrowed from one starting point.
+
+   The run is measured over the rows as displayed, which in an artist or
+   genre view are split by album headings: a range spanning two albums
+   selects what is visually between them and nothing else. */
+function libRowPaths() {
+  return Array.from($("libtracks").querySelectorAll(".librow"))
+              .map((r) => r.dataset.path);
+}
+
+function libRange(fromPath, toPath) {
+  const paths = libRowPaths();
+  let a = paths.indexOf(fromPath);
+  let b = paths.indexOf(toPath);
+  if (a < 0 || b < 0) return null;
+  if (a > b) { const t = a; a = b; b = t; }
+  return paths.slice(a, b + 1);
+}
+
 $("libtracks").addEventListener("click", (e) => {
   const row = e.target.closest(".librow");
   if (!row) return;
   const path = row.dataset.path;
-  if (e.ctrlKey) {
+
+  if (e.shiftKey) {
+    const run = libAnchor === null ? null : libRange(libAnchor, path);
+    if (run) {
+      if (!e.ctrlKey) libSelected = new Set();
+      run.forEach((x) => libSelected.add(x));
+    } else {
+      libSelected = new Set([path]);
+      libAnchor = path;
+    }
+  } else if (e.ctrlKey) {
     libSelected.has(path) ? libSelected.delete(path) : libSelected.add(path);
+    libAnchor = path;
   } else {
     libSelected = new Set([path]);
+    libAnchor = path;
   }
   paintLibSelection();
 });
@@ -1217,6 +1255,7 @@ $("libtracks").addEventListener("dblclick", (e) => {
 $("lib-back").addEventListener("click", () => {
   libDetail = null;
   libSelected.clear();
+  libAnchor = null;
   renderLibrary();
 });
 $("lib-queue").addEventListener("click", () => {
@@ -1298,6 +1337,7 @@ function applyLibraryTick(tick) {
       if (!d || !d.kind) return;
       libDetail = d;
       libSelected.clear();
+      libAnchor = null;
       renderLibrary();
     }).catch(() => {});
   }
