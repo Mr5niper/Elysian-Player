@@ -486,7 +486,7 @@ class LibraryService:
     def search(self, needle: str, limit: int = 500) -> list:
         like = "%" + needle.replace("\\", "\\\\").replace("%", "\\%") \
                           .replace("_", "\\_") + "%"
-        return self._rows("""
+        return self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks

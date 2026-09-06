@@ -579,7 +579,7 @@ class Api:
         elif not folders:
             self._set_status("No audio files found")
 
-    def _do_add_audio_paths(self, paths) -> None:
+    def _do_add_audio_paths(self, paths) -> int:
         # _lock guards readers that iterate playlist state from the bridge
         # thread (get_meta), now that mutation itself is worker-only.
         with self._lock:
@@ -593,6 +593,10 @@ class Api:
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
         else:
             self._set_status("Already in the playlist")
+        # Returned so callers can say something more specific than the
+        # generic status above; _do_library_enqueue was already written as
+        # though this reported a count.
+        return len(added)
 
     def add_files(self) -> int:
         import webview
@@ -1144,6 +1148,9 @@ class Api:
         data["browser_revision"] = self._library_browser_revision
         data["detail_revision"] = self._library_detail_revision
         data["scanning"] = self._library_scanning
+        # The tab the library was left on. Saved when a browse result lands,
+        # but nothing read it back, so the frontend always opened on albums.
+        data["view"] = self._settings.get("library_view", "albums")
         return data
 
     def library_get_browser(self) -> dict:

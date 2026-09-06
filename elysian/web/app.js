@@ -896,9 +896,25 @@ function libraryOpened() {
   if (!a) return;
   if (!libOpened) {
     libOpened = true;
-    libPending++;
-    a.library_request_browser(libView);
-    schedule();
+    // Open on the tab the library was left on. The backend saves it, and
+    // asking for the state first costs one call on the first open only.
+    const ask = (view) => {
+      libView = view;
+      document.querySelectorAll(".libtab").forEach((x) =>
+        x.classList.toggle("active", x.dataset.lib === libView));
+      libPending++;
+      a.library_request_browser(libView);
+      schedule();
+    };
+    if (typeof a.library_get_state === "function") {
+      a.library_get_state()
+        .then((st) => ask(
+          st && ["albums", "artists", "genres"].includes(st.view)
+            ? st.view : libView))
+        .catch(() => ask(libView));
+    } else {
+      ask(libView);
+    }
   }
   renderLibrary();
 }
