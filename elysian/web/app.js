@@ -929,7 +929,7 @@ function renderLibrary() {
   $("lib-folders").classList.toggle("on", libShowFolders);
   if (libShowFolders) {
     grid.classList.add("hidden");
-    tracks.classList.add("hidden");
+    $("libdetail").classList.add("hidden");
     crumb.classList.add("hidden");
     empty.classList.add("hidden");
     renderFolders();
@@ -940,13 +940,14 @@ function renderLibrary() {
   if (showingDetail) {
     $("libcrumb-title").textContent = libDetail.title || "";
     grid.classList.add("hidden");
-    tracks.classList.remove("hidden");
+    $("libdetail").classList.remove("hidden");
     empty.classList.add("hidden");
+    renderLibCover();
     renderLibTracks(libDetail.items);
     return;
   }
 
-  tracks.classList.add("hidden");
+  $("libdetail").classList.add("hidden");
   const rows = libFiltered();
   const bare = rows.length === 0;
   empty.classList.toggle("hidden", !bare);
@@ -1042,6 +1043,48 @@ function paintLibArt() {
   });
 }
 
+/* The cover only belongs to an album. An artist or a genre spans many, so
+   there is no single image that would be honest to show, and the pane is
+   dropped rather than filled with the first one that happened to sort
+   first. */
+function renderLibCover() {
+  const pane = $("libcover");
+  const isAlbum = libDetail && libDetail.kind === "album";
+  pane.classList.toggle("hidden", !isAlbum);
+  if (!isAlbum) return;
+
+  const artist = libDetail.key2 || "";
+  const album = libDetail.key || "";
+  const key = `${artist}\u0000${album}`;
+  const url = libArt[key];
+  const art = $("libcover-art");
+  const want = url ? `img:${url}` : "icon";
+  if (art.dataset.painted !== want) {
+    art.dataset.painted = want;
+    art.innerHTML = url ? `<img src="${esc(url)}" alt="">` : DISC_ICON;
+  }
+
+  const items = libDetail.items || [];
+  const seconds = items.reduce((sum, t) => sum + (t.duration || 0), 0);
+  const year = items.length ? (items[0].year || 0) : 0;
+  setText($("libcover-title"), "coverTitle", album);
+  setText($("libcover-artist"), "coverArtist", artist);
+  const bits = [fmtCount(items.length, "track", "tracks"), fmt(seconds)];
+  if (year) bits.unshift(String(year));
+  setText($("libcover-sub"), "coverSub", bits.join("   |   "));
+
+  // The grid asks for covers as cards scroll past, so an album opened
+  // from a card already has one. Reached any other way it may not, and
+  // this is the only place that would notice.
+  const a = api();
+  if (!url && a && typeof a.library_request_art === "function"
+      && !libArtSeen.has(key)) {
+    libArtSeen.add(key);
+    a.library_request_art(album, artist);
+    schedule();
+  }
+}
+
 function renderFolders() {
   const list = $("foldlist");
   if (!libRoots.length) {
@@ -1067,7 +1110,10 @@ function renderLibTracks(items) {
   const kind = libDetail ? libDetail.kind : "";
   const grouped = kind === "artist" || kind === "genre";
   if (!grouped) {
-    box.innerHTML = items.map((t) => trackRow(t, true)).join("");
+    // Inside an album the cover pane already names it, so repeating it on
+    // every row is just noise. A search result still needs the column,
+    // since its rows can come from anywhere.
+    box.innerHTML = items.map((t) => trackRow(t, kind !== "album")).join("");
     paintLibSelection();
     return;
   }
@@ -1259,6 +1305,7 @@ function applyLibraryTick(tick) {
       if (!m) return;
       libArt = m;
       paintLibArt();
+      if (libDetail && libDetail.kind === "album") renderLibCover();
     }).catch(() => {});
   }
   if (tick.library_revision !== libRevision) {

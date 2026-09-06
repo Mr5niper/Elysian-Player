@@ -403,9 +403,40 @@ html, body {
 .libcard .t2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
 
 /* Rows for the artist and genre lists, and for a selected album. */
+/* Album detail: the cover stays put while the tracks scroll beside it, so
+   the record you are inside is always visible. Base rule first, .hidden
+   after, since they have equal specificity and the later one wins. */
+#libdetail {
+  flex: 1; min-height: 0; display: flex; gap: 18px; align-items: stretch;
+}
+#libdetail.hidden { display: none; }
+
+#libcover {
+  width: 232px; flex-shrink: 0; display: flex; flex-direction: column;
+  gap: 3px; align-self: flex-start;
+}
+#libcover.hidden { display: none; }
+#libcover .cover {
+  width: 232px; height: 232px; border-radius: 10px;
+  background: var(--panel-2); margin-bottom: 9px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+#libcover .cover img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+#libcover .cover svg { width: 48px; height: 48px; stroke: var(--accent-dim); }
+#libcover .ct {
+  font-size: 14px; font-weight: 600; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+#libcover .ca { font-size: 12.5px; color: var(--text); }
+#libcover .cs { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
 #libtracks {
-  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  position: relative;
+  flex: 1; min-width: 0; min-height: 0;
+  overflow-y: auto; overflow-x: hidden; position: relative;
 }
 #libtracks.hidden { display: none; }
 #libtracks::-webkit-scrollbar { width: 9px; }
