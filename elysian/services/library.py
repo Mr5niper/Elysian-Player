@@ -47,7 +47,7 @@ SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
-            "modified_at", "added_at")
+            "compilation", "modified_at", "added_at")
 
 _UPSERT = f"""
     INSERT INTO tracks ({','.join(_COLUMNS)})
@@ -57,7 +57,8 @@ _UPSERT = f"""
         album=excluded.album, album_artist=excluded.album_artist,
         genre=excluded.genre, duration=excluded.duration,
         track_number=excluded.track_number, disc_number=excluded.disc_number,
-        year=excluded.year, modified_at=excluded.modified_at
+        year=excluded.year, compilation=excluded.compilation,
+        modified_at=excluded.modified_at
 """
 
 #: Falls back through album artist, then track artist, then a placeholder,
@@ -124,6 +125,7 @@ class LibraryService:
                         track_number  INTEGER DEFAULT 0,
                         disc_number   INTEGER DEFAULT 0,
                         year          INTEGER DEFAULT 0,
+                        compilation   INTEGER DEFAULT 0,
                         modified_at   REAL    DEFAULT 0,
                         added_at      REAL    DEFAULT 0
                     );
@@ -134,6 +136,17 @@ class LibraryService:
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
                 """)
+                # Older databases predate the compilation column. Add it,
+                # and clear modified_at so the next scan actually re-reads
+                # the files: without that every track looks unchanged and
+                # the new column would stay empty forever.
+                have = {r["name"] for r in con.execute("PRAGMA table_info(tracks)")}
+                if "compilation" not in have:
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN compilation INTEGER DEFAULT 0")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in the "
+                             "compilation flag")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
@@ -320,6 +333,7 @@ class LibraryService:
                         int(meta.get("track_number", 0) or 0),
                         int(meta.get("disc_number", 0) or 0),
                         int(meta.get("year", 0) or 0),
+                        int(meta.get("compilation", 0) or 0),
                         float(mtime or 0.0), now,
                     ))
                     if len(batch) >= BATCH_SIZE:
@@ -373,8 +387,7 @@ class LibraryService:
         rows = self._rows(f"""
             SELECT COUNT(*) AS tracks,
                    COUNT(DISTINCT {_EFFECTIVE_ARTIST}) AS artists,
-                   COUNT(DISTINCT {_EFFECTIVE_ARTIST} || '\\u0000' || {_EFFECTIVE_ALBUM})
-                       AS albums,
+                   COUNT(DISTINCT {_EFFECTIVE_ALBUM}) AS albums,
                    COUNT(DISTINCT NULLIF(genre,'')) AS genres,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
@@ -385,28 +398,43 @@ class LibraryService:
         return data
 
     def albums(self) -> list:
-        # Grouped by band, then chronological within each band, with albums
-        # missing a year tag at the end of that band's run rather than the
-        # front: a NULL year sorts first in SQLite, which put an undated
-        # album ahead of everything the artist actually released.
-        #
-        # GROUP BY and ORDER BY repeat the expression rather than using the
-        # output alias: album_artist, album and artist are all real column
-        # names too, and SQLite resolves the bare name to the column, which
-        # silently groups by the raw tag instead of the fallback chain.
-        return self._rows(f"""
-            SELECT {_EFFECTIVE_ARTIST} AS album_artist,
-                   {_EFFECTIVE_ALBUM}  AS album,
+        """One row per album, whatever its tracks say about the artist.
+
+        The album is the unit here; the artist view already separates by
+        band. Grouping by band as well split a compilation into one card
+        per contributing artist whenever the album artist tag was missing,
+        which is exactly when it is needed most.
+
+        An album naming more than one band is a compilation, and those sort
+        after the single band albums rather than being scattered among them
+        under whichever name happened to come first.
+
+        GROUP BY and ORDER BY repeat the expressions rather than using the
+        output aliases: album and album_artist are real column names too,
+        and SQLite resolves a bare name to the column, which would group by
+        the raw tag instead of the fallback chain.
+        """
+        rows = self._rows(f"""
+            SELECT COALESCE(NULLIF(album,''), 'Unknown Album') AS album,
+                   (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))           AS is_comp,
+                   MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))           AS only_artist,
                    MIN(NULLIF(year,0)) AS year,
                    COUNT(*)            AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'), COALESCE(NULLIF(album,''), 'Unknown Album')
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
+            GROUP BY COALESCE(NULLIF(album,''), 'Unknown Album')
+            ORDER BY (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')),
+                     CASE WHEN (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')) THEN '' ELSE MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) END COLLATE NOCASE,
                      CASE WHEN MIN(NULLIF(year,0)) IS NULL THEN 1 ELSE 0 END,
-                     year,
+                     MIN(NULLIF(year,0)),
                      COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
         """)
+        for row in rows:
+            comp = bool(row.pop("is_comp", 0))
+            only = (row.pop("only_artist", "") or "").strip()
+            row["compilation"] = comp
+            row["album_artist"] = "Various Artists" if comp else only
+        return rows
 
     def artists(self) -> list:
         return self._rows(f"""
@@ -436,12 +464,8 @@ class LibraryService:
         track, which is the most likely to carry the artwork.
         """
         sql = f"SELECT path FROM tracks WHERE {_EFFECTIVE_ALBUM} = ?"
-        args = [album or "Unknown Album"]
-        if album_artist:
-            sql += f" AND {_EFFECTIVE_ARTIST} = ?"
-            args.append(album_artist)
         sql += f" ORDER BY {_TRACK_ORDER} LIMIT 25"
-        return [r["path"] for r in self._rows(sql, tuple(args))]
+        return [r["path"] for r in self._rows(sql, (album or "Unknown Album",))]
 
     def album_tracks(self, album: str, album_artist: str = "") -> list:
         sql = f"""
@@ -450,12 +474,12 @@ class LibraryService:
             FROM tracks
             WHERE {_EFFECTIVE_ALBUM} = ?
         """
-        args = [album or "Unknown Album"]
-        if album_artist:
-            sql += f" AND {_EFFECTIVE_ARTIST} = ?"
-            args.append(album_artist)
+        # No artist filter: the grid shows one card per album, so opening
+        # one has to return the whole album. Filtering by the card's artist
+        # would return nothing at all for a compilation, whose card is
+        # labelled Various Artists rather than any name in the tags.
         sql += f" ORDER BY {_TRACK_ORDER}"
-        return self._rows(sql, tuple(args))
+        return self._rows(sql, (album or "Unknown Album",))
 
     def artist_tracks(self, artist: str) -> list:
         # Tracks with no album tag sort last rather than first. Their year
