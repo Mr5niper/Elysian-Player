@@ -367,10 +367,12 @@ html, body {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   padding-right: 4px;
 }
-#libgrid.hidden { display: none; }
-/* Artists and genres render as rows, so the grid columns are dropped.
-   A class, not an inline style, or it would override .hidden above. */
+/* Artists and genres render as rows, so the grid columns are dropped. */
 #libgrid.aslist { display: block; }
+/* Declared last, and deliberately: this and .aslist have equal specificity,
+   so whichever comes later wins. With .aslist last, drilling into an artist
+   left the artist list on screen underneath the tracks. */
+#libgrid.hidden, #libgrid.aslist.hidden { display: none; }
 #libgrid::-webkit-scrollbar { width: 9px; }
 #libgrid::-webkit-scrollbar-track { background: transparent; }
 #libgrid::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
@@ -389,6 +391,10 @@ html, body {
   align-items: center; justify-content: center; margin-bottom: 8px;
 }
 .libcard .art svg { width: 34px; height: 34px; stroke: var(--accent-dim); }
+.libcard .art img {
+  width: 100%; height: 100%; border-radius: 7px;
+  object-fit: cover; display: block;
+}
 .libcard .t1, .libcard .t2 {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
@@ -417,6 +423,17 @@ html, body {
 .librow .a, .librow .al { color: var(--muted); }
 .librow .t, .librow .a, .librow .al {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Album heading inside an artist's track list. */
+.libsection {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 14px 10px 5px; font-size: 12.5px; font-weight: 600;
+  color: var(--accent-hi);
+}
+.libsection:first-child { padding-top: 4px; }
+.libsection .yr, .libsection .by {
+  font-size: 11px; font-weight: 400; color: var(--muted);
 }
 
 #libempty {

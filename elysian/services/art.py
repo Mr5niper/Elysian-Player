@@ -90,9 +90,20 @@ class ArtProvider:
             else:
                 from mutagen import File
 
-                pictures = getattr(File(audio_path), "pictures", None)
+                meta = File(audio_path)
+                pictures = getattr(meta, "pictures", None)
                 if pictures:
                     return pictures[0].data
+                # WAV and a few others carry ID3 rather than FLAC-style
+                # pictures, so there is nothing on .pictures to find and the
+                # art was being missed even though the file has it.
+                tags = getattr(meta, "tags", None)
+                if tags is not None:
+                    from mutagen.id3 import APIC
+
+                    for frame in getattr(tags, "values", lambda: [])():
+                        if isinstance(frame, APIC) and frame.data:
+                            return frame.data
         except Exception:
             log.debug("no embedded art in %s", audio_path, exc_info=True)
         return None
