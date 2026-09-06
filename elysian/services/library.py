@@ -66,6 +66,15 @@ _EFFECTIVE_ARTIST = ("COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), "
                      "'Unknown Artist')")
 _EFFECTIVE_ALBUM = "COALESCE(NULLIF(album,''), 'Unknown Album')"
 
+#: Ordering within an album. A missing disc tag means the first disc, not
+#: disc zero: a rip where only some files carry TPOS would otherwise put
+#: every untagged track ahead of every tagged one, which reads as the file
+#: format deciding the order when it is really the tag. A missing track
+#: number has no such natural value, so those sort to the end by title.
+_TRACK_ORDER = ("CASE WHEN disc_number <= 0 THEN 1 ELSE disc_number END, "
+                "CASE WHEN track_number <= 0 THEN 1 ELSE 0 END, "
+                "track_number, title COLLATE NOCASE")
+
 
 def _like_prefix(root: str) -> str:
     """A LIKE pattern matching only paths inside this folder."""
@@ -431,7 +440,7 @@ class LibraryService:
         if album_artist:
             sql += f" AND {_EFFECTIVE_ARTIST} = ?"
             args.append(album_artist)
-        sql += " ORDER BY disc_number, track_number LIMIT 25"
+        sql += f" ORDER BY {_TRACK_ORDER} LIMIT 25"
         return [r["path"] for r in self._rows(sql, tuple(args))]
 
     def album_tracks(self, album: str, album_artist: str = "") -> list:
@@ -445,7 +454,7 @@ class LibraryService:
         if album_artist:
             sql += f" AND {_EFFECTIVE_ARTIST} = ?"
             args.append(album_artist)
-        sql += " ORDER BY disc_number, track_number, title COLLATE NOCASE"
+        sql += f" ORDER BY {_TRACK_ORDER}"
         return self._rows(sql, tuple(args))
 
     def artist_tracks(self, artist: str) -> list:
@@ -458,7 +467,7 @@ class LibraryService:
             FROM tracks
             WHERE {_EFFECTIVE_ARTIST} = ?
             ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
-                     year, album COLLATE NOCASE, disc_number, track_number
+                     year, album COLLATE NOCASE, {_TRACK_ORDER}
         """, (artist,))
 
     def genre_tracks(self, genre: str) -> list:
@@ -471,7 +480,7 @@ class LibraryService:
             WHERE genre = ?
             ORDER BY {_EFFECTIVE_ARTIST} COLLATE NOCASE,
                      CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
-                     year, album COLLATE NOCASE, disc_number, track_number
+                     year, album COLLATE NOCASE, {_TRACK_ORDER}
         """, (genre,))
 
     def search(self, needle: str, limit: int = 500) -> list:
@@ -484,7 +493,7 @@ class LibraryService:
             WHERE title LIKE ? ESCAPE '\\' OR artist LIKE ? ESCAPE '\\'
                OR album LIKE ? ESCAPE '\\' OR album_artist LIKE ? ESCAPE '\\'
             ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
-                     disc_number, track_number
+                     {_TRACK_ORDER}
             LIMIT ?
         """, (like, like, like, like, int(limit)))
 
