@@ -325,7 +325,6 @@ html, body {
 /* ---- library ----
    Reuses the same tokens as the playlist so the two panes read as one
    application: same row height, same accent, same muted grey. */
-#view-library { display: flex; flex-direction: column; min-height: 0; }
 
 #libtools {
   display: flex; gap: 8px; align-items: center;
