@@ -8,6 +8,7 @@ import os
 import queue
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -98,9 +99,17 @@ class Api:
         # Cover art, resolved only for the cards actually on screen. A
         # library of a thousand albums is a thousand image decodes, and
         # most of them are for cards nobody has scrolled to.
-        self._library_art = {}
+        # Each entry carries the sequence number it arrived at, so the
+        # frontend can ask for only what it has not seen. Returning the
+        # whole map meant several megabytes of base64 crossing the bridge
+        # every time a single cover resolved, which is what made scrolling
+        # a large library stutter.
+        self._library_art = {}          # key -> [seq, data url or ""]
+        self._library_art_seq = 0
         self._library_art_revision = 0
         self._library_art_pending = set()
+        self._art_pool = ThreadPoolExecutor(
+            max_workers=4, thread_name_prefix="elysian-lib-art")
         # The playlist scanner consults the index before opening a file. A
         # track the library already knows costs a local lookup instead of a
         # tag read over a share, which is the expensive thing the whole
@@ -951,6 +960,7 @@ class Api:
 
     def _do_library_remove_root(self, path) -> None:
         removed = self._library.remove_root(path)
+        self._forget_art_misses()
         self._set_status(f"Removed {removed} track(s) from the library")
         self._bump_library()
         self._refresh_library_summary()
@@ -998,6 +1008,7 @@ class Api:
         now = time.monotonic()
         if now - self._library_refresh_at >= 2.0:
             self._library_refresh_at = now
+            self._forget_art_misses()
             self._library_revision += 1
             self._refresh_library_summary()
             self._do_library_browser(self._library_browser.get("view", "albums"))
@@ -1101,15 +1112,35 @@ class Api:
                 url = None
             self._post("library_art_ready", key, url)
 
-        threading.Thread(target=work, name="elysian-lib-art",
-                         daemon=True).start()
+        # A small pool rather than a thread per album: scrolling a large
+        # library asks for covers faster than they can be decoded, and one
+        # thread each would mean hundreds of them competing.
+        self._art_pool.submit(work)
+
+    def _forget_art_misses(self) -> None:
+        """Drop remembered "this album has no cover" answers.
+
+        A miss is only true for the tracks indexed at the time it was
+        asked. Folders are committed one at a time, so an album can be
+        half indexed when its card first appears, and the track carrying
+        the artwork may not have arrived yet. Keeping that answer meant the
+        cover never appeared however much of the album turned up later.
+        Successful lookups are kept: those cannot become wrong.
+        """
+        missing = [k for k, v in self._library_art.items() if not v[1]]
+        if not missing:
+            return
+        for key in missing:
+            self._library_art.pop(key, None)
+        self._library_art_revision += 1
 
     def _do_library_art_ready(self, key, url) -> None:
         self._library_art_pending.discard(key)
         # Cached even when nothing was found, so a coverless album is not
         # searched again every time it scrolls past.
-        self._library_art[key] = url or ""
-        while len(self._library_art) > 600:
+        self._library_art_seq += 1
+        self._library_art[key] = [self._library_art_seq, url or ""]
+        while len(self._library_art) > 900:
             self._library_art.pop(next(iter(self._library_art)), None)
         self._library_art_revision += 1
 
@@ -1179,8 +1210,19 @@ class Api:
     def library_request_art(self, album, album_artist="") -> None:
         self._post("library_art", str(album or ""), str(album_artist or ""))
 
-    def library_get_art(self) -> dict:
-        return dict(self._library_art)
+    def library_get_art(self, since=0) -> dict:
+        """Covers resolved after the caller's last sequence number.
+
+        A pure read of what the worker has already produced, and bounded by
+        how many covers have arrived rather than by library size.
+        """
+        try:
+            mark = int(since or 0)
+        except (TypeError, ValueError):
+            mark = 0
+        fresh = {k: v[1] for k, v in self._library_art.items() if v[0] > mark}
+        return {"seq": self._library_art_seq, "art": fresh,
+                "reset": mark > self._library_art_seq}
 
     def library_enqueue(self, paths) -> None:
         self._post("library_enqueue", [str(p) for p in (paths or []) if p])
@@ -1359,6 +1401,7 @@ class Api:
             log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
+        self._art_pool.shutdown(wait=False)
         self._engine.stop()
 
     def _flush_persisted(self) -> None:
