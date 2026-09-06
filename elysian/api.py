@@ -89,6 +89,7 @@ class Api:
         self._library_browser_revision = 0
         self._library_detail_revision = 0
         self._library_scanning = False
+        self._library_refresh_at = 0.0
         self._library_summary = {"tracks": 0, "artists": 0, "albums": 0,
                                  "genres": 0, "duration": 0.0, "roots": []}
         self._library_browser = {"view": "albums", "items": [], "revision": 0}
@@ -974,23 +975,39 @@ class Api:
                 return
             self._post("library_scan_done", result)
 
-        def report(done, total):
-            # Posted rather than written directly: the counter is read by
+        def report(totals, folder):
+            # Posted rather than written directly: the counters are read by
             # the snapshot the frontend polls, and that belongs to the
             # worker like everything else it reads.
-            self._post("library_scan_progress", int(done), int(total))
+            self._post("library_scan_progress", dict(totals), str(folder))
 
         threading.Thread(target=work, name="elysian-lib-scan",
                          daemon=True).start()
 
-    def _do_library_scan_progress(self, done, total) -> None:
-        self._set_status(f"Scanning library... {done} of {total}", 60.0)
+    def _do_library_scan_progress(self, totals, folder) -> None:
+        found = int(totals.get("scanned", 0) or 0)
+        folders = int(totals.get("folders", 0) or 0)
+        name = os.path.basename(str(folder).rstrip("\\/")) or folder
+        self._set_status(
+            f"Scanning library: {found} tracks in {folders} folders, {name}",
+            60.0)
+        # Show the new albums as they arrive rather than at the end. Both
+        # queries cost more as the library grows, so they are throttled;
+        # a long scan should not spend its time re-aggregating a table it
+        # is still writing to.
+        now = time.monotonic()
+        if now - self._library_refresh_at >= 2.0:
+            self._library_refresh_at = now
+            self._library_revision += 1
+            self._refresh_library_summary()
+            self._do_library_browser(self._library_browser.get("view", "albums"))
 
     def _do_library_scan_done(self, result) -> None:
         self._library_scanning = False
         scanned = int(result.get("scanned", 0) or 0)
         updated = int(result.get("updated", 0) or 0)
         removed = int(result.get("removed", 0) or 0)
+        self._library_refresh_at = 0.0
         if result.get("cancelled"):
             self._set_status("Library scan cancelled")
         elif updated or removed:
