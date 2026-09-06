@@ -47,7 +47,7 @@ SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
-            "modified_at", "added_at")
+            "compilation", "modified_at", "added_at")
 
 _UPSERT = f"""
     INSERT INTO tracks ({','.join(_COLUMNS)})
@@ -57,7 +57,8 @@ _UPSERT = f"""
         album=excluded.album, album_artist=excluded.album_artist,
         genre=excluded.genre, duration=excluded.duration,
         track_number=excluded.track_number, disc_number=excluded.disc_number,
-        year=excluded.year, modified_at=excluded.modified_at
+        year=excluded.year, compilation=excluded.compilation,
+        modified_at=excluded.modified_at
 """
 
 #: Falls back through album artist, then track artist, then a placeholder,
@@ -124,6 +125,7 @@ class LibraryService:
                         track_number  INTEGER DEFAULT 0,
                         disc_number   INTEGER DEFAULT 0,
                         year          INTEGER DEFAULT 0,
+                        compilation   INTEGER DEFAULT 0,
                         modified_at   REAL    DEFAULT 0,
                         added_at      REAL    DEFAULT 0
                     );
@@ -134,6 +136,17 @@ class LibraryService:
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
                 """)
+                # Older databases predate the compilation column. Add it,
+                # and clear modified_at so the next scan actually re-reads
+                # the files: without that every track looks unchanged and
+                # the new column would stay empty forever.
+                have = {r["name"] for r in con.execute("PRAGMA table_info(tracks)")}
+                if "compilation" not in have:
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN compilation INTEGER DEFAULT 0")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in the "
+                             "compilation flag")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
@@ -320,6 +333,7 @@ class LibraryService:
                         int(meta.get("track_number", 0) or 0),
                         int(meta.get("disc_number", 0) or 0),
                         int(meta.get("year", 0) or 0),
+                        int(meta.get("compilation", 0) or 0),
                         float(mtime or 0.0), now,
                     ))
                     if len(batch) >= BATCH_SIZE:
@@ -402,15 +416,15 @@ class LibraryService:
         """
         rows = self._rows(f"""
             SELECT COALESCE(NULLIF(album,''), 'Unknown Album') AS album,
-                   (COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))           AS is_comp,
+                   (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))           AS is_comp,
                    MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))           AS only_artist,
                    MIN(NULLIF(year,0)) AS year,
                    COUNT(*)            AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
             GROUP BY COALESCE(NULLIF(album,''), 'Unknown Album')
-            ORDER BY (COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')),
-                     CASE WHEN (COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')) THEN '' ELSE MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) END COLLATE NOCASE,
+            ORDER BY (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')),
+                     CASE WHEN (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')) THEN '' ELSE MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) END COLLATE NOCASE,
                      CASE WHEN MIN(NULLIF(year,0)) IS NULL THEN 1 ELSE 0 END,
                      MIN(NULLIF(year,0)),
                      COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
