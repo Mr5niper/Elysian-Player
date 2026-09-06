@@ -1200,9 +1200,14 @@ $("foldlist").addEventListener("click", (e) => {
     a.library_remove_root(path);
     // Drop it locally so the row goes at once; the backend confirms on the
     // next state bump either way.
+    //
+    // The art caches are deliberately left alone. Clearing them here threw
+    // the covers away on this side while the backend still had every album
+    // resolved, and a resolved album costs nothing and bumps no revision,
+    // so it never told us about them again and the grid came back bare
+    // until the app was restarted. Entries for albums that went with the
+    // folder are harmless: their cards are gone too.
     libRoots = libRoots.filter((p) => p !== path);
-    libArtSeen = new Set();
-    libArt = {};
     renderFolders();
     schedule();
   }
@@ -1228,6 +1233,14 @@ function applyLibraryTick(tick) {
         x.classList.toggle("active", x.dataset.lib === libView));
       libDetail = null;
       renderLibrary();
+      // Resync rather than assume: the backend only announces art it has
+      // just resolved, so anything it already had would otherwise never
+      // reach a frontend whose cache has been reset.
+      a.library_get_art().then((m) => {
+        if (!m) return;
+        libArt = m;
+        paintLibArt();
+      }).catch(() => {});
     }).catch(() => {});
   }
   if (tick.library_detail_revision !== libDetailRevision) {
