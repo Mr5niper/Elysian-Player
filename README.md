@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.3.0.0
+- **Version**: 2.4.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -47,6 +47,28 @@ megabytes. Audio runs on miniaudio.
   the next launch, and resumes the last track from where you stopped the first
   time you press play.
 
+### Library
+
+* Point the Library at one or more folders and it indexes what it finds into a
+  small database, so browsing does not depend on the folders being reachable.
+* Browse by album, artist or genre. Albums are grouped by band and ordered by
+  year within each; an album with no year tag sorts to the end of that band's
+  run rather than the front.
+* Opening an artist or a genre breaks the tracks into album sections. Files
+  with no album tag appear last, under their own heading.
+* Opening an album shows its cover beside the track list, with the year, track
+  count and running time. The cover stays put while the tracks scroll.
+* Cover art comes from the first track in the album that carries an image, so
+  an album whose opening track is untagged still gets artwork. Covers are read
+  only for the entries actually on screen.
+* Select tracks the same way as in the playlist and add them to it, or play
+  them straight away.
+* Manage the indexed folders from the Folders button. Removing one takes it out
+  of the library and nothing else; no files are touched.
+* The playlist reads its tags from this index. A track the library has already
+  seen needs no file opened at all, which is what makes a large collection on a
+  network share usable.
+
 ## Controls
 
 | Key(s)           | Action                  |
@@ -71,7 +93,10 @@ megabytes. Audio runs on miniaudio.
 Double-clicking the title bar maximises and restores, as it would on a normal
 window. The maximise button changes to a restore glyph while maximised.
 
-## Not in 2.3.0.0
+Selection in the library track lists follows the same rules. Double-clicking a
+row there plays that track.
+
+## Not in 2.4.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:
@@ -118,6 +143,12 @@ A second small file, `.elysian_player_instance`, holds a token used by the
 single-instance check. That check talks over a Windows named pipe rather than
 a network socket, so it never triggers a firewall prompt and cannot collide
 with another program over a port number.
+
+The library index is a SQLite database at `.elysian_library.db`, also in your
+home folder. It holds the tags and file paths it has seen, never the audio
+itself. Deleting it loses nothing but the index: the folders are remembered in
+the settings file and a rescan rebuilds it. A rescan only reads files whose
+modification time has changed, so repeating one is cheap.
 
 Problems are logged to `.elysian_player.log` in the same folder, rotating at
 512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
@@ -193,16 +224,25 @@ elysian/
   single_instance.py       hands a file to an already-running copy
   models/                  Track, Playlist
   playback/engine.py       miniaudio wrapper
-  services/                tags, album art, waveform, lyrics, discovery
+  services/                tags, album art, waveform, library, lyrics,
+                           discovery
   web/                     index.html, style.css, app.js: the interface
 ```
 
 Application state lives entirely on the Python side. The frontend polls a small
 snapshot and renders what it is given, so there is one source of truth.
 
+Every method the frontend can call is either a plain read of a snapshot or a
+request queued for the worker. Nothing on that boundary touches a disk, a
+network share or a database, because a bridge call that blocks freezes the
+interface. Library queries follow the same rule: a request is queued, the query
+runs on its own thread, and the result is collected when a revision counter
+changes. The library keeps three of those counters, for the index, the browse
+list and the open album, so opening a record does not refetch the grid.
+
 The frontend fetches the whole track list only when the row set changes.
-When a tag scan fills in metadata it fetches just the rows that changed --
-sending the full list for that meant over a megabyte a second on a long
+When a tag scan fills in metadata it fetches just the rows that changed.
+Sending the full list for that meant over a megabyte a second on a long
 playlist to communicate a couple of dozen updates.
 
 That poll adapts: 200ms while playing, 1s when paused, and a 2s heartbeat when
