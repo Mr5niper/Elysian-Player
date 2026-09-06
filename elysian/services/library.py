@@ -148,7 +148,6 @@ class LibraryService:
                     CREATE INDEX IF NOT EXISTS idx_album_group
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
-                    CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir);
                 """)
                 # Older databases predate the compilation column. Add it,
                 # and clear modified_at so the next scan actually re-reads
@@ -158,7 +157,6 @@ class LibraryService:
                 if "dir" not in have:
                     con.execute("ALTER TABLE tracks ADD COLUMN dir TEXT DEFAULT ''")
                     con.execute("UPDATE tracks SET modified_at = 0")
-                    con.execute("CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir)")
                     log.info("library upgraded; a rescan will fill in the "
                              "folder column")
                 if "compilation" not in have:
@@ -167,6 +165,11 @@ class LibraryService:
                     con.execute("UPDATE tracks SET modified_at = 0")
                     log.info("library upgraded; a rescan will fill in the "
                              "compilation flag")
+                # Indexes are created after the column checks above, not in
+                # the schema script: on an existing table the CREATE TABLE is
+                # skipped, so an index naming a newly added column would fail
+                # and abort the whole script before the migration ran.
+                con.execute("CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir)")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
