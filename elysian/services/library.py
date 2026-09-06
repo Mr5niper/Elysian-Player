@@ -376,6 +376,11 @@ class LibraryService:
         return data
 
     def albums(self) -> list:
+        # Grouped by band, then chronological within each band, with albums
+        # missing a year tag at the end of that band's run rather than the
+        # front: a NULL year sorts first in SQLite, which put an undated
+        # album ahead of everything the artist actually released.
+        #
         # GROUP BY and ORDER BY repeat the expression rather than using the
         # output alias: album_artist, album and artist are all real column
         # names too, and SQLite resolves the bare name to the column, which
@@ -388,7 +393,10 @@ class LibraryService:
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
             GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'), COALESCE(NULLIF(album,''), 'Unknown Album')
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE, year, COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
+            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
+                     CASE WHEN MIN(NULLIF(year,0)) IS NULL THEN 1 ELSE 0 END,
+                     year,
+                     COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
         """)
 
     def artists(self) -> list:
