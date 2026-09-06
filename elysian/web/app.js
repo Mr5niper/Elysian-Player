@@ -927,6 +927,8 @@ function renderLibrary() {
   // it, so there is never a question of which thing a click belongs to.
   folders.classList.toggle("hidden", !libShowFolders);
   $("lib-folders").classList.toggle("on", libShowFolders);
+  // Totals belong to the browse lists only.
+  $("libstat").classList.toggle("hidden", libShowFolders || showingDetail);
   if (libShowFolders) {
     grid.classList.add("hidden");
     $("libdetail").classList.add("hidden");

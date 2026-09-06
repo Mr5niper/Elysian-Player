@@ -506,8 +506,13 @@ html, body {
 #libempty.hidden { display: none; }
 #libempty svg { width: 34px; height: 34px; stroke: #4a3a42; }
 
+/* Library totals. Only meaningful on the browse lists: inside an album the
+   cover pane already carries that record's counts, and the folder panel is
+   about folders. There is no global .hidden rule, so this id needs its own,
+   declared after the base as usual. */
 #libstat {
   flex-shrink: 0; font-size: 11px; color: var(--muted);
   padding-top: 8px; white-space: nowrap;
   overflow: hidden; text-overflow: ellipsis;
 }
+#libstat.hidden { display: none; }
