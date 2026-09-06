@@ -412,6 +412,20 @@ class LibraryService:
             ORDER BY genre COLLATE NOCASE
         """)
 
+    def album_paths(self, album: str, album_artist: str = "") -> list:
+        """Candidate files for an album's cover, best first.
+
+        Ordered by disc and track so the first one tried is the opening
+        track, which is the most likely to carry the artwork.
+        """
+        sql = f"SELECT path FROM tracks WHERE {_EFFECTIVE_ALBUM} = ?"
+        args = [album or "Unknown Album"]
+        if album_artist:
+            sql += f" AND {_EFFECTIVE_ARTIST} = ?"
+            args.append(album_artist)
+        sql += " ORDER BY disc_number, track_number LIMIT 25"
+        return [r["path"] for r in self._rows(sql, tuple(args))]
+
     def album_tracks(self, album: str, album_artist: str = "") -> list:
         sql = f"""
             SELECT path, title, artist, album, album_artist, genre,
@@ -427,22 +441,29 @@ class LibraryService:
         return self._rows(sql, tuple(args))
 
     def artist_tracks(self, artist: str) -> list:
+        # Tracks with no album tag sort last rather than first. Their year
+        # is usually 0 too, so plain "ORDER BY year, album" would put the
+        # loose files above the actual records.
         return self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
             WHERE {_EFFECTIVE_ARTIST} = ?
-            ORDER BY year, album COLLATE NOCASE, disc_number, track_number
+            ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+                     year, album COLLATE NOCASE, disc_number, track_number
         """, (artist,))
 
     def genre_tracks(self, genre: str) -> list:
+        # Grouped by artist then album, with untagged files last within each
+        # artist, so the view reads as records rather than a loose pile.
         return self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
             WHERE genre = ?
             ORDER BY {_EFFECTIVE_ARTIST} COLLATE NOCASE,
-                     album COLLATE NOCASE, disc_number, track_number
+                     CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+                     year, album COLLATE NOCASE, disc_number, track_number
         """, (genre,))
 
     def search(self, needle: str, limit: int = 500) -> list:

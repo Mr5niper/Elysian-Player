@@ -877,6 +877,10 @@ let libRevision = -1;
 // Artists could sit for a full second before anything appeared.
 let libPending = 0;
 let libScanning = false;
+let libArt = {};                 // "artist\u0000album" -> data url or ""
+let libArtRevision = -1;
+let libArtSeen = new Set();      // already asked for, so no repeats
+let libArtObserver = null;
 let libBrowserRevision = -1;
 let libDetailRevision = -1;
 
@@ -936,11 +940,15 @@ function renderLibrary() {
     // the .hidden rule and leave the grid showing behind the track list.
     grid.classList.remove("aslist");
     grid.innerHTML = rows.map((it, i) => `
-      <div class="libcard" data-i="${i}">
+      <div class="libcard" data-i="${i}"
+           data-album="${esc(it.album || "")}"
+           data-artist="${esc(it.album_artist || "")}">
         <div class="art">${DISC_ICON}</div>
         <div class="t1">${esc(it.album)}</div>
         <div class="t2">${esc(it.album_artist)}${it.year ? " &middot; " + it.year : ""}</div>
       </div>`).join("");
+    paintLibArt();
+    watchLibArt();
   } else {
     // Artists and genres are a list rather than a grid: there is no
     // artwork to show, and a name reads better on one line than boxed.
@@ -958,15 +966,89 @@ function renderLibrary() {
   }
 }
 
-function renderLibTracks(items) {
-  $("libtracks").innerHTML = items.map((t) => `
-    <div class="librow" data-path="${esc(t.path)}">
+function trackRow(t, showAlbum) {
+  return `<div class="librow" data-path="${esc(t.path)}">
       <div class="n">${t.track_number || ""}</div>
       <div class="t">${esc(t.title)}</div>
       <div class="a">${esc(t.artist)}</div>
-      <div class="al">${esc(t.album)}</div>
+      <div class="al">${showAlbum ? esc(t.album) : ""}</div>
       <div class="d">${fmt(t.duration || 0)}</div>
-    </div>`).join("");
+    </div>`;
+}
+
+/* An artist or a genre is a set of records, not a loose pile of songs, so
+   the tracks are broken into album sections. The backend already returns
+   them in album order with untagged files last, so this only has to notice
+   where one album ends and the next begins.
+
+   Inside a section the album column is dropped, since the heading says it.
+   A genre spans many artists, so its headings carry the album artist too;
+   under a single artist that would just repeat the title of the pane. */
+/* Covers are fetched for the cards on screen, not for the whole library.
+   An IntersectionObserver is what makes that automatic: scrolling brings
+   new cards into view and each asks once, so a thousand-album library
+   decodes only what has actually been looked at. */
+/* The key is built here rather than stored in an attribute: it joins the
+   two names with a NUL, which an HTML attribute does not preserve, so a
+   data-key round trip came back without it and never matched. */
+function artKey(card) {
+  return `${card.dataset.artist || ""}\u0000${card.dataset.album || ""}`;
+}
+
+function watchLibArt() {
+  if (libArtObserver) libArtObserver.disconnect();
+  const a = api();
+  if (!a || typeof a.library_request_art !== "function") return;
+  libArtObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target;
+      const key = artKey(card);
+      if (libArtSeen.has(key)) continue;
+      libArtSeen.add(key);
+      a.library_request_art(card.dataset.album || "", card.dataset.artist || "");
+    }
+  }, { root: $("libgrid"), rootMargin: "200px" });
+  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
+    libArtObserver.observe(c));
+}
+
+function paintLibArt() {
+  $("libgrid").querySelectorAll(".libcard").forEach((card) => {
+    const url = libArt[artKey(card)];
+    if (!url) return;
+    const art = card.querySelector(".art");
+    if (art.dataset.painted === url) return;
+    art.dataset.painted = url;
+    art.innerHTML = `<img src="${esc(url)}" alt="">`;
+  });
+}
+
+function renderLibTracks(items) {
+  const box = $("libtracks");
+  const kind = libDetail ? libDetail.kind : "";
+  const grouped = kind === "artist" || kind === "genre";
+  if (!grouped) {
+    box.innerHTML = items.map((t) => trackRow(t, true)).join("");
+    paintLibSelection();
+    return;
+  }
+  const html = [];
+  let current = null;
+  for (const t of items) {
+    const who = t.album_artist || t.artist || "";
+    const key = `${who}\u0000${t.album || ""}`;
+    if (key !== current) {
+      current = key;
+      const bits = [];
+      if (kind === "genre" && who) bits.push(`<span class="by">${esc(who)}</span>`);
+      if (t.year) bits.push(`<span class="yr">${t.year}</span>`);
+      const heading = t.album || "Not part of an album";
+      html.push(`<div class="libsection">${esc(heading)}${bits.join("")}</div>`);
+    }
+    html.push(trackRow(t, false));
+  }
+  box.innerHTML = html.join("");
   paintLibSelection();
 }
 
@@ -1082,6 +1164,14 @@ function applyLibraryTick(tick) {
       libDetail = d;
       libSelected.clear();
       renderLibrary();
+    }).catch(() => {});
+  }
+  if (tick.library_art_revision !== libArtRevision) {
+    libArtRevision = tick.library_art_revision;
+    a.library_get_art().then((m) => {
+      if (!m) return;
+      libArt = m;
+      paintLibArt();
     }).catch(() => {});
   }
   if (tick.library_revision !== libRevision) {

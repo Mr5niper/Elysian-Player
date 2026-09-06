@@ -94,6 +94,12 @@ class Api:
         self._library_browser = {"view": "albums", "items": [], "revision": 0}
         self._library_detail = {"kind": "", "key": "", "key2": "",
                                 "title": "", "items": [], "revision": 0}
+        # Cover art, resolved only for the cards actually on screen. A
+        # library of a thousand albums is a thousand image decodes, and
+        # most of them are for cards nobody has scrolled to.
+        self._library_art = {}
+        self._library_art_revision = 0
+        self._library_art_pending = set()
         # The playlist scanner consults the index before opening a file. A
         # track the library already knows costs a local lookup instead of a
         # tag read over a share, which is the expensive thing the whole
@@ -107,7 +113,8 @@ class Api:
             "status": "", "maximized": False, "revision": 0,
             "meta_revision": 0, "scan_pending": 0,
             "library_revision": 0, "library_browser_revision": 0,
-            "library_detail_revision": 0, "library_scanning": False,
+            "library_detail_revision": 0, "library_art_revision": 0,
+            "library_scanning": False,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -364,6 +371,7 @@ class Api:
                 "library_revision": self._library_revision,
                 "library_browser_revision": self._library_browser_revision,
                 "library_detail_revision": self._library_detail_revision,
+                "library_art_revision": self._library_art_revision,
                 "library_scanning": self._library_scanning,
             }
             if self._revision != self._full_revision:
@@ -1051,6 +1059,39 @@ class Api:
                                 "title": title, "items": items,
                                 "revision": self._library_detail_revision}
 
+    def _do_library_art(self, album, album_artist) -> None:
+        key = f"{album_artist}\u0000{album}"
+        if key in self._library_art or key in self._library_art_pending:
+            return
+        self._library_art_pending.add(key)
+
+        def work():
+            url = None
+            try:
+                # First track with a usable image wins. Albums whose opening
+                # track happens to be untagged still get a cover from a
+                # later one rather than showing the placeholder forever.
+                for path in self._library.album_paths(album, album_artist):
+                    url = self._art.data_url(path)
+                    if url:
+                        break
+            except Exception:
+                log.warning("library art failed for %s", album, exc_info=True)
+                url = None
+            self._post("library_art_ready", key, url)
+
+        threading.Thread(target=work, name="elysian-lib-art",
+                         daemon=True).start()
+
+    def _do_library_art_ready(self, key, url) -> None:
+        self._library_art_pending.discard(key)
+        # Cached even when nothing was found, so a coverless album is not
+        # searched again every time it scrolls past.
+        self._library_art[key] = url or ""
+        while len(self._library_art) > 600:
+            self._library_art.pop(next(iter(self._library_art)), None)
+        self._library_art_revision += 1
+
     def _do_library_enqueue(self, paths) -> None:
         added = self._do_add_audio_paths(paths)
         if added:
@@ -1110,6 +1151,12 @@ class Api:
 
     def library_get_detail(self) -> dict:
         return dict(self._library_detail)
+
+    def library_request_art(self, album, album_artist="") -> None:
+        self._post("library_art", str(album or ""), str(album_artist or ""))
+
+    def library_get_art(self) -> dict:
+        return dict(self._library_art)
 
     def library_enqueue(self, paths) -> None:
         self._post("library_enqueue", [str(p) for p in (paths or []) if p])
@@ -1338,6 +1385,7 @@ class Api:
         "library_request_detail", "library_get_state",
         "library_get_browser", "library_get_detail",
         "library_enqueue", "library_play",
+        "library_request_art", "library_get_art",
     })
 
     #: Public for the host process only, never called from JavaScript, but
