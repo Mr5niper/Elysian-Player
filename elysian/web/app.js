@@ -62,6 +62,7 @@ function setView(name) {
   // Ask for the pane's contents the first time it is opened, rather than
   // querying a database nobody is looking at on startup.
   if (name === "library") libraryOpened();
+  else { libShowFolders = false; libConfirmRemove = null; }
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -881,6 +882,9 @@ let libArt = {};                 // "artist\u0000album" -> data url or ""
 let libArtRevision = -1;
 let libArtSeen = new Set();      // already asked for, so no repeats
 let libArtObserver = null;
+let libRoots = [];               // folders currently in the library
+let libShowFolders = false;
+let libConfirmRemove = null;     // path awaiting a second click
 let libBrowserRevision = -1;
 let libDetailRevision = -1;
 
@@ -916,7 +920,21 @@ function renderLibrary() {
   const tracks = $("libtracks");
   const crumb = $("libcrumb");
   const empty = $("libempty");
+  const folders = $("libfolders");
   const showingDetail = libDetail !== null;
+
+  // Managing folders replaces the browse area rather than floating over
+  // it, so there is never a question of which thing a click belongs to.
+  folders.classList.toggle("hidden", !libShowFolders);
+  $("lib-folders").classList.toggle("on", libShowFolders);
+  if (libShowFolders) {
+    grid.classList.add("hidden");
+    tracks.classList.add("hidden");
+    crumb.classList.add("hidden");
+    empty.classList.add("hidden");
+    renderFolders();
+    return;
+  }
 
   crumb.classList.toggle("hidden", !showingDetail);
   if (showingDetail) {
@@ -1024,6 +1042,26 @@ function paintLibArt() {
   });
 }
 
+function renderFolders() {
+  const list = $("foldlist");
+  if (!libRoots.length) {
+    list.innerHTML = '<div class="foldempty">No folders yet. '
+      + 'Add one and its music is indexed in the background.</div>';
+    return;
+  }
+  list.innerHTML = libRoots.map((path) => {
+    const armed = libConfirmRemove === path;
+    // Two clicks rather than a dialog: removing drops every track under
+    // that folder from the index, which is not something to do by a
+    // stray click, but it is also not destructive enough to interrupt.
+    return `<div class="foldrow" data-path="${esc(path)}">
+      <div class="path" title="${esc(path)}"><bdi>${esc(path)}</bdi></div>
+      <button class="tbtn${armed ? " danger" : ""}" data-remove="${esc(path)}">
+        ${armed ? "Remove?" : "Remove"}</button>
+    </div>`;
+  }).join("");
+}
+
 function renderLibTracks(items) {
   const box = $("libtracks");
   const kind = libDetail ? libDetail.kind : "";
@@ -1087,6 +1125,13 @@ document.querySelectorAll(".libtab").forEach((b) =>
 
 $("libfilter").addEventListener("input", () => renderLibrary());
 
+$("libfolders").addEventListener("click", (e) => {
+  if (libConfirmRemove && !e.target.closest("[data-remove]")) {
+    libConfirmRemove = null;
+    renderFolders();
+  }
+});
+
 $("libgrid").addEventListener("click", (e) => {
   const card = e.target.closest(".libcard, .librow");
   if (!card) return;
@@ -1134,6 +1179,35 @@ $("lib-play").addEventListener("click", () => {
   const a = api();
   if (a) a.library_play(libChosenPaths());
 });
+$("lib-folders").addEventListener("click", () => {
+  libShowFolders = !libShowFolders;
+  libConfirmRemove = null;
+  renderLibrary();
+});
+
+$("foldlist").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-remove]");
+  if (!btn) return;
+  const path = btn.dataset.remove;
+  if (libConfirmRemove !== path) {
+    libConfirmRemove = path;      // arm, and let a click elsewhere disarm
+    renderFolders();
+    return;
+  }
+  libConfirmRemove = null;
+  const a = api();
+  if (a) {
+    a.library_remove_root(path);
+    // Drop it locally so the row goes at once; the backend confirms on the
+    // next state bump either way.
+    libRoots = libRoots.filter((p) => p !== path);
+    libArtSeen = new Set();
+    libArt = {};
+    renderFolders();
+    schedule();
+  }
+});
+
 $("lib-add").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
 $("lib-add-empty").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
 $("lib-rescan").addEventListener("click", () => { const a = api(); if (a) a.library_rescan(); });
@@ -1183,7 +1257,9 @@ function applyLibraryTick(tick) {
         fmtCount(st.albums || 0, "album", "albums"),
         fmtCount(st.artists || 0, "artist", "artists"),
       ];
-      if ((st.roots || []).length) bits.push(fmtCount(st.roots.length, "folder", "folders"));
+      libRoots = st.roots || [];
+      if (libRoots.length) bits.push(fmtCount(libRoots.length, "folder", "folders"));
+      if (libShowFolders) renderFolders();
       $("libstat").textContent = bits.join("   |   ");
     }).catch(() => {});
   }

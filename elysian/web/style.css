@@ -338,6 +338,7 @@ html, body {
 }
 .libtab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
 .libtab.active { border-color: var(--accent); color: var(--accent-hi); }
+.tbtn.on { border-color: var(--accent); color: var(--accent-hi); }
 #libfilter {
   flex: 1; min-width: 0; background: rgba(0,0,0,0.28);
   border: 1px solid var(--line); border-radius: 7px;
@@ -435,6 +436,36 @@ html, body {
 .libsection .yr, .libsection .by {
   font-size: 11px; font-weight: 400; color: var(--muted);
 }
+
+/* Folder management. Declared before its .hidden rule below, which has
+   equal specificity, so the order matters: with it after, hiding would
+   lose and the panel would sit on top of the grid. */
+#libfolders {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  gap: 10px; overflow-y: auto;
+}
+#libfolders.hidden { display: none; }
+.foldhead { font-size: 12.5px; font-weight: 600; color: var(--accent-hi); }
+#foldlist { display: flex; flex-direction: column; gap: 4px; }
+.foldrow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 8px;
+  background: rgba(255,255,255,0.03); font-size: 12.5px;
+}
+.foldrow:hover { background: rgba(255,255,255,0.06); }
+/* Long paths truncate from the left, so the folder name stays readable
+   rather than the drive letter. direction: rtl does that, but it also
+   reorders the separators, which moved a leading slash to the end; the
+   bdi element around the text isolates it and keeps them in place. */
+.foldrow .path {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+  text-align: left; user-select: text;
+}
+.foldrow .tbtn.danger { color: var(--accent-hi); border-color: var(--accent-dim); }
+.foldempty { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+.foldfoot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.foldnote { font-size: 11px; color: var(--muted); }
 
 #libempty {
   flex: 1; display: flex; flex-direction: column;

@@ -73,7 +73,7 @@
             <button class="libtab" data-lib="genres">Genres</button>
           </div>
           <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
-          <button class="tbtn" id="lib-add">Add folder</button>
+          <button class="tbtn" id="lib-folders">Folders</button>
           <button class="tbtn" id="lib-rescan">Rescan</button>
         </div>
 
@@ -83,6 +83,16 @@
           <span class="spacer"></span>
           <button class="tbtn" id="lib-queue">Add to playlist</button>
           <button class="tbtn" id="lib-play">Play</button>
+        </div>
+
+        <div id="libfolders" class="hidden">
+          <div class="foldhead">Folders in your library</div>
+          <div id="foldlist"></div>
+          <div class="foldfoot">
+            <button class="tbtn" id="lib-add">Add a folder</button>
+            <span class="foldnote">Removing a folder only takes it out of the
+              library. Nothing on disk is deleted.</span>
+          </div>
         </div>
 
         <div id="libgrid"></div>
