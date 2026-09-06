@@ -321,3 +321,198 @@ html, body {
 
 /* Rows still waiting on a tag read from the network. */
 .row .r-artist:empty::after { content: ""; }
+
+/* ---- library ----
+   Reuses the same tokens as the playlist so the two panes read as one
+   application: same row height, same accent, same muted grey. */
+
+#libtools {
+  display: flex; gap: 8px; align-items: center;
+  margin-bottom: 8px; flex-shrink: 0;
+}
+#libtabs { display: flex; gap: 4px; }
+.libtab {
+  background: none; border: 1px solid transparent; border-radius: 7px;
+  padding: 6px 12px; color: var(--muted); font-size: 12px;
+  font-family: inherit; cursor: default; white-space: nowrap;
+}
+.libtab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.libtab.active { border-color: var(--accent); color: var(--accent-hi); }
+.tbtn.on { border-color: var(--accent); color: var(--accent-hi); }
+#libfilter {
+  flex: 1; min-width: 0; background: rgba(0,0,0,0.28);
+  border: 1px solid var(--line); border-radius: 7px;
+  padding: 7px 11px; color: var(--text); font-size: 12px;
+  font-family: inherit; outline: none; user-select: text;
+}
+#libfilter:focus { border-color: var(--accent); }
+#libfilter::placeholder { color: #6a6a74; }
+
+#libcrumb {
+  display: flex; align-items: center; gap: 10px;
+  margin-bottom: 8px; flex-shrink: 0; font-size: 13px;
+}
+#libcrumb.hidden { display: none; }
+#libcrumb .spacer { flex: 1; }
+#libcrumb-title {
+  font-weight: 500; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Album and artist tiles. content-visibility keeps a large grid cheap
+   without the virtualisation the track list needs, since a library pane
+   holds thousands of entries rather than tens of thousands. */
+#libgrid {
+  flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
+  display: grid; gap: 12px; align-content: start;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  padding-right: 4px;
+}
+/* Artists and genres render as rows, so the grid columns are dropped. */
+#libgrid.aslist { display: block; }
+/* Declared last, and deliberately: this and .aslist have equal specificity,
+   so whichever comes later wins. With .aslist last, drilling into an artist
+   left the artist list on screen underneath the tracks. */
+#libgrid.hidden, #libgrid.aslist.hidden { display: none; }
+#libgrid::-webkit-scrollbar { width: 9px; }
+#libgrid::-webkit-scrollbar-track { background: transparent; }
+#libgrid::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
+#libgrid::-webkit-scrollbar-thumb:hover { background: #4a3a42; }
+
+.libcard {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 196px;
+  border-radius: 9px; padding: 10px; background: rgba(255,255,255,0.03);
+}
+.libcard:hover { background: rgba(255,255,255,0.07); }
+.libcard:active { background: rgba(192,57,47,0.20); }
+.libcard .art {
+  width: 100%; aspect-ratio: 1 / 1; border-radius: 7px;
+  background: var(--panel-2); display: flex;
+  align-items: center; justify-content: center; margin-bottom: 8px;
+}
+.libcard .art svg { width: 34px; height: 34px; stroke: var(--accent-dim); }
+.libcard .art img {
+  width: 100%; height: 100%; border-radius: 7px;
+  object-fit: cover; display: block;
+}
+.libcard .t1, .libcard .t2 {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.libcard .t1 { font-size: 12.5px; font-weight: 500; }
+.libcard .t2 { font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+/* Rows for the artist and genre lists, and for a selected album. */
+/* Album detail: the cover stays put while the tracks scroll beside it, so
+   the record you are inside is always visible. Base rule first, .hidden
+   after, since they have equal specificity and the later one wins. */
+#libdetail {
+  flex: 1; min-height: 0; display: flex; gap: 18px; align-items: stretch;
+}
+#libdetail.hidden { display: none; }
+
+#libcover {
+  width: 232px; flex-shrink: 0; display: flex; flex-direction: column;
+  gap: 3px; align-self: flex-start;
+}
+#libcover.hidden { display: none; }
+#libcover .cover {
+  width: 232px; height: 232px; border-radius: 10px;
+  background: var(--panel-2); margin-bottom: 9px;
+  display: flex; align-items: center; justify-content: center;
+  overflow: hidden;
+}
+#libcover .cover img {
+  width: 100%; height: 100%; object-fit: cover; display: block;
+}
+#libcover .cover svg { width: 48px; height: 48px; stroke: var(--accent-dim); }
+#libcover .ct {
+  font-size: 14px; font-weight: 600; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+}
+#libcover .ca { font-size: 12.5px; color: var(--text); }
+#libcover .cs { font-size: 11px; color: var(--muted); margin-top: 3px; }
+
+#libtracks {
+  flex: 1; min-width: 0; min-height: 0;
+  overflow-y: auto; overflow-x: hidden; position: relative;
+}
+#libtracks.hidden { display: none; }
+#libtracks::-webkit-scrollbar { width: 9px; }
+#libtracks::-webkit-scrollbar-track { background: transparent; }
+#libtracks::-webkit-scrollbar-thumb { background: #33292f; border-radius: 5px; }
+.librow {
+  display: grid; align-items: center; gap: 10px; height: 30px;
+  grid-template-columns: 34px minmax(0,1fr) minmax(0,0.6fr) minmax(0,0.5fr) 46px;
+  padding: 0 10px; border-radius: 7px; font-size: 12.5px;
+}
+.librow:hover { background: rgba(255,255,255,0.05); }
+.librow.selected { background: rgba(192,57,47,0.18); }
+.librow .n, .librow .d { color: var(--muted); font-size: 11px; }
+.librow .n { text-align: center; }
+.librow .d { text-align: right; }
+.librow .a, .librow .al { color: var(--muted); }
+.librow .t, .librow .a, .librow .al {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* Album heading inside an artist's track list. */
+.libsection {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 14px 10px 5px; font-size: 12.5px; font-weight: 600;
+  color: var(--accent-hi);
+}
+.libsection:first-child { padding-top: 4px; }
+.libsection .yr, .libsection .by {
+  font-size: 11px; font-weight: 400; color: var(--muted);
+}
+
+/* Folder management. Declared before its .hidden rule below, which has
+   equal specificity, so the order matters: with it after, hiding would
+   lose and the panel would sit on top of the grid. */
+#libfolders {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+  gap: 10px; overflow-y: auto;
+}
+#libfolders.hidden { display: none; }
+.foldhead { font-size: 12.5px; font-weight: 600; color: var(--accent-hi); }
+#foldlist { display: flex; flex-direction: column; gap: 4px; }
+.foldrow {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 12px; border-radius: 8px;
+  background: rgba(255,255,255,0.03); font-size: 12.5px;
+}
+.foldrow:hover { background: rgba(255,255,255,0.06); }
+/* Long paths truncate from the left, so the folder name stays readable
+   rather than the drive letter. direction: rtl does that, but it also
+   reorders the separators, which moved a leading slash to the end; the
+   bdi element around the text isolates it and keeps them in place. */
+.foldrow .path {
+  flex: 1; min-width: 0; overflow: hidden;
+  text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+  text-align: left; user-select: text;
+}
+.foldrow .tbtn.danger { color: var(--accent-hi); border-color: var(--accent-dim); }
+.foldempty { color: var(--muted); font-size: 12.5px; padding: 4px 2px; }
+.foldfoot { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.foldnote { font-size: 11px; color: var(--muted); }
+
+#libempty {
+  flex: 1; display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px; color: var(--muted); text-align: center;
+}
+#libempty.hidden { display: none; }
+#libempty svg { width: 34px; height: 34px; stroke: #4a3a42; }
+
+/* Library totals. Only meaningful on the browse lists: inside an album the
+   cover pane already carries that record's counts, and the folder panel is
+   about folders. There is no global .hidden rule, so this id needs its own,
+   declared after the base as usual. */
+#libstat {
+  flex-shrink: 0; font-size: 11px; color: var(--muted);
+  padding-top: 8px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+#libstat.hidden { display: none; }

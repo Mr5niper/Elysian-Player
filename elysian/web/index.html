@@ -29,6 +29,10 @@
 
   <div id="body">
     <div id="sidebar">
+      <div class="navitem" data-view="library">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5a2 2 0 0 1 2-2h2v18H6a2 2 0 0 1-2-2z"/><path d="M10 3h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-2z"/><path d="m16.5 4.5 2 .5a2 2 0 0 1 1.4 2.4l-3 12"/></svg>
+        Library
+      </div>
       <div class="navitem" data-view="playlists">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="6" x2="15" y2="6"/><line x1="3" y1="12" x2="15" y2="12"/><line x1="3" y1="18" x2="11" y2="18"/><circle cx="19" cy="16" r="3"/><line x1="22" y1="16" x2="22" y2="7"/></svg>
         Playlist
@@ -59,6 +63,55 @@
         </div>
         <canvas id="wave"></canvas>
       </div>
+      </div>
+
+      <div id="view-library" class="view hidden">
+        <div id="libtools">
+          <div id="libtabs">
+            <button class="libtab active" data-lib="albums">Albums</button>
+            <button class="libtab" data-lib="artists">Artists</button>
+            <button class="libtab" data-lib="genres">Genres</button>
+          </div>
+          <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
+          <button class="tbtn" id="lib-folders">Folders</button>
+          <button class="tbtn" id="lib-rescan">Rescan</button>
+        </div>
+
+        <div id="libcrumb" class="hidden">
+          <button class="tbtn" id="lib-back">Back</button>
+          <span id="libcrumb-title"></span>
+          <span class="spacer"></span>
+          <button class="tbtn" id="lib-queue">Add to playlist</button>
+          <button class="tbtn" id="lib-play">Play</button>
+        </div>
+
+        <div id="libfolders" class="hidden">
+          <div class="foldhead">Folders in your library</div>
+          <div id="foldlist"></div>
+          <div class="foldfoot">
+            <button class="tbtn" id="lib-add">Add a folder</button>
+            <span class="foldnote">Removing a folder only takes it out of the
+              library. Nothing on disk is deleted.</span>
+          </div>
+        </div>
+
+        <div id="libgrid"></div>
+        <div id="libdetail" class="hidden">
+          <div id="libcover">
+            <div class="cover" id="libcover-art"></div>
+            <div class="ct" id="libcover-title"></div>
+            <div class="ca" id="libcover-artist"></div>
+            <div class="cs" id="libcover-sub"></div>
+          </div>
+          <div id="libtracks"></div>
+        </div>
+
+        <div id="libempty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+          <div>No music indexed yet</div>
+          <button class="tbtn" id="lib-add-empty">Add a folder</button>
+        </div>
+        <div id="libstat"></div>
       </div>
 
       <div id="view-list" class="view hidden">

@@ -18,6 +18,7 @@ from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
 from .services.art import ArtProvider
+from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.waveform import peaks_for
 
@@ -79,12 +80,41 @@ class Api:
         self._dirty: set[int] = set()
         self._meta_revision = 0
 
+        # Library state. Three counters rather than one, so the frontend
+        # refetches only the pane that actually changed: the index itself
+        # (a scan finished, a root was added), the browser list, and the
+        # detail list are all independent of each other and of the playlist.
+        self._library = LibraryService(config.LIBRARY_DB_FILE)
+        self._library_revision = 0
+        self._library_browser_revision = 0
+        self._library_detail_revision = 0
+        self._library_scanning = False
+        self._library_summary = {"tracks": 0, "artists": 0, "albums": 0,
+                                 "genres": 0, "duration": 0.0, "roots": []}
+        self._library_browser = {"view": "albums", "items": [], "revision": 0}
+        self._library_detail = {"kind": "", "key": "", "key2": "",
+                                "title": "", "items": [], "revision": 0}
+        # Cover art, resolved only for the cards actually on screen. A
+        # library of a thousand albums is a thousand image decodes, and
+        # most of them are for cards nobody has scrolled to.
+        self._library_art = {}
+        self._library_art_revision = 0
+        self._library_art_pending = set()
+        # The playlist scanner consults the index before opening a file. A
+        # track the library already knows costs a local lookup instead of a
+        # tag read over a share, which is the expensive thing the whole
+        # prefetch scheme exists to ration.
+        self._scanner.resolver = self._library.lookup_one
+
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
             "shuffle": self._shuffle, "repeat": self._repeat,
             "status": "", "maximized": False, "revision": 0,
             "meta_revision": 0, "scan_pending": 0,
+            "library_revision": 0, "library_browser_revision": 0,
+            "library_detail_revision": 0, "library_art_revision": 0,
+            "library_scanning": False,
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -338,6 +368,11 @@ class Api:
                 # Lets the frontend keep the queue topped up without ever
                 # dumping a whole playlist into it.
                 "scan_pending": self._scanner.pending,
+                "library_revision": self._library_revision,
+                "library_browser_revision": self._library_browser_revision,
+                "library_detail_revision": self._library_detail_revision,
+                "library_art_revision": self._library_art_revision,
+                "library_scanning": self._library_scanning,
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
@@ -544,7 +579,7 @@ class Api:
         elif not folders:
             self._set_status("No audio files found")
 
-    def _do_add_audio_paths(self, paths) -> None:
+    def _do_add_audio_paths(self, paths) -> int:
         # _lock guards readers that iterate playlist state from the bridge
         # thread (get_meta), now that mutation itself is worker-only.
         with self._lock:
@@ -558,6 +593,10 @@ class Api:
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
         else:
             self._set_status("Already in the playlist")
+        # Returned so callers can say something more specific than the
+        # generic status above; _do_library_enqueue was already written as
+        # though this reported a count.
+        return len(added)
 
     def add_files(self) -> int:
         import webview
@@ -874,6 +913,264 @@ class Api:
                 continue
             bag.insert(random.randrange(len(bag) + 1), tid)
 
+    # ---- library: worker side -------------------------------------------
+    #
+    # Every query runs on a thread of its own and posts its result back,
+    # rather than running on the worker. A GROUP BY over a large library is
+    # not free, and the worker is what services play, seek and next: a
+    # browse should never be able to stall transport. This is the same
+    # shape already used for album art and waveform peaks.
+
+    def _bump_library(self) -> None:
+        self._library_revision += 1
+
+    def _refresh_library_summary(self) -> None:
+        def work():
+            try:
+                data = self._library.summary()
+            except Exception:
+                log.exception("library summary failed")
+                return
+            self._post("library_summary_ready", data)
+        threading.Thread(target=work, name="elysian-lib-summary",
+                         daemon=True).start()
+
+    def _do_library_summary_ready(self, data) -> None:
+        self._library_summary = data
+        self._settings["library_roots"] = list(data.get("roots", []))
+        settings_store.save(self._settings)
+        self._bump_library()
+
+    def _do_library_add_root(self, path) -> None:
+        if self._library.add_root(path):
+            self._bump_library()
+            self._do_library_scan(path)
+        else:
+            self._set_status("Could not add that folder to the library")
+
+    def _do_library_remove_root(self, path) -> None:
+        removed = self._library.remove_root(path)
+        self._set_status(f"Removed {removed} track(s) from the library")
+        self._bump_library()
+        self._refresh_library_summary()
+        self._do_library_browser(self._library_browser.get("view", "albums"))
+
+    def _do_library_scan(self, root=None) -> None:
+        if self._library_scanning:
+            self._set_status("A library scan is already running")
+            return
+        self._library_scanning = True
+        self._set_status("Scanning library...", 60.0)
+
+        def work():
+            try:
+                if root:
+                    result = self._library.scan_root(root, progress=report)
+                else:
+                    result = self._library.rescan_all(progress=report)
+            except Exception as exc:
+                log.exception("library scan failed")
+                self._post("library_scan_failed", str(exc))
+                return
+            self._post("library_scan_done", result)
+
+        def report(done, total):
+            # Posted rather than written directly: the counter is read by
+            # the snapshot the frontend polls, and that belongs to the
+            # worker like everything else it reads.
+            self._post("library_scan_progress", int(done), int(total))
+
+        threading.Thread(target=work, name="elysian-lib-scan",
+                         daemon=True).start()
+
+    def _do_library_scan_progress(self, done, total) -> None:
+        self._set_status(f"Scanning library... {done} of {total}", 60.0)
+
+    def _do_library_scan_done(self, result) -> None:
+        self._library_scanning = False
+        scanned = int(result.get("scanned", 0) or 0)
+        updated = int(result.get("updated", 0) or 0)
+        removed = int(result.get("removed", 0) or 0)
+        if result.get("cancelled"):
+            self._set_status("Library scan cancelled")
+        elif updated or removed:
+            self._set_status(f"Library: {scanned} seen, {updated} added or "
+                             f"updated, {removed} gone")
+        else:
+            self._set_status(f"Library up to date, {scanned} tracks")
+        self._bump_library()
+        self._refresh_library_summary()
+        self._do_library_browser(self._library_browser.get("view", "albums"))
+
+    def _do_library_scan_failed(self, message) -> None:
+        self._library_scanning = False
+        self._set_status(f"Library scan failed: {message}")
+
+    def _do_library_browser(self, view) -> None:
+        view = view if view in ("albums", "artists", "genres") else "albums"
+
+        def work():
+            try:
+                if view == "artists":
+                    items = self._library.artists()
+                elif view == "genres":
+                    items = self._library.genres()
+                else:
+                    items = self._library.albums()
+            except Exception:
+                log.exception("library browser query failed")
+                items = []
+            self._post("library_browser_ready", view, items)
+
+        threading.Thread(target=work, name="elysian-lib-browse",
+                         daemon=True).start()
+
+    def _do_library_browser_ready(self, view, items) -> None:
+        self._library_browser_revision += 1
+        self._library_browser = {"view": view, "items": items,
+                                 "revision": self._library_browser_revision}
+        self._settings["library_view"] = view
+        settings_store.save(self._settings)
+
+    def _do_library_detail(self, kind, key, key2="") -> None:
+        def work():
+            try:
+                if kind == "album":
+                    items = self._library.album_tracks(key, key2)
+                    title = key
+                elif kind == "artist":
+                    items = self._library.artist_tracks(key)
+                    title = key
+                elif kind == "genre":
+                    items = self._library.genre_tracks(key)
+                    title = key
+                elif kind == "search":
+                    items = self._library.search(key)
+                    title = f'Search: {key}'
+                else:
+                    items, title = [], ""
+            except Exception:
+                log.exception("library detail query failed")
+                items, title = [], ""
+            self._post("library_detail_ready", kind, key, key2, title, items)
+
+        threading.Thread(target=work, name="elysian-lib-detail",
+                         daemon=True).start()
+
+    def _do_library_detail_ready(self, kind, key, key2, title, items) -> None:
+        self._library_detail_revision += 1
+        self._library_detail = {"kind": kind, "key": key, "key2": key2,
+                                "title": title, "items": items,
+                                "revision": self._library_detail_revision}
+
+    def _do_library_art(self, album, album_artist) -> None:
+        key = f"{album_artist}\u0000{album}"
+        if key in self._library_art or key in self._library_art_pending:
+            return
+        self._library_art_pending.add(key)
+
+        def work():
+            url = None
+            try:
+                # First track with a usable image wins. Albums whose opening
+                # track happens to be untagged still get a cover from a
+                # later one rather than showing the placeholder forever.
+                for path in self._library.album_paths(album, album_artist):
+                    url = self._art.data_url(path)
+                    if url:
+                        break
+            except Exception:
+                log.warning("library art failed for %s", album, exc_info=True)
+                url = None
+            self._post("library_art_ready", key, url)
+
+        threading.Thread(target=work, name="elysian-lib-art",
+                         daemon=True).start()
+
+    def _do_library_art_ready(self, key, url) -> None:
+        self._library_art_pending.discard(key)
+        # Cached even when nothing was found, so a coverless album is not
+        # searched again every time it scrolls past.
+        self._library_art[key] = url or ""
+        while len(self._library_art) > 600:
+            self._library_art.pop(next(iter(self._library_art)), None)
+        self._library_art_revision += 1
+
+    def _do_library_enqueue(self, paths) -> None:
+        added = self._do_add_audio_paths(paths)
+        if added:
+            self._set_status(f"Added {added} track(s) from the library")
+
+    def _do_library_play(self, paths) -> None:
+        if not paths:
+            return
+        self._do_add_audio_paths(paths)
+        with self._lock:
+            index = self._playlist.index_of_path(paths[0])
+            target = self._playlist.id_at(index) if index >= 0 else -1
+        if target >= 0:
+            self._do_play_id(target)
+
+    # ---- library: bridge side -------------------------------------------
+
+    def library_add_folder(self) -> int:
+        """Picks a folder, then hands the work to the worker."""
+        import webview
+
+        result = self._window.create_file_dialog(webview.FOLDER_DIALOG)
+        if not result:
+            return 0
+        folder = result[0] if isinstance(result, (list, tuple)) else result
+        if not folder:
+            return 0
+        self._post("library_add_root", str(folder))
+        return 1
+
+    def library_remove_root(self, path) -> None:
+        self._post("library_remove_root", str(path))
+
+    def library_rescan(self) -> None:
+        self._post("library_scan", None)
+
+    def library_cancel_scan(self) -> None:
+        self._library.cancel()
+
+    def library_request_browser(self, view) -> None:
+        self._post("library_browser", str(view))
+
+    def library_request_detail(self, kind, key, key2="") -> None:
+        self._post("library_detail", str(kind), str(key), str(key2 or ""))
+
+    def library_get_state(self) -> dict:
+        """Small, pure read: counters and the summary, never a query."""
+        data = dict(self._library_summary)
+        data["revision"] = self._library_revision
+        data["browser_revision"] = self._library_browser_revision
+        data["detail_revision"] = self._library_detail_revision
+        data["scanning"] = self._library_scanning
+        # The tab the library was left on. Saved when a browse result lands,
+        # but nothing read it back, so the frontend always opened on albums.
+        data["view"] = self._settings.get("library_view", "albums")
+        return data
+
+    def library_get_browser(self) -> dict:
+        return dict(self._library_browser)
+
+    def library_get_detail(self) -> dict:
+        return dict(self._library_detail)
+
+    def library_request_art(self, album, album_artist="") -> None:
+        self._post("library_art", str(album or ""), str(album_artist or ""))
+
+    def library_get_art(self) -> dict:
+        return dict(self._library_art)
+
+    def library_enqueue(self, paths) -> None:
+        self._post("library_enqueue", [str(p) for p in (paths or []) if p])
+
+    def library_play(self, paths) -> None:
+        self._post("library_play", [str(p) for p in (paths or []) if p])
+
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
     # run on the call from JavaScript. The frontend already updates itself
@@ -988,6 +1285,17 @@ class Api:
                     break
         self._bump()
 
+        # Re-register saved roots so the library is browsable straight away.
+        # No scan is started here: opening the app should not go and read a
+        # share, and the index already on disk answers every query.
+        for root in self._settings.get("library_roots", []):
+            try:
+                self._library.add_root(root)
+            except Exception:
+                log.warning("could not restore library root %s", root,
+                            exc_info=True)
+        self._refresh_library_summary()
+
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
         self._settings.update({
@@ -1015,6 +1323,7 @@ class Api:
     #: Underscored because pywebview walks every public attribute of this
     #: object when it builds the JS API.
     _PERSISTED_COMMANDS = frozenset({
+        "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
         "clear_playlist",
@@ -1078,6 +1387,12 @@ class Api:
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "toggle_mute",
         "win_minimise", "win_maximise", "win_close",
+        "library_add_folder", "library_remove_root", "library_rescan",
+        "library_cancel_scan", "library_request_browser",
+        "library_request_detail", "library_get_state",
+        "library_get_browser", "library_get_detail",
+        "library_enqueue", "library_play",
+        "library_request_art", "library_get_art",
     })
 
     #: Public for the host process only, never called from JavaScript, but

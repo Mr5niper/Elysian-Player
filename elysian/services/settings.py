@@ -17,6 +17,8 @@ DEFAULTS = {
     "playlist": [],
     "last_path": "",
     "last_position": 0.0,
+    "library_roots": [],
+    "library_view": "albums",
 }
 
 

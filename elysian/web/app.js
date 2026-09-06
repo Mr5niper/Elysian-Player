@@ -49,7 +49,9 @@ function setView(name) {
   view = name;
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
-  $("panel-title").textContent = name === "now" ? "Now playing" : "Playlist";
+  $("view-library").classList.toggle("hidden", name !== "library");
+  $("panel-title").textContent =
+    name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
@@ -57,6 +59,10 @@ function setView(name) {
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
   if (name === "playlists") renderWindow(false);
+  // Ask for the pane's contents the first time it is opened, rather than
+  // querying a database nobody is looking at on startup.
+  if (name === "library") libraryOpened();
+  else { libShowFolders = false; libConfirmRemove = null; }
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -848,6 +854,535 @@ document.addEventListener("keydown", (e) => {
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
 });
 
+
+/* ---------- library ----------
+   Browsing never blocks: the frontend asks for a view, Python runs the
+   query off its worker, and the result is collected on a revision bump
+   the same way playlist metadata already is. Three counters rather than
+   one, so opening an album does not refetch the album grid and a finished
+   scan does not refetch either unless it changed something.
+
+   The grid is not virtualised like the track list. A library holds
+   thousands of albums where a playlist holds tens of thousands of rows,
+   and content-visibility keeps offscreen cards off the layout budget
+   without the machinery that the track list genuinely needs. */
+
+let libView = "albums";          // albums | artists | genres
+let libItems = [];               // browser results, unfiltered
+let libDetail = null;            // {kind, key, title, items} when drilled in
+let libSelected = new Set();     // paths selected in a detail list
+let libAnchor = null;            // where a shift range measures from
+let libOpened = false;
+let libRevision = -1;
+// Requests made but not yet collected. The poll drops to once a second
+// when paused, which is exactly when someone is browsing, so a click on
+// Artists could sit for a full second before anything appeared.
+let libPending = 0;
+let libScanning = false;
+let libArt = {};                 // "artist\u0000album" -> data url or ""
+let libArtRevision = -1;
+let libArtSeen = new Set();      // already asked for, so no repeats
+let libArtObserver = null;
+let libRoots = [];               // folders currently in the library
+let libShowFolders = false;
+let libConfirmRemove = null;     // path awaiting a second click
+let libBrowserRevision = -1;
+let libDetailRevision = -1;
+
+const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+function libraryOpened() {
+  const a = api();
+  if (!a) return;
+  if (!libOpened) {
+    libOpened = true;
+    // Open on the tab the library was left on. The backend saves it, and
+    // asking for the state first costs one call on the first open only.
+    const ask = (view) => {
+      libView = view;
+      document.querySelectorAll(".libtab").forEach((x) =>
+        x.classList.toggle("active", x.dataset.lib === libView));
+      libPending++;
+      a.library_request_browser(libView);
+      schedule();
+    };
+    if (typeof a.library_get_state === "function") {
+      a.library_get_state()
+        .then((st) => ask(
+          st && ["albums", "artists", "genres"].includes(st.view)
+            ? st.view : libView))
+        .catch(() => ask(libView));
+    } else {
+      ask(libView);
+    }
+  }
+  renderLibrary();
+}
+
+function libFiltered() {
+  const needle = $("libfilter").value.trim().toLowerCase();
+  if (!needle) return libItems;
+  return libItems.filter((it) => {
+    const hay = libView === "albums"
+      ? `${it.album} ${it.album_artist}`
+      : (libView === "artists" ? it.artist : it.genre);
+    return (hay || "").toLowerCase().includes(needle);
+  });
+}
+
+const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
+
+function renderLibrary() {
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const crumb = $("libcrumb");
+  const empty = $("libempty");
+  const folders = $("libfolders");
+  const showingDetail = libDetail !== null;
+
+  // Managing folders replaces the browse area rather than floating over
+  // it, so there is never a question of which thing a click belongs to.
+  folders.classList.toggle("hidden", !libShowFolders);
+  $("lib-folders").classList.toggle("on", libShowFolders);
+  // Totals belong to the browse lists only.
+  $("libstat").classList.toggle("hidden", libShowFolders || showingDetail);
+  if (libShowFolders) {
+    grid.classList.add("hidden");
+    $("libdetail").classList.add("hidden");
+    crumb.classList.add("hidden");
+    empty.classList.add("hidden");
+    renderFolders();
+    return;
+  }
+
+  crumb.classList.toggle("hidden", !showingDetail);
+  if (showingDetail) {
+    $("libcrumb-title").textContent = libDetail.title || "";
+    grid.classList.add("hidden");
+    $("libdetail").classList.remove("hidden");
+    empty.classList.add("hidden");
+    renderLibCover();
+    renderLibTracks(libDetail.items);
+    return;
+  }
+
+  $("libdetail").classList.add("hidden");
+  const rows = libFiltered();
+  const bare = rows.length === 0;
+  empty.classList.toggle("hidden", !bare);
+  grid.classList.toggle("hidden", bare);
+  if (bare) return;
+
+  if (libView === "albums") {
+    // Toggle a class rather than an inline display, which would win over
+    // the .hidden rule and leave the grid showing behind the track list.
+    grid.classList.remove("aslist");
+    grid.innerHTML = rows.map((it, i) => `
+      <div class="libcard" data-i="${i}"
+           data-album="${esc(it.album || "")}"
+           data-artist="${esc(it.album_artist || "")}">
+        <div class="art">${DISC_ICON}</div>
+        <div class="t1">${esc(it.album)}</div>
+        <div class="t2">${esc(it.album_artist)}${it.year ? " &middot; " + it.year : ""}</div>
+      </div>`).join("");
+    paintLibArt();
+    watchLibArt();
+  } else {
+    // Artists and genres are a list rather than a grid: there is no
+    // artwork to show, and a name reads better on one line than boxed.
+    grid.classList.add("aslist");
+    grid.innerHTML = rows.map((it, i) => {
+      const name = libView === "artists" ? it.artist : it.genre;
+      const sub = libView === "artists"
+        ? `${fmtCount(it.tracks, "track", "tracks")}, ${fmtCount(it.albums, "album", "albums")}`
+        : fmtCount(it.tracks, "track", "tracks");
+      return `<div class="librow" data-i="${i}">
+        <div class="n"></div><div class="t">${esc(name)}</div>
+        <div class="a">${sub}</div><div class="al"></div>
+        <div class="d">${fmt(it.duration || 0)}</div></div>`;
+    }).join("");
+  }
+}
+
+function trackRow(t, showAlbum) {
+  return `<div class="librow" data-path="${esc(t.path)}">
+      <div class="n">${t.track_number || ""}</div>
+      <div class="t">${esc(t.title)}</div>
+      <div class="a">${esc(t.artist)}</div>
+      <div class="al">${showAlbum ? esc(t.album) : ""}</div>
+      <div class="d">${fmt(t.duration || 0)}</div>
+    </div>`;
+}
+
+/* An artist or a genre is a set of records, not a loose pile of songs, so
+   the tracks are broken into album sections. The backend already returns
+   them in album order with untagged files last, so this only has to notice
+   where one album ends and the next begins.
+
+   Inside a section the album column is dropped, since the heading says it.
+   A genre spans many artists, so its headings carry the album artist too;
+   under a single artist that would just repeat the title of the pane. */
+/* Covers are fetched for the cards on screen, not for the whole library.
+   An IntersectionObserver is what makes that automatic: scrolling brings
+   new cards into view and each asks once, so a thousand-album library
+   decodes only what has actually been looked at. */
+/* The key is built here rather than stored in an attribute: it joins the
+   two names with a NUL, which an HTML attribute does not preserve, so a
+   data-key round trip came back without it and never matched. */
+function artKey(card) {
+  return `${card.dataset.artist || ""}\u0000${card.dataset.album || ""}`;
+}
+
+function watchLibArt() {
+  if (libArtObserver) libArtObserver.disconnect();
+  const a = api();
+  if (!a || typeof a.library_request_art !== "function") return;
+  libArtObserver = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting) continue;
+      const card = entry.target;
+      const key = artKey(card);
+      if (libArtSeen.has(key)) continue;
+      libArtSeen.add(key);
+      a.library_request_art(card.dataset.album || "", card.dataset.artist || "");
+    }
+  }, { root: $("libgrid"), rootMargin: "200px" });
+  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
+    libArtObserver.observe(c));
+}
+
+function paintLibArt() {
+  $("libgrid").querySelectorAll(".libcard").forEach((card) => {
+    const url = libArt[artKey(card)];
+    if (!url) return;
+    const art = card.querySelector(".art");
+    if (art.dataset.painted === url) return;
+    art.dataset.painted = url;
+    art.innerHTML = `<img src="${esc(url)}" alt="">`;
+  });
+}
+
+/* The cover only belongs to an album. An artist or a genre spans many, so
+   there is no single image that would be honest to show, and the pane is
+   dropped rather than filled with the first one that happened to sort
+   first. */
+function renderLibCover() {
+  const pane = $("libcover");
+  const isAlbum = libDetail && libDetail.kind === "album";
+  pane.classList.toggle("hidden", !isAlbum);
+  if (!isAlbum) return;
+
+  const artist = libDetail.key2 || "";
+  const album = libDetail.key || "";
+  const key = `${artist}\u0000${album}`;
+  const url = libArt[key];
+  const art = $("libcover-art");
+  const want = url ? `img:${url}` : "icon";
+  if (art.dataset.painted !== want) {
+    art.dataset.painted = want;
+    art.innerHTML = url ? `<img src="${esc(url)}" alt="">` : DISC_ICON;
+  }
+
+  const items = libDetail.items || [];
+  const seconds = items.reduce((sum, t) => sum + (t.duration || 0), 0);
+  const year = items.length ? (items[0].year || 0) : 0;
+  setText($("libcover-title"), "coverTitle", album);
+  setText($("libcover-artist"), "coverArtist", artist);
+  const bits = [fmtCount(items.length, "track", "tracks"), fmt(seconds)];
+  if (year) bits.unshift(String(year));
+  setText($("libcover-sub"), "coverSub", bits.join("   |   "));
+
+  // The grid asks for covers as cards scroll past, so an album opened
+  // from a card already has one. Reached any other way it may not, and
+  // this is the only place that would notice.
+  const a = api();
+  if (!url && a && typeof a.library_request_art === "function"
+      && !libArtSeen.has(key)) {
+    libArtSeen.add(key);
+    a.library_request_art(album, artist);
+    schedule();
+  }
+}
+
+function renderFolders() {
+  const list = $("foldlist");
+  if (!libRoots.length) {
+    list.innerHTML = '<div class="foldempty">No folders yet. '
+      + 'Add one and its music is indexed in the background.</div>';
+    return;
+  }
+  list.innerHTML = libRoots.map((path) => {
+    const armed = libConfirmRemove === path;
+    // Two clicks rather than a dialog: removing drops every track under
+    // that folder from the index, which is not something to do by a
+    // stray click, but it is also not destructive enough to interrupt.
+    return `<div class="foldrow" data-path="${esc(path)}">
+      <div class="path" title="${esc(path)}"><bdi>${esc(path)}</bdi></div>
+      <button class="tbtn${armed ? " danger" : ""}" data-remove="${esc(path)}">
+        ${armed ? "Remove?" : "Remove"}</button>
+    </div>`;
+  }).join("");
+}
+
+function renderLibTracks(items) {
+  const box = $("libtracks");
+  const kind = libDetail ? libDetail.kind : "";
+  const grouped = kind === "artist" || kind === "genre";
+  if (!grouped) {
+    // Inside an album the cover pane already names it, so repeating it on
+    // every row is just noise. A search result still needs the column,
+    // since its rows can come from anywhere.
+    box.innerHTML = items.map((t) => trackRow(t, kind !== "album")).join("");
+    paintLibSelection();
+    return;
+  }
+  const html = [];
+  let current = null;
+  for (const t of items) {
+    const who = t.album_artist || t.artist || "";
+    const key = `${who}\u0000${t.album || ""}`;
+    if (key !== current) {
+      current = key;
+      const bits = [];
+      if (kind === "genre" && who) bits.push(`<span class="by">${esc(who)}</span>`);
+      if (t.year) bits.push(`<span class="yr">${t.year}</span>`);
+      const heading = t.album || "Not part of an album";
+      html.push(`<div class="libsection">${esc(heading)}${bits.join("")}</div>`);
+    }
+    html.push(trackRow(t, false));
+  }
+  box.innerHTML = html.join("");
+  paintLibSelection();
+}
+
+function paintLibSelection() {
+  $("libtracks").querySelectorAll(".librow").forEach((row) =>
+    row.classList.toggle("selected", libSelected.has(row.dataset.path)));
+}
+
+function libChosenPaths() {
+  if (!libDetail) return [];
+  if (libSelected.size) {
+    return libDetail.items.map((t) => t.path).filter((p) => libSelected.has(p));
+  }
+  return libDetail.items.map((t) => t.path);
+}
+
+function setLibView(name) {
+  if (libView === name) return;
+  libView = name;
+  libDetail = null;
+  libSelected.clear();
+  libAnchor = null;
+  document.querySelectorAll(".libtab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.lib === name));
+  const a = api();
+  if (a) {
+    libPending++;
+    a.library_request_browser(name);
+    schedule();
+  }
+}
+
+/* ---- library wiring ---- */
+
+document.querySelectorAll(".libtab").forEach((b) =>
+  b.addEventListener("click", () => setLibView(b.dataset.lib)));
+
+$("libfilter").addEventListener("input", () => renderLibrary());
+
+$("libfolders").addEventListener("click", (e) => {
+  if (libConfirmRemove && !e.target.closest("[data-remove]")) {
+    libConfirmRemove = null;
+    renderFolders();
+  }
+});
+
+$("libgrid").addEventListener("click", (e) => {
+  const card = e.target.closest(".libcard, .librow");
+  if (!card) return;
+  const item = libFiltered()[Number(card.dataset.i)];
+  if (!item) return;
+  const a = api();
+  if (!a) return;
+  libSelected.clear();
+  libAnchor = null;
+  libPending++;
+  if (libView === "albums") a.library_request_detail("album", item.album, item.album_artist);
+  else if (libView === "artists") a.library_request_detail("artist", item.artist, "");
+  else a.library_request_detail("genre", item.genre, "");
+  schedule();
+});
+
+/* Same rules as the playlist, so selection behaves the same wherever you
+   are: plain click replaces and sets the anchor, ctrl toggles one row and
+   moves it, shift takes the run from the anchor, ctrl+shift adds that run.
+   The anchor does not move on a shift click, so a range can be widened and
+   narrowed from one starting point.
+
+   The run is measured over the rows as displayed, which in an artist or
+   genre view are split by album headings: a range spanning two albums
+   selects what is visually between them and nothing else. */
+function libRowPaths() {
+  return Array.from($("libtracks").querySelectorAll(".librow"))
+              .map((r) => r.dataset.path);
+}
+
+function libRange(fromPath, toPath) {
+  const paths = libRowPaths();
+  let a = paths.indexOf(fromPath);
+  let b = paths.indexOf(toPath);
+  if (a < 0 || b < 0) return null;
+  if (a > b) { const t = a; a = b; b = t; }
+  return paths.slice(a, b + 1);
+}
+
+$("libtracks").addEventListener("click", (e) => {
+  const row = e.target.closest(".librow");
+  if (!row) return;
+  const path = row.dataset.path;
+
+  if (e.shiftKey) {
+    const run = libAnchor === null ? null : libRange(libAnchor, path);
+    if (run) {
+      if (!e.ctrlKey) libSelected = new Set();
+      run.forEach((x) => libSelected.add(x));
+    } else {
+      libSelected = new Set([path]);
+      libAnchor = path;
+    }
+  } else if (e.ctrlKey) {
+    libSelected.has(path) ? libSelected.delete(path) : libSelected.add(path);
+    libAnchor = path;
+  } else {
+    libSelected = new Set([path]);
+    libAnchor = path;
+  }
+  paintLibSelection();
+});
+
+$("libtracks").addEventListener("dblclick", (e) => {
+  const row = e.target.closest(".librow");
+  if (!row) return;
+  const a = api();
+  if (a) a.library_play([row.dataset.path]);
+});
+
+$("lib-back").addEventListener("click", () => {
+  libDetail = null;
+  libSelected.clear();
+  libAnchor = null;
+  renderLibrary();
+});
+$("lib-queue").addEventListener("click", () => {
+  const a = api();
+  if (a) a.library_enqueue(libChosenPaths());
+});
+$("lib-play").addEventListener("click", () => {
+  const a = api();
+  if (a) a.library_play(libChosenPaths());
+});
+$("lib-folders").addEventListener("click", () => {
+  libShowFolders = !libShowFolders;
+  libConfirmRemove = null;
+  renderLibrary();
+});
+
+$("foldlist").addEventListener("click", (e) => {
+  const btn = e.target.closest("[data-remove]");
+  if (!btn) return;
+  const path = btn.dataset.remove;
+  if (libConfirmRemove !== path) {
+    libConfirmRemove = path;      // arm, and let a click elsewhere disarm
+    renderFolders();
+    return;
+  }
+  libConfirmRemove = null;
+  const a = api();
+  if (a) {
+    a.library_remove_root(path);
+    // Drop it locally so the row goes at once; the backend confirms on the
+    // next state bump either way.
+    //
+    // The art caches are deliberately left alone. Clearing them here threw
+    // the covers away on this side while the backend still had every album
+    // resolved, and a resolved album costs nothing and bumps no revision,
+    // so it never told us about them again and the grid came back bare
+    // until the app was restarted. Entries for albums that went with the
+    // folder are harmless: their cards are gone too.
+    libRoots = libRoots.filter((p) => p !== path);
+    renderFolders();
+    schedule();
+  }
+});
+
+$("lib-add").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
+$("lib-add-empty").addEventListener("click", () => { const a = api(); if (a) a.library_add_folder(); });
+$("lib-rescan").addEventListener("click", () => { const a = api(); if (a) a.library_rescan(); });
+
+function applyLibraryTick(tick) {
+  const a = api();
+  if (!a) return;
+  libScanning = !!tick.library_scanning;
+  if (!libOpened) return;
+  if (tick.library_browser_revision !== libBrowserRevision) {
+    libBrowserRevision = tick.library_browser_revision;
+    if (libPending > 0) libPending--;
+    a.library_get_browser().then((b) => {
+      if (!b) return;
+      libView = b.view || libView;
+      libItems = b.items || [];
+      document.querySelectorAll(".libtab").forEach((x) =>
+        x.classList.toggle("active", x.dataset.lib === libView));
+      libDetail = null;
+      renderLibrary();
+      // Resync rather than assume: the backend only announces art it has
+      // just resolved, so anything it already had would otherwise never
+      // reach a frontend whose cache has been reset.
+      a.library_get_art().then((m) => {
+        if (!m) return;
+        libArt = m;
+        paintLibArt();
+      }).catch(() => {});
+    }).catch(() => {});
+  }
+  if (tick.library_detail_revision !== libDetailRevision) {
+    libDetailRevision = tick.library_detail_revision;
+    if (libPending > 0) libPending--;
+    a.library_get_detail().then((d) => {
+      if (!d || !d.kind) return;
+      libDetail = d;
+      libSelected.clear();
+      libAnchor = null;
+      renderLibrary();
+    }).catch(() => {});
+  }
+  if (tick.library_art_revision !== libArtRevision) {
+    libArtRevision = tick.library_art_revision;
+    a.library_get_art().then((m) => {
+      if (!m) return;
+      libArt = m;
+      paintLibArt();
+      if (libDetail && libDetail.kind === "album") renderLibCover();
+    }).catch(() => {});
+  }
+  if (tick.library_revision !== libRevision) {
+    libRevision = tick.library_revision;
+    a.library_get_state().then((st) => {
+      if (!st) return;
+      const bits = [
+        fmtCount(st.tracks || 0, "track", "tracks"),
+        fmtCount(st.albums || 0, "album", "albums"),
+        fmtCount(st.artists || 0, "artist", "artists"),
+      ];
+      libRoots = st.roots || [];
+      if (libRoots.length) bits.push(fmtCount(libRoots.length, "folder", "folders"));
+      if (libShowFolders) renderFolders();
+      $("libstat").textContent = bits.join("   |   ");
+    }).catch(() => {});
+  }
+}
+
 /* ---------- waveform ---------- */
 
 function drawWave() {
@@ -1039,6 +1574,8 @@ function pollInterval() {
   if (document.hidden) return POLL_HIDDEN;
   // Something on screen is still blank: collect updates quickly.
   if (visibleMissing()) return POLL_FILLING;
+  // A library request is in flight, or a scan is filling the index.
+  if (libPending > 0 || libScanning) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }
@@ -1107,6 +1644,7 @@ async function poll() {
         // Resync: if the reader says it has nothing left, it has nothing
         // left, whatever the local counter thinks.
         if ((tick.scan_pending || 0) === 0) scanOutstanding = 0;
+        applyLibraryTick(tick);
         if (view === "now" && !state.peaks.length && ++peakTick % 4 === 0) {
           const p = await a.get_peaks();
           if (p && p.length) { state.peaks = p; prev.waveSig = null; drawWave(); }
