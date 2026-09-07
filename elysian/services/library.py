@@ -533,17 +533,18 @@ class LibraryService:
         rows.sort(key=lambda r: sort_key(r["genre"]))
         return rows
 
-    def songs(self, needle="", limit=3000) -> list:
+    def songs(self, needle="", limit=50000) -> list:
         """Individual tracks, grouped by album the way artists and genres are.
 
         Ordered in SQL as well as in Python: the cap has to take a
         meaningful first slice, and without an ORDER BY the rows it keeps
         are whatever the table happened to yield.
 
-        Capped rather than unbounded because a large collection is tens of
-        thousands of rows, every one of which would be built into the page.
-        The cap is reported so the pane can say the list was cut short
-        rather than quietly lying about what is there.
+        The limit is a backstop against a pathological collection, not a
+        working limit: ten thousand songs build in about 150ms and cost
+        nothing to scroll, since offscreen rows are kept out of the layout
+        budget. It is reported when reached, so the pane can say the list
+        was cut short rather than quietly lying about what is there.
         """
         clause, args = self._match(needle, ("title", "artist", "album"))
         where = f"WHERE {clause}" if clause else ""
