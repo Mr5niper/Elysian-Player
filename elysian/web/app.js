@@ -1014,9 +1014,11 @@ function renderTagEditor() {
   if (libEditor.errors && libEditor.errors.length) {
     errs.classList.remove("hidden");
     const shown = libEditor.errors.slice(0, 4);
+    const hidden = libEditor.errors.length - shown.length;
     errs.textContent = (libEditor.failed
       ? `Saved ${libEditor.saved}, failed ${libEditor.failed}. `
-      : "") + shown.join(" ");
+      : "") + shown.join(" ")
+      + (hidden > 0 ? `  (+${hidden} more error${hidden !== 1 ? "s" : ""})` : "");
   } else {
     errs.classList.add("hidden");
   }
@@ -1133,7 +1135,7 @@ function libraryOpened() {
     if (typeof a.library_get_state === "function") {
       a.library_get_state()
         .then((st) => ask(
-          st && ["albums", "artists", "genres"].includes(st.view)
+          st && ["albums", "artists", "genres", "songs"].includes(st.view)
             ? st.view : libView))
         .catch(() => ask(libView));
     } else {
