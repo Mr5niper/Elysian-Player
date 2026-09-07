@@ -1078,8 +1078,15 @@ function pathKey(path) {
 }
 
 function rebuildLibRowIndex() {
+  // Scanning both containers together let a row left behind in the one
+  // you just left - never removed, only hidden - silently win the map
+  // entry over the actual current row for the same file, whichever the
+  // combined query happened to reach last. Only the container that is
+  // actually the current view can hold a row worth indexing.
+  const scope = libDetail !== null ? "#libtracks .librow"
+                                   : "#libgrid .librow.song";
   libRowsByPath = new Map();
-  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+  document.querySelectorAll(scope)
           .forEach((row) => libRowsByPath.set(pathKey(row.dataset.path), row));
   libPlayingRow = null;         // the old reference no longer points at a
                                  // live row after the rebuild that just ran
@@ -1206,8 +1213,23 @@ function renderLibrary() {
      rebuilds until the scan finishes; switching away and back still shows
      the current list immediately, since that is a fresh render, not a
      refresh. */
-  if (libView === "songs" && libScanning && grid.childElementCount > 0) {
+  if (libView === "songs" && libScanning && grid.childElementCount > 0
+      && libGridSig.startsWith("songs\u0001")) {
+    // Checking for any content at all, rather than specifically Songs
+    // content, meant returning here after visiting another tab mid-scan
+    // left whatever that tab last drew - album cards, artist rows -
+    // sitting there under the Songs tab, since the guard skipped the
+    // rebuild that would have replaced it. Skipping only applies when the
+    // grid still genuinely holds the Songs list from before.
+    //
+    // Reindexing here, not just repainting: visiting another view in
+    // between replaces libRowsByPath with that view's own rows, so the
+    // frozen Songs rows already on screen need reindexing too - but that
+    // is a plain querySelectorAll over what already exists, not the HTML
+    // string construction that made a full rebuild expensive, so it costs
+    // nothing close to that even on a large list.
     paintLibArt();
+    rebuildLibRowIndex();
     return;
   }
 
