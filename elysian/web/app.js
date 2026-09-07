@@ -757,6 +757,12 @@ const intent = {
     $("max-box").style.display = maxed ? "none" : "";
     $("max-restore").style.display = maxed ? "" : "none";
     $("win-max").title = maxed ? "Restore" : "Maximise";
+    // Growing or shrinking is certain here - unlike a plain drag-resize,
+    // which has to guess from window area - so the resize this triggers
+    // does not have to guess either. Consumed once by that resize's
+    // debounced callback, then cleared, so an unrelated drag afterward
+    // still falls back to the area comparison.
+    libMaximizeToggleGrew = maxed;
     api().win_maximise();
   },
 
@@ -2198,6 +2204,17 @@ function scrollExpandedAlbumIntoView(grew) {
 }
 
 let libResizeBaseline = window.innerWidth * window.innerHeight;
+/* Set by toggleMaximise the instant the button (or a titlebar
+   double-click) is clicked, since growing or shrinking is certain there.
+   A plain area comparison turned out not to be trustworthy for that case
+   even computed once per settled gesture: maximising and restoring both
+   animate through intermediate sizes, and there is no guarantee the
+   settled area ends up correctly bigger or smaller than whatever the
+   comparison baseline was, particularly restoring back to a windowed
+   size that can vary. This sidesteps guessing entirely for that one
+   case, while an ordinary drag-resize - where no such signal exists -
+   still falls back to comparing area. */
+let libMaximizeToggleGrew = null;
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
@@ -2213,18 +2230,12 @@ window.addEventListener("resize", () => {
   // stay stranded in a new row instead of filling in beside the earlier
   // ones. Debounced, since resizing fires continuously while dragging an
   // edge and this involves real DOM moves, not just a read.
-  //
-  // Whether the window grew or shrank is decided once the gesture settles,
-  // not on every one of these events: maximising or restoring animates
-  // through several intermediate sizes, each firing its own resize event,
-  // and comparing against whatever the immediately preceding one happened
-  // to be could catch the tail end of that animation rather than the
-  // gesture as a whole - which is what made restoring after a maximise
-  // sometimes read as "grew" and land on the wrong end of the tracklist.
   clearTimeout(libResizeTimer);
   libResizeTimer = setTimeout(() => {
     const area = window.innerWidth * window.innerHeight;
-    const grew = area >= libResizeBaseline;
+    const grew = libMaximizeToggleGrew !== null
+      ? libMaximizeToggleGrew : area >= libResizeBaseline;
+    libMaximizeToggleGrew = null;
     libResizeBaseline = area;
     if (libView === "albums" && libDetail && libDetail.kind === "album") {
       placeInlineAlbumDetail();
