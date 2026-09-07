@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.4.0.0
+- **Version**: 2.5.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -29,13 +29,16 @@ megabytes. Audio runs on miniaudio.
   associated with the executable. It plays the file you opened, whether or not
   it was already in the playlist.
 * Only one copy runs at a time. Opening another file hands it to the player
-  that is already running rather than starting a second one.
+  that is already running instead of starting a second one, and brings that
+  window to the front so you can actually see it happened.
 * Filter the playlist by title, artist, album or filename as you type. The
   playlist shows track number, title, artist, album and duration; the album
   column hides itself when the window is narrower than 820px.
 * Drag rows to reorder. Selection works as it does in Explorer: ctrl-click
   toggles one row, shift-click takes the whole run from the last row you
   clicked, and ctrl+shift-click adds that run to what is already selected.
+* Typing into any filter box never triggers a playback shortcut, even if the
+  key you typed happens to be one that normally would.
 * Shuffle draws from a bag, so every track plays once before any repeats.
   Repeat cycles off, all, one.
 * Click the speaker icon to mute. The slider keeps your volume, unmuting
@@ -49,25 +52,79 @@ megabytes. Audio runs on miniaudio.
 
 ### Library
 
-* Point the Library at one or more folders and it indexes what it finds into a
-  small database, so browsing does not depend on the folders being reachable.
-* Browse by album, artist or genre. Albums are grouped by band and ordered by
-  year within each; an album with no year tag sorts to the end of that band's
-  run rather than the front.
-* Opening an artist or a genre breaks the tracks into album sections. Files
-  with no album tag appear last, under their own heading.
-* Opening an album shows its cover beside the track list, with the year, track
-  count and running time. The cover stays put while the tracks scroll.
-* Cover art comes from the first track in the album that carries an image, so
-  an album whose opening track is untagged still gets artwork. Covers are read
-  only for the entries actually on screen.
-* Select tracks the same way as in the playlist and add them to it, or play
-  them straight away.
-* Manage the indexed folders from the Folders button. Removing one takes it out
-  of the library and nothing else; no files are touched.
-* The playlist reads its tags from this index. A track the library has already
-  seen needs no file opened at all, which is what makes a large collection on a
-  network share usable.
+The Library is a second way to get at your music, separate from the playlist.
+Point it at one or more folders and it builds a small index of what it finds,
+so browsing works even if the folders themselves are slow, on a NAS, or
+briefly unreachable.
+
+**Four ways to look at it.** Albums, Artists, Genres and Songs sit as tabs
+across the top. Albums groups by album title and artist together, so a band's
+records line up in the order they came out. Opening an artist or a genre
+breaks its tracks into album sections rather than one flat pile, with anything
+that has no album tag collected at the end under its own heading instead of
+scattered in with everything else. Songs lists every track and is searchable
+on its own, broken into the same album sections.
+
+**Same album, same artist, whatever the spelling.** A tagger who wrote
+`NEVERMIND` on one track and `Nevermind` on the rest still gets one album, not
+two, and sorting ignores both case and leading punctuation, so `"Weird Al"
+Yankovic` files under W instead of jumping to the front on its quote mark.
+
+**Compilations get grouped, unrelated albums don't.** If a track is flagged as
+part of a compilation, or its album artist tag says something like Various
+Artists, every track sharing that album title joins one card labelled that
+way, whatever each individual track says about who performed it. Two
+completely different bands who both happened to call an album Greatest Hits
+stay as two separate cards. Sharing a title is not, by itself, a reason to
+merge two things that were never the same release.
+
+**The search box only searches what the tab shows you.** On Albums it matches
+album and artist names. On Artists it matches artist names, on Genres it
+matches genre names, and on Songs it matches song titles. A search on Songs
+does not go digging through album titles and hand you three unrelated tracks
+because their album happened to contain the word; if you are looking for a
+song, Songs is where you look for it.
+
+**Opening an album shows its cover next to the track list**, with the year,
+track count and total time underneath, and the cover stays in place while you
+scroll the tracks. The cover itself comes from the first track in the album
+that actually carries one, so a compilation whose opening file happens to be
+untagged still gets its artwork from track two or wherever it actually lives.
+Covers for whatever you are looking at are fetched first; everything else in
+the library fills in quietly in the background, so a library of thousands of
+albums does not sit there decoding images nobody has scrolled to yet, but
+nothing is left blank forever either.
+
+**Scanning a folder works one subfolder at a time**, and each one is written
+and made browsable the moment it finishes rather than all at once at the end.
+On a large collection that means albums start showing up within seconds, and
+you can browse, search and even start playing something while the rest is
+still being read. A rescan only re-reads a file if its modification time
+changed, so once a folder is indexed, checking it again is quick.
+
+**Manage the folders from the Folders button**, next to the tabs. It lists
+everything currently indexed with a Remove next to each; removing asks you to
+click a second time before it actually does anything, since it drops every
+track under that folder from the library. It only ever touches the index,
+never the files themselves.
+
+**Double-click a track anywhere in the library and it keeps playing.** Whether
+you are inside an album, an artist, a genre, or the Songs list, the whole
+thing you are currently looking at becomes the active queue, in the order it
+is shown on screen, starting from the track you clicked. Finish that track and
+it moves on to the next one in the same list, the same way it would if you had
+built a playlist out of it yourself. Double-clicking an album's cover plays
+that album from the first track without you having to open it first. The
+library stays open while this happens, and the track that is currently
+playing gets the same small triangle marker the playlist itself uses, so you
+can see what is playing from inside the library too, not only from the
+Playlist tab. Shuffle, repeat, next and previous all keep working exactly as
+they always have, whatever queue happens to be loaded at the time.
+
+**The playlist reads its tags from this index.** A track the library has
+already seen needs no file opened at all to show its title and artist, which
+is what makes browsing a large collection on a network share feel normal
+instead of slow.
 
 ## Controls
 
@@ -93,10 +150,11 @@ megabytes. Audio runs on miniaudio.
 Double-clicking the title bar maximises and restores, as it would on a normal
 window. The maximise button changes to a restore glyph while maximised.
 
-Selection in the library track lists follows the same rules. Double-clicking a
-row there plays that track.
+Selection in the library track lists follows the same rules as the playlist.
+Double-clicking a row plays it and continues through the rest of whatever list
+you had open, as described above.
 
-## Not in 2.4.0.0
+## Not in 2.5.0.0
 
 These worked in 1.0.0.0 and did not survive the rewrite. They are listed here
 so nobody upgrades expecting them:
@@ -105,7 +163,7 @@ so nobody upgrades expecting them:
 * Discovery mode
 * Sleep timer
 * Mini player mode
-* Sortable columns
+* Sortable playlist columns
 * Remove missing files
 * Right-click context menu
 * Shortcuts dialog
@@ -118,15 +176,20 @@ but they are no longer constructed at runtime. Nothing else remains.
 The player assumes your library might not be local, and avoids touching files
 until it has to:
 
-* Adding files reads no tags. Tracks appear as filenames immediately, and the
-  rows on screen are read first. Whatever capacity is left over fills in the
-  rest of the list: while you scroll, only the direction you are heading; once
-  you stop, outward from the view in both directions. Rows scrolling into view
-  jump ahead of that prefetch, and prefetch you have scrolled past is
-  discarded rather than spending round trips on rows nobody will look at.
-* Adding a folder streams the directory walk, so tracks start appearing within
-  milliseconds instead of after the entire share has been enumerated.
-* Album art is fetched only for the track that is playing.
+* Adding files to the playlist reads no tags up front. Tracks appear as
+  filenames immediately, and the rows on screen are read first. Whatever
+  capacity is left over fills in the rest of the list: while you scroll, only
+  the direction you are heading; once you stop, outward from the view in both
+  directions. Rows scrolling into view jump ahead of that prefetch, and
+  prefetch you have scrolled past is discarded rather than spending round
+  trips on rows nobody will look at.
+* Adding a folder to the playlist streams the directory walk, so tracks start
+  appearing within milliseconds instead of after the entire share has been
+  enumerated. Indexing a folder into the Library works the same way, one
+  subfolder at a time, described above.
+* Album art for the playlist is fetched only for the track that is playing.
+  Library cover art is fetched for whatever is on screen first and fills in
+  the rest afterward, also described above.
 * Startup does not check that every saved path still exists.
 * Every operation that can block runs on a worker thread. The interface only
   ever reads a precomputed snapshot, so a slow share cannot stall a button.
@@ -147,8 +210,12 @@ with another program over a port number.
 The library index is a SQLite database at `.elysian_library.db`, also in your
 home folder. It holds the tags and file paths it has seen, never the audio
 itself. Deleting it loses nothing but the index: the folders are remembered in
-the settings file and a rescan rebuilds it. A rescan only reads files whose
-modification time has changed, so repeating one is cheap.
+the settings file and a rescan rebuilds it.
+
+If you are updating from a version older than 2.4.0.0 and already have folders
+indexed, the next scan will take longer than usual, since a couple of columns
+were added to the database and every file needs to be read once to fill them
+in. After that one pass, rescans go back to being fast.
 
 Problems are logged to `.elysian_player.log` in the same folder, rotating at
 512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
@@ -237,8 +304,18 @@ request queued for the worker. Nothing on that boundary touches a disk, a
 network share or a database, because a bridge call that blocks freezes the
 interface. Library queries follow the same rule: a request is queued, the query
 runs on its own thread, and the result is collected when a revision counter
-changes. The library keeps three of those counters, for the index, the browse
-list and the open album, so opening a record does not refetch the grid.
+changes. Both browsing and opening a record carry their own generation number
+too, so a slower query fired earlier can never land after a faster one fired
+later and overwrite it with something stale.
+
+Playing a track from the library replaces the active playlist with that view's
+own current order and starts at the clicked track, then hands off to the same
+transport code that runs everything else. There is only one queue in this
+program; the library just knows how to build one from what it is showing you.
+The currently playing path is carried in the same snapshot the rest of the
+transport state comes from, which is how both the playlist and the library
+can show the same track marked as playing without needing two separate ideas
+of what "current" means.
 
 The frontend fetches the whole track list only when the row set changes.
 When a tag scan fills in metadata it fetches just the rows that changed.
@@ -254,7 +331,10 @@ unconfirmed.
 
 Note for anyone editing the frontend: `ROW_H` in `app.js` and the `.row` height
 in `style.css` must stay equal, or rows drift out of line with the scrollbar.
-Both are 30px.
+Both are 30px. The library's own track lists are not virtualised the same way
+the playlist is, since a browse list is rarely more than a few thousand rows;
+if that ever needs to hold tens of thousands of visible rows at once the way
+the playlist does, it will need the same treatment.
 
 Every user action goes through the `intent` object in `app.js`, so a keypress
 and a click produce the same local update before the command is posted. That
