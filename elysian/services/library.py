@@ -852,17 +852,42 @@ class LibraryService:
         }
 
     def refresh_paths(self, paths) -> int:
-        """Re-read exact files from disk and upsert them into the index.
+        """Re-read exact files from disk, and write back only what changed.
 
-        Used right after a tag write: the file just changed underneath the
-        index, and a full rescan is not needed to notice that, only these
-        specific paths. Mirrors the row shape _scan_directory builds, so a
-        freshly written file and a freshly scanned one look identical to
-        every query in this class.
+        Used right after a tag write, and now also when the editor opens:
+        both already have to read the file in full, since there is no way
+        to know what changed without reading it, but that does not mean
+        the database has to be rewritten too. Comparing the fresh read
+        against what is already stored, and skipping the write when they
+        agree, means looking at a file the index already has right costs a
+        read with no write at all, not just no extra file access. Only
+        modified_at always gets touched when it is out of date, since that
+        is what tells a future scan this file does not need reopening.
         """
         clean = [p for p in dict.fromkeys(paths) if p]
         if not clean:
             return 0
+
+        by_key = {pathutil.key(p): p for p in clean}
+        current = {}
+        with self._lock:
+            con = self._connect()
+            try:
+                keys = list(by_key)
+                for i in range(0, len(keys), 400):
+                    chunk = keys[i:i + 400]
+                    sql = ("SELECT key, title, artist, album, album_artist, "
+                           "genre, duration, track_number, track_total, "
+                           "disc_number, disc_total, year, compilation, "
+                           "modified_at FROM tracks WHERE key IN (%s)"
+                           % ",".join("?" * len(chunk)))
+                    for row in con.execute(sql, chunk):
+                        current[by_key[row["key"]]] = dict(row)
+            except Exception:
+                log.exception("could not read the current rows to compare")
+            finally:
+                con.close()
+
         now = time.time()
         rows = []
         for path in clean:
@@ -876,20 +901,36 @@ class LibraryService:
                 continue
             key = pathutil.key(path)
             dkey = pathutil.key(os.path.dirname(path))
+            fresh = {
+                "title": meta.get("title", "") or Path(path).stem,
+                "artist": meta.get("artist", ""), "album": meta.get("album", ""),
+                "album_artist": (meta.get("album_artist", "")
+                                or meta.get("artist", "")),
+                "genre": meta.get("genre", ""),
+                "duration": float(meta.get("length", 0.0) or 0.0),
+                "track_number": int(meta.get("track_number", 0) or 0),
+                "track_total": int(meta.get("track_total", 0) or 0),
+                "disc_number": int(meta.get("disc_number", 0) or 0),
+                "disc_total": int(meta.get("disc_total", 0) or 0),
+                "year": int(meta.get("year", 0) or 0),
+                "compilation": int(meta.get("compilation", 0) or 0),
+            }
+            existing = current.get(path)
+            if existing is not None:
+                same_mtime = abs(float(existing.get("modified_at") or 0.0)
+                                 - mtime) < 1e-4
+                same_tags = all(
+                    (abs(existing.get(f, 0.0) - fresh[f]) < 1e-3
+                     if f == "duration" else existing.get(f) == fresh[f])
+                    for f in fresh)
+                if same_mtime and same_tags:
+                    continue   # index already matches the file exactly
             rows.append((
-                path, key,
-                meta.get("title", "") or Path(path).stem,
-                meta.get("artist", ""), meta.get("album", ""),
-                meta.get("album_artist", "") or meta.get("artist", ""),
-                meta.get("genre", ""),
-                float(meta.get("length", 0.0) or 0.0),
-                int(meta.get("track_number", 0) or 0),
-                int(meta.get("disc_number", 0) or 0),
-                int(meta.get("year", 0) or 0),
-                int(meta.get("compilation", 0) or 0),
-                dkey, int(meta.get("track_total", 0) or 0),
-                int(meta.get("disc_total", 0) or 0),
-                float(mtime or 0.0), now,
+                path, key, fresh["title"], fresh["artist"], fresh["album"],
+                fresh["album_artist"], fresh["genre"], fresh["duration"],
+                fresh["track_number"], fresh["disc_number"], fresh["year"],
+                fresh["compilation"], dkey, fresh["track_total"],
+                fresh["disc_total"], float(mtime or 0.0), now,
             ))
         if not rows:
             return 0
