@@ -1387,22 +1387,34 @@ function libChosenPaths() {
    continuing past the clicked track carries on through the rest of what
    was actually on screen, the way opening an album and hitting play
    naturally continues into the next track. */
-function libraryContextPayload(startPath) {
-  startPath = String(startPath || "");
-  if (!startPath) return null;
-
-  if (libView === "songs" && !libDetail) {
-    const paths = libItems.map((t) => t.path).filter(Boolean);
-    return { paths, startPath, kind: "songs", title: "Songs" };
-  }
-  if (libDetail && Array.isArray(libDetail.items) && libDetail.items.length) {
-    const paths = libDetail.items.map((t) => t.path).filter(Boolean);
+/* What to call the current view, for the status line. One place, so the
+   Play button and a double-click cannot each describe the same list
+   differently. */
+function libraryContextLabel() {
+  if (libView === "songs" && !libDetail) return { kind: "songs", title: "Songs" };
+  if (libDetail) {
     // The backend labels a search result "Search: eclipse" for its own
     // detail title; libDetail.key is the bare search text, which reads
     // better here than repeating that label back.
     const title = libDetail.kind === "search"
       ? (libDetail.key || libDetail.title || "") : (libDetail.title || "");
-    return { paths, startPath, kind: libDetail.kind || "library", title };
+    return { kind: libDetail.kind || "library", title };
+  }
+  return { kind: "", title: "" };
+}
+
+function libraryContextPayload(startPath) {
+  startPath = String(startPath || "");
+  if (!startPath) return null;
+  const label = libraryContextLabel();
+
+  if (libView === "songs" && !libDetail) {
+    const paths = libItems.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: label.kind, title: label.title };
+  }
+  if (libDetail && Array.isArray(libDetail.items) && libDetail.items.length) {
+    const paths = libDetail.items.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: label.kind, title: label.title };
   }
   return null;
 }
@@ -1597,17 +1609,14 @@ $("lib-queue").addEventListener("click", () => {
   if (a) a.library_enqueue(libChosenPaths());
 });
 $("lib-play").addEventListener("click", () => {
-  const a = api();
-  if (!a) return;
-  const paths = orderedSelectedLibraryPaths();
-  if (!paths.length) return;
-  const kind = libDetail ? (libDetail.kind || "library")
-                        : (libView === "songs" ? "songs" : "library");
-  const title = libDetail
-    ? (libDetail.kind === "search" ? (libDetail.key || libDetail.title || "")
-                                   : (libDetail.title || ""))
-    : (libView === "songs" ? "Songs" : "");
-  a.library_play_context(paths, paths[0], kind, title);
+  // A button version of double-clicking the selected row: not "play only
+  // the selection", but the same thing double-click does, which plays the
+  // whole current view in its own order starting at that row. With
+  // nothing selected, that row is the first one, same as double-clicking
+  // it directly would be.
+  const chosen = orderedSelectedLibraryPaths();
+  if (!chosen.length) return;
+  playLibraryContextFrom(chosen[0]);
 });
 $("lib-folders").addEventListener("click", () => {
   libShowFolders = !libShowFolders;
