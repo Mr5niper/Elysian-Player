@@ -86,6 +86,10 @@ html, body {
 }
 .panelhead h1 { font-size: 15px; font-weight: 500; }
 .headicons { display: flex; gap: 14px; color: var(--muted); }
+/* Hidden in the library, where they would act on the playlist behind it.
+   No global .hidden rule exists, so this class needs its own, declared
+   after the base or it would lose on source order. */
+.headicons.hidden { display: none; }
 .headicons svg { width: 16px; height: 16px; }
 .headicons svg:hover { stroke: var(--text); }
 
@@ -95,15 +99,31 @@ html, body {
 
 /* ---- now playing ---- */
 #view-now { justify-content: center; }
-#nowplaying { display: flex; gap: 24px; align-items: center; }
-#artwrap { flex-shrink: 0; text-align: center; width: 240px; }
+/* The artwork grows with the window rather than sitting at one size, so
+   maximising the player actually shows the cover larger. What limits it is
+   the window height less the chrome above and below plus the two lines of
+   text underneath, which measures at 248px; 260 leaves a little air. The
+   floor keeps it visible on a short window, the ceiling stops it eating a
+   very tall one. */
+#nowplaying {
+  /* Also bounded by width, or a tall narrow window grows the artwork
+     until the waveform beside it has almost nothing left. */
+  --np-art: clamp(150px, min(calc(100vh - 260px), 40vw), 480px);
+  display: flex; gap: 24px; align-items: center;
+}
+#artwrap { flex-shrink: 0; text-align: center; width: var(--np-art); }
 #art {
-  width: 240px; height: 240px;
+  width: var(--np-art); height: var(--np-art);
   border-radius: 12px;
   background: var(--panel-2) center/cover no-repeat;
   display: flex; align-items: center; justify-content: center;
 }
-#art svg { width: 64px; height: 64px; stroke: var(--accent-dim); }
+/* The placeholder scales with it rather than sitting small in a large box. */
+#art svg {
+  width: clamp(48px, calc(var(--np-art) * 0.27), 120px);
+  height: clamp(48px, calc(var(--np-art) * 0.27), 120px);
+  stroke: var(--accent-dim);
+}
 #np-title {
   font-size: 14px; font-weight: 600; margin-top: 11px;
   letter-spacing: 0.6px; white-space: nowrap;
@@ -353,6 +373,7 @@ html, body {
   margin-bottom: 8px; flex-shrink: 0; font-size: 13px;
 }
 #libcrumb.hidden { display: none; }
+#libcrumb .tbtn.hidden { display: none; }
 #libcrumb .spacer { flex: 1; }
 #libcrumb-title {
   font-weight: 500; overflow: hidden;
@@ -411,13 +432,32 @@ html, body {
 }
 #libdetail.hidden { display: none; }
 
+/* The cover is sized from the window height rather than fixed, so the
+   title and totals underneath always have somewhere to sit. At a small
+   window it is about 150px; maximised on a tall screen it is roughly twice
+   that. The floor stops it vanishing on a short window, the ceiling stops
+   it dominating a very tall one.
+
+   max-height with min-height: 0 is what actually keeps it inside the pane:
+   without them a flex column happily overflows its parent, which is how
+   the text ended up over the transport bar. */
 #libcover {
-  width: 232px; flex-shrink: 0; display: flex; flex-direction: column;
-  gap: 3px; align-self: flex-start;
+  /* What limits the cover is the window height minus the fixed chrome
+     above and below it, which measures at about 370px, not a fraction of
+     the window. A plain vh fraction was either too small on a modest
+     window or overflowed on a short one. */
+  --cover: clamp(120px, calc(100vh - 372px), 360px);
+  width: var(--cover); flex-shrink: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  align-self: flex-start; min-height: 0; max-height: 100%;
+  /* Last resort on a very short window: clip inside the pane rather than
+     let the text escape over the transport bar. */
+  overflow: hidden;
 }
 #libcover.hidden { display: none; }
 #libcover .cover {
-  width: 232px; height: 232px; border-radius: 10px;
+  width: var(--cover); height: var(--cover); flex-shrink: 0;
+  border-radius: 10px;
   background: var(--panel-2); margin-bottom: 9px;
   display: flex; align-items: center; justify-content: center;
   overflow: hidden;
@@ -448,6 +488,13 @@ html, body {
   padding: 0 10px; border-radius: 7px; font-size: 12.5px;
 }
 .librow:hover { background: rgba(255,255,255,0.05); }
+/* Same treatment as the playlist's own playing row, so a track looks the
+   same whether you are watching it from the playlist or from the library. */
+.librow.playing { background: var(--accent-wash); }
+.librow.playing .t { color: var(--accent-hi); font-weight: 500; }
+/* The songs list can hold thousands of rows. Offscreen ones are kept out
+   of the layout budget the same way the album cards are. */
+.librow.song { content-visibility: auto; contain-intrinsic-size: auto 30px; }
 .librow.selected { background: rgba(192,57,47,0.18); }
 .librow .n, .librow .d { color: var(--muted); font-size: 11px; }
 .librow .n { text-align: center; }

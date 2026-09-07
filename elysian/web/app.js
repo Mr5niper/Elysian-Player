@@ -50,6 +50,10 @@ function setView(name) {
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
   $("view-library").classList.toggle("hidden", name !== "library");
+  // Add files and Add folder put tracks in the playlist, so they have
+  // nothing to do with the library, which has its own Folders panel.
+  document.querySelector(".headicons")
+          .classList.toggle("hidden", name === "library");
   $("panel-title").textContent =
     name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>
@@ -806,6 +810,25 @@ $("titlebar").addEventListener("dblclick", (e) => {
 
 $("filter").addEventListener("input", () => renderList(true));
 
+/* True for anything the keyboard should be going into rather than the
+   player. Covers text fields, textareas, selects and contenteditable, so a
+   field added later is exempt without anyone having to remember to add it
+   here. Buttons, checkboxes and sliders are not: those want the arrow and
+   space keys to mean what the browser makes them mean. */
+const NOT_TYPING = new Set([
+  "button", "checkbox", "color", "file", "hidden", "image",
+  "radio", "range", "reset", "submit",
+]);
+
+function isTypingTarget(el) {
+  if (!el || !el.tagName) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName.toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  return !NOT_TYPING.has((el.type || "text").toLowerCase());
+}
+
 document.addEventListener("keydown", (e) => {
   if (modalOpen()) {
     // The dialog owns the keyboard: Escape declines, and Enter or Space
@@ -814,8 +837,18 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
     return;
   }
-  if (e.target === $("filter")) {
-    if (e.key === "Escape") { $("filter").value = ""; $("filter").blur(); renderList(true); }
+  // Anything being typed into owns the keyboard. Naming the one filter
+  // box meant every field added later, the library filter among them,
+  // silently fired the transport shortcuts: a space in a search box
+  // paused the music and the arrows seeked.
+  if (isTypingTarget(e.target)) {
+    if (e.key === "Escape") {
+      const field = e.target;
+      field.value = "";
+      field.blur();
+      if (field === $("filter")) renderList(true);
+      else if (field === $("libfilter")) renderLibrary();
+    }
     return;
   }
   const k = e.key;
@@ -867,9 +900,13 @@ document.addEventListener("keydown", (e) => {
    and content-visibility keeps offscreen cards off the layout budget
    without the machinery that the track list genuinely needs. */
 
-let libView = "albums";          // albums | artists | genres
+let libView = "albums";          // albums | artists | genres | songs
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
+// Set just before requesting an album's detail for a card double-click,
+// which has no track list of its own to play yet. Consumed by whichever
+// detail result arrives next; see the library_detail_revision handler.
+let libPlayAlbumOnDetail = null;
 let libSelected = new Set();     // paths selected in a detail list
 let libAnchor = null;            // where a shift range measures from
 let libOpened = false;
@@ -880,9 +917,47 @@ let libRevision = -1;
 let libPending = 0;
 let libScanning = false;
 let libArt = {};                 // "artist\u0000album" -> data url or ""
+let libArtSeq = 0;               // last sequence collected from the backend
 let libArtRevision = -1;
 let libArtSeen = new Set();      // already asked for, so no repeats
-let libArtObserver = null;
+let libCards = new Map();        // album key -> its card element
+let libGridSig = "";             // what the grid currently shows
+let libArtWaiting = false;       // covers asked for but not yet collected
+
+// The path of the track currently playing, and where to find its row
+// without walking the list. The songs and detail lists are not
+// virtualised the way the playlist is, so scanning every row on every
+// tick - as a large library easily has tens of thousands of them - would
+// cost real time for something that changes once per track. A map from
+// path to element, rebuilt only when the rows themselves change, keeps
+// showing or moving the indicator to two lookups regardless of list size.
+let libPlayingPath = "";
+let libPlayingRow = null;
+let libRowsByPath = new Map();
+
+function rebuildLibRowIndex() {
+  libRowsByPath = new Map();
+  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+          .forEach((row) => libRowsByPath.set(row.dataset.path, row));
+  libPlayingRow = null;         // the old reference no longer points at a
+                                 // live row after the rebuild that just ran
+  paintLibPlaying();
+}
+
+function paintLibPlaying() {
+  if (libPlayingRow) {
+    libPlayingRow.classList.remove("playing");
+    const cell = libPlayingRow.querySelector(".n");
+    if (cell) cell.textContent = libPlayingRow.dataset.num || "";
+    libPlayingRow = null;
+  }
+  const row = libPlayingPath ? libRowsByPath.get(libPlayingPath) : null;
+  if (!row) return;
+  row.classList.add("playing");
+  const cell = row.querySelector(".n");
+  if (cell) cell.textContent = "\u25B6";
+  libPlayingRow = row;
+}
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -903,7 +978,7 @@ function libraryOpened() {
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
       libPending++;
-      a.library_request_browser(libView);
+      a.library_request_browser(libView, $("libfilter").value.trim());
       schedule();
     };
     if (typeof a.library_get_state === "function") {
@@ -919,15 +994,11 @@ function libraryOpened() {
   renderLibrary();
 }
 
+/* The list as it should be shown. The backend has already applied the
+   filter, including against track titles, so filtering here as well would
+   throw away the albums that matched on a song name. */
 function libFiltered() {
-  const needle = $("libfilter").value.trim().toLowerCase();
-  if (!needle) return libItems;
-  return libItems.filter((it) => {
-    const hay = libView === "albums"
-      ? `${it.album} ${it.album_artist}`
-      : (libView === "artists" ? it.artist : it.genre);
-    return (hay || "").toLowerCase().includes(needle);
-  });
+  return libItems;
 }
 
 const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
@@ -955,7 +1026,15 @@ function renderLibrary() {
     return;
   }
 
-  crumb.classList.toggle("hidden", !showingDetail);
+  const songsView = libView === "songs" && !showingDetail;
+  crumb.classList.toggle("hidden", !showingDetail && !songsView);
+  $("lib-back").classList.toggle("hidden", songsView);
+  if (songsView) {
+    const shown = libItems.length;
+    const capped = libItems.length && libItems[0].truncated;
+    $("libcrumb-title").textContent =
+      capped ? `First ${shown} songs, filter to narrow` : `${shown} songs`;
+  }
   if (showingDetail) {
     $("libcrumb-title").textContent = libDetail.title || "";
     grid.classList.add("hidden");
@@ -973,6 +1052,18 @@ function renderLibrary() {
   grid.classList.toggle("hidden", bare);
   if (bare) return;
 
+  /* Rebuilding the grid throws away scroll position, every painted cover
+     and the observer. During a scan the list refreshes every couple of
+     seconds, so rebuild only when the set of entries actually changed. */
+  const sig = libView + "\u0001" + rows.map((it) =>
+    libView === "albums" ? `${it.album_artist}\u0000${it.album}`
+                         : (it.artist || it.genre || "")).join("\u0002");
+  if (sig === libGridSig && grid.childElementCount === rows.length) {
+    paintLibArt();
+    return;
+  }
+  libGridSig = sig;
+
   if (libView === "albums") {
     // Toggle a class rather than an inline display, which would win over
     // the .hidden rule and leave the grid showing behind the track list.
@@ -987,6 +1078,44 @@ function renderLibrary() {
       </div>`).join("");
     paintLibArt();
     watchLibArt();
+  } else if (libView === "songs") {
+    // Individual tracks. Selecting works as it does in the playlist, and
+    // the buttons above act on the selection, so there is nothing to
+    // drill into: a song is already the thing you wanted.
+    grid.classList.add("aslist");
+    // Broken into album sections, as the artist and genre views are. The
+    // backend returns them in album order, so this only has to notice
+    // where one ends and the next begins. Track number replaces the blank
+    // first column, and the album is dropped from the row since the
+    // heading above already carries it.
+    const out = [];
+    let section = null;
+    for (const t of rows) {
+      const who = t.album_artist || t.artist || "";
+      const album = (t.album || "").trim();
+      // Everything with no album tag shares one heading at the end rather
+      // than one per artist, which repeated the same words down the page.
+      // Those rows keep their artist in the column, so nothing is lost.
+      const key = album ? `${who}\u0000${album}` : "\u0000";
+      if (key !== section) {
+        section = key;
+        const bits = [];
+        if (album && who) bits.push(`<span class="by">${esc(who)}</span>`);
+        if (album && t.year) bits.push(`<span class="yr">${t.year}</span>`);
+        out.push(`<div class="libsection">${esc(album || "Not part of an album")}`
+                 + `${bits.join("")}</div>`);
+      }
+      out.push(`<div class="librow song" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
+        <div class="n">${t.track_number || ""}</div>
+        <div class="t">${esc(t.title)}</div>
+        <div class="a">${esc(t.artist)}</div>
+        <div class="al"></div>
+        <div class="d">${fmt(t.duration || 0)}</div>
+      </div>`);
+    }
+    grid.innerHTML = out.join("");
+    paintLibSelection();
+    rebuildLibRowIndex();
   } else {
     // Artists and genres are a list rather than a grid: there is no
     // artwork to show, and a name reads better on one line than boxed.
@@ -1005,7 +1134,7 @@ function renderLibrary() {
 }
 
 function trackRow(t, showAlbum) {
-  return `<div class="librow" data-path="${esc(t.path)}">
+  return `<div class="librow" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
       <div class="n">${t.track_number || ""}</div>
       <div class="t">${esc(t.title)}</div>
       <div class="a">${esc(t.artist)}</div>
@@ -1033,32 +1162,109 @@ function artKey(card) {
   return `${card.dataset.artist || ""}\u0000${card.dataset.album || ""}`;
 }
 
-function watchLibArt() {
-  if (libArtObserver) libArtObserver.disconnect();
-  const a = api();
-  if (!a || typeof a.library_request_art !== "function") return;
-  libArtObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const card = entry.target;
-      const key = artKey(card);
-      if (libArtSeen.has(key)) continue;
-      libArtSeen.add(key);
-      a.library_request_art(card.dataset.album || "", card.dataset.artist || "");
-    }
-  }, { root: $("libgrid"), rootMargin: "200px" });
-  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
-    libArtObserver.observe(c));
+/* Tells the backend which albums are on screen, nearest the top of the
+   view first, whenever that changes. It resolves exactly those and throws
+   away anything queued for cards that have scrolled away.
+
+   An observer was queueing every card it passed, so the covers being
+   looked at waited behind a hundred albums already scrolled past. What
+   matters is what is on screen now. */
+const ART_AHEAD = 400;           // px beyond the view to prepare
+let libArtTimer = 0;
+
+function visibleAlbumKeys() {
+  const grid = $("libgrid");
+  const top = grid.scrollTop - ART_AHEAD;
+  const bottom = grid.scrollTop + grid.clientHeight + ART_AHEAD;
+  const wanted = [];
+  for (const [key, card] of libCards) {
+    if (libArt[key] !== undefined) continue;
+    const y = card.offsetTop;
+    if (y + card.offsetHeight < top || y > bottom) continue;
+    wanted.push([Math.abs(y - grid.scrollTop), key]);
+  }
+  // Nearest the top of the view first, so the row being looked at is
+  // resolved before the ones above and below it.
+  wanted.sort((a, b) => a[0] - b[0]);
+  return wanted.map((w) => w[1]);
 }
 
-function paintLibArt() {
-  $("libgrid").querySelectorAll(".libcard").forEach((card) => {
+function reportVisibleArt() {
+  const a = api();
+  if (!a || typeof a.library_visible_art !== "function") return;
+  if (libView !== "albums" || libDetail || libShowFolders) return;
+  const keys = visibleAlbumKeys();
+  if (!keys.length) return;
+  keys.forEach((k) => libArtSeen.add(k));
+  libArtWaiting = true;
+  a.library_visible_art(keys);
+  schedule();
+}
+
+function watchLibArt() {
+  libCards = new Map();
+  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
+    libCards.set(artKey(c), c));
+  reportVisibleArt();
+}
+
+$("libgrid").addEventListener("scroll", () => {
+  clearTimeout(libArtTimer);
+  libArtTimer = setTimeout(reportVisibleArt, 90);
+}, { passive: true });
+
+/* The only place that knows the shape of a library_get_art reply. It
+   returns an envelope, not a map of covers; assigning that envelope
+   straight to the cache replaced every cover with the words seq, art and
+   reset, which is what emptied the grid after a tab switch. */
+function collectArt(since) {
+  const a = api();
+  if (!a || typeof a.library_get_art !== "function") return;
+  a.library_get_art(since).then((m) => {
+    if (!m || typeof m !== "object") return;
+    // A backend that has restarted, or forgotten misses, reports a
+    // sequence behind ours; start again rather than keeping stale keys.
+    if (m.reset) { libArt = {}; libArtSeen = new Set(); }
+    libArtSeq = m.seq || 0;
+    const fresh = m.art || {};
+    const keys = Object.keys(fresh);
+    if (!keys.length && !m.reset) return;
+    for (const k of keys) libArt[k] = fresh[k];
+    // Anything the backend has forgotten should be asked for again: it
+    // drops "no cover" answers when the index changes, since an album that
+    // was half indexed when it was asked may have gained the track
+    // carrying the artwork since.
+    for (const key of Array.from(libArtSeen)) {
+      if (!(key in libArt)) libArtSeen.delete(key);
+    }
+    paintLibArt(keys);
+    libArtWaiting = visibleAlbumKeys().length > 0;
+    if (libDetail && libDetail.kind === "album") renderLibCover();
+  }).catch(() => {});
+}
+
+function paintLibArt(keys) {
+  const grid = $("libgrid");
+  if (keys && keys.length) {
+    for (const key of keys) {
+      const url = libArt[key];
+      if (!url) continue;
+      const card = libCards.get(key);
+      if (!card) continue;
+      const art = card.querySelector(".art");
+      if (art.dataset.painted === url) continue;
+      art.dataset.painted = url;
+      art.innerHTML = `<img src="${esc(url)}" alt="" loading="lazy">`;
+    }
+    return;
+  }
+  grid.querySelectorAll(".libcard").forEach((card) => {
     const url = libArt[artKey(card)];
     if (!url) return;
     const art = card.querySelector(".art");
     if (art.dataset.painted === url) return;
     art.dataset.painted = url;
-    art.innerHTML = `<img src="${esc(url)}" alt="">`;
+    art.innerHTML = `<img src="${esc(url)}" alt="" loading="lazy">`;
   });
 }
 
@@ -1134,6 +1340,7 @@ function renderLibTracks(items) {
     // since its rows can come from anywhere.
     box.innerHTML = items.map((t) => trackRow(t, kind !== "album")).join("");
     paintLibSelection();
+    rebuildLibRowIndex();
     return;
   }
   const html = [];
@@ -1153,14 +1360,20 @@ function renderLibTracks(items) {
   }
   box.innerHTML = html.join("");
   paintLibSelection();
+  rebuildLibRowIndex();
 }
 
 function paintLibSelection() {
-  $("libtracks").querySelectorAll(".librow").forEach((row) =>
-    row.classList.toggle("selected", libSelected.has(row.dataset.path)));
+  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+    .forEach((row) => row.classList.toggle(
+      "selected", libSelected.has(row.dataset.path)));
 }
 
 function libChosenPaths() {
+  if (libView === "songs" && !libDetail) {
+    const all = libRowPaths(".song");
+    return libSelected.size ? all.filter((p) => libSelected.has(p)) : all;
+  }
   if (!libDetail) return [];
   if (libSelected.size) {
     return libDetail.items.map((t) => t.path).filter((p) => libSelected.has(p));
@@ -1168,8 +1381,83 @@ function libChosenPaths() {
   return libDetail.items.map((t) => t.path);
 }
 
+/* What a double-click in the library plays: the current view's own order,
+   not just the one track clicked. An album's track list, an artist's or
+   genre's detail list, or the songs list exactly as displayed - so
+   continuing past the clicked track carries on through the rest of what
+   was actually on screen, the way opening an album and hitting play
+   naturally continues into the next track. */
+/* What to call the current view, for the status line. One place, so the
+   Play button and a double-click cannot each describe the same list
+   differently. */
+function libraryContextLabel() {
+  if (libView === "songs" && !libDetail) return { kind: "songs", title: "Songs" };
+  if (libDetail) {
+    // The backend labels a search result "Search: eclipse" for its own
+    // detail title; libDetail.key is the bare search text, which reads
+    // better here than repeating that label back.
+    const title = libDetail.kind === "search"
+      ? (libDetail.key || libDetail.title || "") : (libDetail.title || "");
+    return { kind: libDetail.kind || "library", title };
+  }
+  return { kind: "", title: "" };
+}
+
+function libraryContextPayload(startPath) {
+  startPath = String(startPath || "");
+  if (!startPath) return null;
+  const label = libraryContextLabel();
+
+  if (libView === "songs" && !libDetail) {
+    const paths = libItems.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: label.kind, title: label.title };
+  }
+  if (libDetail && Array.isArray(libDetail.items) && libDetail.items.length) {
+    const paths = libDetail.items.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: label.kind, title: label.title };
+  }
+  return null;
+}
+
+function playLibraryContextFrom(startPath) {
+  const a = api();
+  if (!a) return;
+  const payload = libraryContextPayload(startPath);
+  // No context to build a queue from - a row reached some way this does
+  // not anticipate - still has to play something, so it becomes a queue
+  // of just that one track rather than doing nothing.
+  const p = payload && payload.paths && payload.paths.length
+    ? payload : { paths: [startPath], startPath, kind: "", title: "" };
+  a.library_play_context(p.paths, p.startPath, p.kind, p.title);
+}
+
+function orderedSelectedLibraryPaths() {
+  const chosen = new Set(libChosenPaths());
+  if (!chosen.size) return [];
+  if (libView === "songs" && !libDetail) {
+    return libItems.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  if (libDetail && Array.isArray(libDetail.items)) {
+    return libDetail.items.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  return Array.from(chosen);
+}
+
+/* An album card carries only the summary shown on it - no track paths - so
+   double-clicking it has to fetch the album before anything can play. The
+   fetch is the same one a single click already makes; this only adds a
+   flag saying what to do once it lands, rather than opening the album pane
+   the user did not ask to see. */
+function playAlbumCardFromStart(item) {
+  const a = api();
+  if (!a) return;
+  libPlayAlbumOnDetail = { album: item.album || "", artist: item.album_artist || "" };
+  a.library_request_detail("album", item.album, item.album_artist);
+}
+
 function setLibView(name) {
   if (libView === name) return;
+  libGridSig = "";
   libView = name;
   libDetail = null;
   libSelected.clear();
@@ -1179,7 +1467,7 @@ function setLibView(name) {
   const a = api();
   if (a) {
     libPending++;
-    a.library_request_browser(name);
+    a.library_request_browser(name, $("libfilter").value.trim());
     schedule();
   }
 }
@@ -1189,7 +1477,22 @@ function setLibView(name) {
 document.querySelectorAll(".libtab").forEach((b) =>
   b.addEventListener("click", () => setLibView(b.dataset.lib)));
 
-$("libfilter").addEventListener("input", () => renderLibrary());
+let libFilterTimer = 0;
+$("libfilter").addEventListener("input", () => {
+  // Asked of the backend, not applied to what is already loaded: a song
+  // title is not in the album list, so matching locally could never find
+  // one. Debounced, since this is a query rather than an array filter.
+  clearTimeout(libFilterTimer);
+  libFilterTimer = setTimeout(() => {
+    const a = api();
+    if (!a) return;
+    libDetail = null;
+    libAnchor = null;
+    libPending++;
+    a.library_request_browser(libView, $("libfilter").value.trim());
+    schedule();
+  }, 180);
+});
 
 $("libfolders").addEventListener("click", (e) => {
   if (libConfirmRemove && !e.target.closest("[data-remove]")) {
@@ -1198,7 +1501,35 @@ $("libfolders").addEventListener("click", (e) => {
   }
 });
 
+$("libgrid").addEventListener("dblclick", (e) => {
+  const row = e.target.closest(".librow.song");
+  if (row) { playLibraryContextFrom(row.dataset.path); return; }
+  const card = e.target.closest(".libcard");
+  if (!card) return;
+  const item = libFiltered()[Number(card.dataset.i)];
+  if (item) playAlbumCardFromStart(item);
+});
+
 $("libgrid").addEventListener("click", (e) => {
+  const song = e.target.closest(".librow.song");
+  if (song) {
+    const path = song.dataset.path;
+    if (e.shiftKey) {
+      const run = libAnchor === null ? null : libRange(libAnchor, path, ".song");
+      if (run) {
+        if (!e.ctrlKey) libSelected = new Set();
+        run.forEach((x) => libSelected.add(x));
+      } else { libSelected = new Set([path]); libAnchor = path; }
+    } else if (e.ctrlKey) {
+      libSelected.has(path) ? libSelected.delete(path) : libSelected.add(path);
+      libAnchor = path;
+    } else {
+      libSelected = new Set([path]);
+      libAnchor = path;
+    }
+    paintLibSelection();
+    return;
+  }
   const card = e.target.closest(".libcard, .librow");
   if (!card) return;
   const item = libFiltered()[Number(card.dataset.i)];
@@ -1223,13 +1554,13 @@ $("libgrid").addEventListener("click", (e) => {
    The run is measured over the rows as displayed, which in an artist or
    genre view are split by album headings: a range spanning two albums
    selects what is visually between them and nothing else. */
-function libRowPaths() {
-  return Array.from($("libtracks").querySelectorAll(".librow"))
-              .map((r) => r.dataset.path);
+function libRowPaths(sel) {
+  const scope = sel ? `#libgrid .librow${sel}` : "#libtracks .librow";
+  return Array.from(document.querySelectorAll(scope)).map((r) => r.dataset.path);
 }
 
-function libRange(fromPath, toPath) {
-  const paths = libRowPaths();
+function libRange(fromPath, toPath, sel) {
+  const paths = libRowPaths(sel);
   let a = paths.indexOf(fromPath);
   let b = paths.indexOf(toPath);
   if (a < 0 || b < 0) return null;
@@ -1264,8 +1595,7 @@ $("libtracks").addEventListener("click", (e) => {
 $("libtracks").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow");
   if (!row) return;
-  const a = api();
-  if (a) a.library_play([row.dataset.path]);
+  playLibraryContextFrom(row.dataset.path);
 });
 
 $("lib-back").addEventListener("click", () => {
@@ -1279,8 +1609,14 @@ $("lib-queue").addEventListener("click", () => {
   if (a) a.library_enqueue(libChosenPaths());
 });
 $("lib-play").addEventListener("click", () => {
-  const a = api();
-  if (a) a.library_play(libChosenPaths());
+  // A button version of double-clicking the selected row: not "play only
+  // the selection", but the same thing double-click does, which plays the
+  // whole current view in its own order starting at that row. With
+  // nothing selected, that row is the first one, same as double-clicking
+  // it directly would be.
+  const chosen = orderedSelectedLibraryPaths();
+  if (!chosen.length) return;
+  playLibraryContextFrom(chosen[0]);
 });
 $("lib-folders").addEventListener("click", () => {
   libShowFolders = !libShowFolders;
@@ -1339,11 +1675,7 @@ function applyLibraryTick(tick) {
       // Resync rather than assume: the backend only announces art it has
       // just resolved, so anything it already had would otherwise never
       // reach a frontend whose cache has been reset.
-      a.library_get_art().then((m) => {
-        if (!m) return;
-        libArt = m;
-        paintLibArt();
-      }).catch(() => {});
+      collectArt(0);
     }).catch(() => {});
   }
   if (tick.library_detail_revision !== libDetailRevision) {
@@ -1351,6 +1683,20 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_detail().then((d) => {
       if (!d || !d.kind) return;
+      // Consumed by whichever detail lands next, matching or not: if
+      // something else changed the selection in between, a stale double
+      // click waiting for its album is less useful than one that already
+      // moved on.
+      const wantPlay = libPlayAlbumOnDetail;
+      libPlayAlbumOnDetail = null;
+      if (wantPlay && d.kind === "album" && d.key === wantPlay.album
+          && (d.key2 || "") === wantPlay.artist) {
+        const paths = (d.items || []).map((t) => t.path).filter(Boolean);
+        if (paths.length) {
+          a.library_play_context(paths, paths[0], "album", d.title || "");
+        }
+        return;
+      }
       libDetail = d;
       libSelected.clear();
       libAnchor = null;
@@ -1359,12 +1705,7 @@ function applyLibraryTick(tick) {
   }
   if (tick.library_art_revision !== libArtRevision) {
     libArtRevision = tick.library_art_revision;
-    a.library_get_art().then((m) => {
-      if (!m) return;
-      libArt = m;
-      paintLibArt();
-      if (libDetail && libDetail.kind === "album") renderLibCover();
-    }).catch(() => {});
+    collectArt(libArtSeq);
   }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
@@ -1437,6 +1778,10 @@ function applyTick(s) {
 
   state.current_id = s.current_id;
   state.playing = playing;
+  if (s.current_path !== libPlayingPath) {
+    libPlayingPath = s.current_path || "";
+    paintLibPlaying();
+  }
   state.position = position;
   state.duration = s.duration;
   state.shuffle = shuffle;
@@ -1576,6 +1921,9 @@ function pollInterval() {
   if (visibleMissing()) return POLL_FILLING;
   // A library request is in flight, or a scan is filling the index.
   if (libPending > 0 || libScanning) return POLL_FILLING;
+  // Covers are collected on the poll, so a resolved one would otherwise
+  // wait up to a second before it appeared.
+  if (libArtWaiting) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }

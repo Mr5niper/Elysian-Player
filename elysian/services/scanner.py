@@ -60,7 +60,7 @@ def _raw(meta, frame: str) -> str:
 EMPTY_METADATA = {
     "title": "", "artist": "", "album": "", "length": 0.0,
     "album_artist": "", "genre": "", "track_number": 0,
-    "disc_number": 0, "year": 0,
+    "disc_number": 0, "year": 0, "compilation": 0,
 }
 
 
@@ -102,6 +102,15 @@ def read_metadata(path: str) -> dict:
                                       or _raw(meta, "TPOS"))
         info["year"] = _number(meta.get("date") or meta.get("year")
                                or _raw(meta, "TDRC"))
+        # The "part of a compilation" flag. Tools write it as TCMP in ID3,
+        # COMPILATION in Vorbis comments and cpil in MP4. It is the only
+        # authoritative answer: a compilation can have one artist on every
+        # track, and counting artists would never notice.
+        flag = (_first(meta.get("compilation"), "")
+                or _raw(meta, "TCMP")
+                or _first(meta.get("cpil"), ""))
+        info["compilation"] = 1 if str(flag).strip().lower() in (
+            "1", "true", "yes", "y") else 0
     except Exception:
         log.warning("could not read tags from %s", path, exc_info=True)
     if not info["title"]:

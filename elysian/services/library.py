@@ -24,8 +24,10 @@ Three things here are deliberate rather than incidental:
   uses, so the same file reached by a different spelling is one row.
 """
 import os
+import re
 import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -47,7 +49,7 @@ SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
-            "modified_at", "added_at")
+            "compilation", "dir", "modified_at", "added_at")
 
 _UPSERT = f"""
     INSERT INTO tracks ({','.join(_COLUMNS)})
@@ -57,7 +59,8 @@ _UPSERT = f"""
         album=excluded.album, album_artist=excluded.album_artist,
         genre=excluded.genre, duration=excluded.duration,
         track_number=excluded.track_number, disc_number=excluded.disc_number,
-        year=excluded.year, modified_at=excluded.modified_at
+        year=excluded.year, compilation=excluded.compilation,
+        dir=excluded.dir, modified_at=excluded.modified_at
 """
 
 #: Falls back through album artist, then track artist, then a placeholder,
@@ -76,12 +79,59 @@ _TRACK_ORDER = ("CASE WHEN disc_number <= 0 THEN 1 ELSE disc_number END, "
                 "track_number, title COLLATE NOCASE")
 
 
+#: What a track counts as belonging to for album grouping. A track that
+#: says it is part of a compilation, or is tagged with a conventional
+#: "Various Artists" style album artist, is grouped by that regardless of
+#: its own artist; anything else groups strictly by its own artist. That
+#: second half matters: without it, any two unrelated single-artist albums
+#: that happen to share a title - "Greatest Hits" is common - would look
+#: like a multi-artist match and get merged into one card with their
+#: tracks interleaved.
+_GROUP_ARTIST = (
+    "CASE WHEN compilation = 1 "
+    f"OR LOWER(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) IN ('various artists','various','va') "
+    "THEN 'Various Artists' "
+    f"ELSE COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') END"
+)
+
+_LEADING_JUNK = re.compile(r"^[^0-9a-z]+", re.IGNORECASE)
+
+
+def sort_key(name) -> str:
+    """How a name should file alphabetically.
+
+    Leading punctuation is ignored, so '"Weird Al" Yankovic' files under W
+    rather than ahead of everything, and case is ignored, so it does not
+    matter how a tagger capitalised it. If a name is nothing but
+    punctuation the original is used, which at least sorts consistently.
+    """
+    text = (name or "").strip()
+    stripped = _LEADING_JUNK.sub("", text)
+    return (stripped or text).casefold()
+
+
+def _escape_like(needle: str) -> str:
+    return (needle.replace("\\", "\\\\")
+                  .replace("%", "\\%").replace("_", "\\_"))
+
+
 def _like_prefix(root: str) -> str:
     """A LIKE pattern matching only paths inside this folder."""
     stem = pathutil.key(root).rstrip("\\/") + os.sep
     for ch in ("\\", "%", "_"):
         stem = stem.replace(ch, "\\" + ch)
     return stem + "%"
+
+
+def _read_job(job):
+    """Read one file's tags. Never raises, so one bad file cannot stop a scan."""
+    path, key, mtime = job
+    try:
+        meta = read_metadata(path)
+    except Exception:
+        log.exception("library scan recovered from %s", path)
+        meta = {}
+    return path, key, mtime, meta
 
 
 class LibraryService:
@@ -124,6 +174,8 @@ class LibraryService:
                         track_number  INTEGER DEFAULT 0,
                         disc_number   INTEGER DEFAULT 0,
                         year          INTEGER DEFAULT 0,
+                        compilation   INTEGER DEFAULT 0,
+                        dir           TEXT    DEFAULT '',
                         modified_at   REAL    DEFAULT 0,
                         added_at      REAL    DEFAULT 0
                     );
@@ -134,6 +186,27 @@ class LibraryService:
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
                 """)
+                # Older databases predate the compilation column. Add it,
+                # and clear modified_at so the next scan actually re-reads
+                # the files: without that every track looks unchanged and
+                # the new column would stay empty forever.
+                have = {r["name"] for r in con.execute("PRAGMA table_info(tracks)")}
+                if "dir" not in have:
+                    con.execute("ALTER TABLE tracks ADD COLUMN dir TEXT DEFAULT ''")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in the "
+                             "folder column")
+                if "compilation" not in have:
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN compilation INTEGER DEFAULT 0")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in the "
+                             "compilation flag")
+                # Indexes are created after the column checks above, not in
+                # the schema script: on an existing table the CREATE TABLE is
+                # skipped, so an index naming a newly added column would fail
+                # and abort the whole script before the migration ran.
+                con.execute("CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir)")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
@@ -190,8 +263,13 @@ class LibraryService:
     def cancel(self) -> None:
         self._cancel.set()
 
-    def _walk(self, root: str):
-        """Audio files under a folder, breadth-limited only by the tree."""
+    def _walk_dirs(self, root: str):
+        """Yield one folder at a time as (folder, audio files inside it).
+
+        A folder at a time rather than the whole tree first: a large
+        collection can take minutes to walk, and nothing should have to
+        wait for the end of that before it appears.
+        """
         stack = [root]
         while stack:
             if self._cancel.is_set():
@@ -201,45 +279,43 @@ class LibraryService:
                 entries = sorted(os.scandir(folder), key=lambda e: e.name.lower())
             except OSError:
                 continue
-            subdirs = []
+            subdirs, files = [], []
             for entry in entries:
                 try:
                     if entry.is_dir(follow_symlinks=False):
                         subdirs.append(entry.path)
                     elif os.path.splitext(entry.name)[1].lower() \
                             in config.AUDIO_EXTENSIONS:
-                        yield pathutil.absolute(entry.path)
+                        files.append(pathutil.absolute(entry.path))
                 except OSError:
                     continue
             stack.extend(reversed(subdirs))
+            if files:
+                yield pathutil.absolute(folder), files
 
-    def _known(self, con, root: str) -> dict:
-        rows = con.execute(
-            "SELECT key, modified_at FROM tracks WHERE key LIKE ? ESCAPE '\\'",
-            (_like_prefix(root),))
-        return {r["key"]: float(r["modified_at"] or 0.0) for r in rows}
+    def _scan_directory(self, folder, files, pool) -> dict:
+        """Index one folder and commit it, so its albums appear right away.
 
-    def scan_root(self, root, progress=None) -> dict:
-        """Index one folder. Safe to call from a background thread."""
-        folder = pathutil.absolute(root)
-        self._cancel.clear()
-        scanned = updated = removed = 0
-
+        The database lock is taken only for the reads and writes, never
+        across the tag reading: holding it for a whole scan blocked every
+        query behind it, which on a large collection meant a library that
+        looked frozen for minutes.
+        """
+        dkey = pathutil.key(folder)
         with self._lock:
             con = self._connect()
             try:
-                known = self._known(con, folder)
+                known = {r["key"]: float(r["modified_at"] or 0.0)
+                         for r in con.execute(
+                             "SELECT key, modified_at FROM tracks WHERE dir = ?",
+                             (dkey,))}
             finally:
                 con.close()
 
-        # Decide what actually needs reading before opening any tags: an
-        # unchanged file costs one stat instead of a full tag read, which
-        # is what makes a rescan cheap.
         todo, seen = [], set()
-        for path in self._walk(folder):
+        for path in files:
             key = pathutil.key(path)
             seen.add(key)
-            scanned += 1
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
@@ -248,100 +324,103 @@ class LibraryService:
                 continue
             todo.append((path, key, mtime))
 
+        rows = []
         if todo and not self._cancel.is_set():
-            updated = self._read_and_store(todo, progress)
+            now = time.time()
+            for path, key, mtime, meta in pool.map(_read_job, todo):
+                if self._cancel.is_set():
+                    break
+                rows.append((
+                    path, key,
+                    meta.get("title", "") or Path(path).stem,
+                    meta.get("artist", ""), meta.get("album", ""),
+                    meta.get("album_artist", "") or meta.get("artist", ""),
+                    meta.get("genre", ""),
+                    float(meta.get("length", 0.0) or 0.0),
+                    int(meta.get("track_number", 0) or 0),
+                    int(meta.get("disc_number", 0) or 0),
+                    int(meta.get("year", 0) or 0),
+                    int(meta.get("compilation", 0) or 0),
+                    dkey, float(mtime or 0.0), now,
+                ))
 
         stale = [k for k in known if k not in seen]
-        if stale and not self._cancel.is_set():
+        if rows or stale:
             with self._lock:
                 con = self._connect()
                 try:
-                    con.executemany("DELETE FROM tracks WHERE key = ?",
-                                    [(k,) for k in stale])
+                    for i in range(0, len(rows), BATCH_SIZE):
+                        con.executemany(_UPSERT, rows[i:i + BATCH_SIZE])
+                    if stale:
+                        con.executemany("DELETE FROM tracks WHERE key = ?",
+                                        [(k,) for k in stale])
                     con.commit()
-                    removed = len(stale)
+                except Exception:
+                    log.exception("could not write folder %s", folder)
                 finally:
                     con.close()
+        return {"folder": folder, "scanned": len(files),
+                "updated": len(rows), "removed": len(stale), "dir_key": dkey}
 
-        return {"root": folder, "scanned": scanned,
-                "updated": updated, "removed": removed,
-                "cancelled": self._cancel.is_set()}
+    def _prune_missing_dirs(self, root: str, visited: set) -> int:
+        """Drop rows for folders under this root that no longer exist.
 
-    def _read_and_store(self, todo, progress=None) -> int:
-        """Read tags on several threads, write them in batches."""
-        import queue as _queue
-
-        jobs = _queue.Queue()
-        for item in todo:
-            jobs.put(item)
-        results = _queue.Queue()
-
-        def worker():
-            while not self._cancel.is_set():
-                try:
-                    path, key, mtime = jobs.get_nowait()
-                except _queue.Empty:
-                    return
-                try:
-                    meta = read_metadata(path)
-                except Exception:
-                    log.exception("library scan recovered from %s", path)
-                    meta = {}
-                results.put((path, key, mtime, meta))
-
-        threads = [threading.Thread(target=worker, name=f"elysian-library-{i}",
-                                    daemon=True)
-                   for i in range(min(SCAN_WORKERS, max(1, len(todo))))]
-        for t in threads:
-            t.start()
-
-        written = 0
-        batch = []
-        now = time.time()
+        Returns the number of tracks dropped, not folders: it is added to
+        the removed count the status line reports, and reporting folders
+        there made a vanished album look like one lost track.
+        """
         with self._lock:
             con = self._connect()
             try:
-                pending = len(todo)
-                while pending > 0:
-                    try:
-                        path, key, mtime, meta = results.get(timeout=0.5)
-                    except _queue.Empty:
-                        if not any(t.is_alive() for t in threads):
-                            break
-                        continue
-                    pending -= 1
-                    batch.append((
-                        path, key,
-                        meta.get("title", "") or Path(path).stem,
-                        meta.get("artist", ""), meta.get("album", ""),
-                        meta.get("album_artist", "") or meta.get("artist", ""),
-                        meta.get("genre", ""),
-                        float(meta.get("length", 0.0) or 0.0),
-                        int(meta.get("track_number", 0) or 0),
-                        int(meta.get("disc_number", 0) or 0),
-                        int(meta.get("year", 0) or 0),
-                        float(mtime or 0.0), now,
-                    ))
-                    if len(batch) >= BATCH_SIZE:
-                        con.executemany(_UPSERT, batch)
-                        con.commit()
-                        written += len(batch)
-                        batch = []
-                        if progress:
-                            progress(written, len(todo))
-                if batch:
-                    con.executemany(_UPSERT, batch)
-                    con.commit()
-                    written += len(batch)
-                    if progress:
-                        progress(written, len(todo))
+                have = [r["dir"] for r in con.execute(
+                    "SELECT DISTINCT dir FROM tracks WHERE key LIKE ? ESCAPE '\\'",
+                    (_like_prefix(root),))]
+                gone = [d for d in have if d and d not in visited]
+                if not gone:
+                    return 0
+                dropped = 0
+                for d in gone:
+                    cur = con.execute("DELETE FROM tracks WHERE dir = ?", (d,))
+                    dropped += cur.rowcount or 0
+                con.commit()
+                return dropped
             except Exception:
-                log.exception("could not write library batch")
+                log.exception("could not prune folders under %s", root)
+                return 0
             finally:
                 con.close()
-        for t in threads:
-            t.join(timeout=0.5)
-        return written
+
+    def scan_root(self, root, progress=None) -> dict:
+        """Index one folder tree, committing each folder as it finishes.
+
+        Nothing is held back until the end: a folder's tracks are queryable
+        as soon as that folder is written, so albums appear steadily rather
+        than all at once after a long wait.
+        """
+        folder = pathutil.absolute(root)
+        self._cancel.clear()
+        totals = {"root": folder, "scanned": 0, "updated": 0, "removed": 0,
+                  "folders": 0, "cancelled": False}
+        visited = set()
+
+        with ThreadPoolExecutor(max_workers=SCAN_WORKERS,
+                                thread_name_prefix="elysian-library") as pool:
+            for directory, files in self._walk_dirs(folder):
+                if self._cancel.is_set():
+                    break
+                result = self._scan_directory(directory, files, pool)
+                visited.add(result["dir_key"])
+                totals["scanned"] += result["scanned"]
+                totals["updated"] += result["updated"]
+                totals["removed"] += result["removed"]
+                totals["folders"] += 1
+                if progress:
+                    progress(dict(totals), directory)
+
+        if not self._cancel.is_set():
+            totals["removed"] += self._prune_missing_dirs(folder, visited)
+        totals["cancelled"] = self._cancel.is_set()
+        return totals
 
     def rescan_all(self, progress=None) -> dict:
         total = {"roots": 0, "scanned": 0, "updated": 0, "removed": 0,
@@ -373,8 +452,7 @@ class LibraryService:
         rows = self._rows(f"""
             SELECT COUNT(*) AS tracks,
                    COUNT(DISTINCT {_EFFECTIVE_ARTIST}) AS artists,
-                   COUNT(DISTINCT {_EFFECTIVE_ARTIST} || '\\u0000' || {_EFFECTIVE_ALBUM})
-                       AS albums,
+                   COUNT(DISTINCT {_EFFECTIVE_ALBUM} || char(31) || ({_GROUP_ARTIST})) AS albums,
                    COUNT(DISTINCT NULLIF(genre,'')) AS genres,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
@@ -384,75 +462,183 @@ class LibraryService:
         data["roots"] = self.get_roots()
         return data
 
-    def albums(self) -> list:
-        # Grouped by band, then chronological within each band, with albums
-        # missing a year tag at the end of that band's run rather than the
-        # front: a NULL year sorts first in SQLite, which put an undated
-        # album ahead of everything the artist actually released.
-        #
-        # GROUP BY and ORDER BY repeat the expression rather than using the
-        # output alias: album_artist, album and artist are all real column
-        # names too, and SQLite resolves the bare name to the column, which
-        # silently groups by the raw tag instead of the fallback chain.
-        return self._rows(f"""
-            SELECT {_EFFECTIVE_ARTIST} AS album_artist,
-                   {_EFFECTIVE_ALBUM}  AS album,
+    def _match(self, needle, fields):
+        """SQL fragment and arguments restricting rows to a search.
+
+        Each view searches its own subject: the albums tab matches album
+        and artist names, and songs match titles. Matching titles in the
+        album tab meant a search for a song silently changed what the album
+        grid meant.
+        """
+        text = (needle or "").strip()
+        if not text:
+            return "", []
+        like = "%" + _escape_like(text) + "%"
+        clause = "(" + " OR ".join(
+            f"{f} LIKE ? ESCAPE '\\'" for f in fields) + ")"
+        return clause, [like] * len(fields)
+
+    def albums(self, needle="") -> list:
+        """One row per album, whatever its tracks say about the artist.
+
+        The album is the unit here; the artist view already separates by
+        band. Grouping by band as well split a compilation into one card
+        per contributing artist whenever the album artist tag was missing.
+
+        A compilation is grouped by _GROUP_ARTIST rather than by counting
+        how many artists share a title: two unrelated single-artist albums
+        that happen to be called "Greatest Hits" are not the same release,
+        and merging them on title alone put their tracks in one card,
+        interleaved.
+
+        Grouping is case insensitive, or a tagger that wrote NEVERMIND on
+        one track and Nevermind on the rest would produce two albums.
+        Ordering is done in Python rather than SQL so it can ignore leading
+        punctuation; see sort_key.
+        """
+        clause, args = self._match(needle, ("album", "album_artist", "artist"))
+        where = f"WHERE {clause}" if clause else ""
+        rows = self._rows(f"""
+            SELECT MIN({_EFFECTIVE_ALBUM}) AS album,
+                   {_GROUP_ARTIST} AS album_artist,
                    MIN(NULLIF(year,0)) AS year,
-                   COUNT(*)            AS tracks,
+                   COUNT(*)      AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'), COALESCE(NULLIF(album,''), 'Unknown Album')
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
-                     CASE WHEN MIN(NULLIF(year,0)) IS NULL THEN 1 ELSE 0 END,
-                     year,
-                     COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
-        """)
+            {where}
+            GROUP BY {_EFFECTIVE_ALBUM} COLLATE NOCASE, {_GROUP_ARTIST} COLLATE NOCASE
+        """, tuple(args))
+        for row in rows:
+            row["compilation"] = row["album_artist"] == "Various Artists"
 
-    def artists(self) -> list:
-        return self._rows(f"""
-            SELECT {_EFFECTIVE_ARTIST} AS artist,
-                   COUNT(*) AS tracks,
-                   COUNT(DISTINCT {_EFFECTIVE_ALBUM}) AS albums,
-                   COALESCE(SUM(duration),0) AS duration
-            FROM tracks
-            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE
-        """)
+        # Bands first, alphabetically then by year, with compilations after
+        # them. An album with no year sorts to the end of its band's run.
+        rows.sort(key=lambda r: (
+            1 if r["compilation"] else 0,
+            "" if r["compilation"] else sort_key(r["album_artist"]),
+            1 if not r["year"] else 0,
+            r["year"] or 0,
+            sort_key(r["album"]),
+        ))
+        return rows
 
-    def genres(self) -> list:
-        return self._rows("""
-            SELECT genre, COUNT(*) AS tracks,
+    def artists(self, needle="") -> list:
+        clause, args = self._match(needle, ("album_artist", "artist"))
+        where = f"WHERE {clause}" if clause else ""
+        rows = self._rows(f"""
+            SELECT MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) AS artist,
+                   COUNT(*)  AS tracks,
+                   COUNT(DISTINCT COALESCE(NULLIF(album,''), 'Unknown Album')
+                                  COLLATE NOCASE) AS albums,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            WHERE COALESCE(genre,'') <> ''
-            GROUP BY genre
-            ORDER BY genre COLLATE NOCASE
-        """)
+            {where}
+            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE
+        """, tuple(args))
+        rows.sort(key=lambda r: sort_key(r["artist"]))
+        return rows
+
+    def genres(self, needle="") -> list:
+        clause, args = self._match(needle, ("genre",))
+        where = "AND " + clause if clause else ""
+        rows = self._rows(f"""
+            SELECT MIN(genre) AS genre, COUNT(*) AS tracks,
+                   COALESCE(SUM(duration),0) AS duration
+            FROM tracks
+            WHERE COALESCE(genre,'') <> '' {where}
+            GROUP BY genre COLLATE NOCASE
+        """, tuple(args))
+        rows.sort(key=lambda r: sort_key(r["genre"]))
+        return rows
+
+    def songs(self, needle="", limit=50000) -> list:
+        """Individual tracks, grouped by album the way artists and genres are.
+
+        Ordered in SQL as well as in Python: the cap has to take a
+        meaningful first slice, and without an ORDER BY the rows it keeps
+        are whatever the table happened to yield.
+
+        The limit is a backstop against a pathological collection, not a
+        working limit: ten thousand songs build in about 150ms and cost
+        nothing to scroll, since offscreen rows are kept out of the layout
+        budget. It is reported when reached, so the pane can say the list
+        was cut short rather than quietly lying about what is there.
+        """
+        # Titles only. Matching the album name as well returned every track
+        # on an album whose title happened to contain the search, which is
+        # what the albums tab is for; here the rows are songs, so the
+        # search should be too.
+        clause, args = self._match(needle, ("title",))
+        where = f"WHERE {clause}" if clause else ""
+        rows = self._rows(f"""
+            SELECT path, title, artist, album, album_artist, genre,
+                   duration, track_number, disc_number, year
+            FROM tracks
+            {where}
+            ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+                     COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
+                     year, album COLLATE NOCASE, {_TRACK_ORDER}
+            LIMIT ?
+        """, tuple(args) + (int(limit) + 1,))
+        truncated = len(rows) > limit
+        if truncated:
+            rows = rows[:limit]
+        # Re-sorted here so leading punctuation is ignored, which SQL
+        # collation cannot do; within an album the SQL order is kept.
+        # Tracks with no album tag collect at the very end rather than
+        # after each artist's records, where they were scattered down the
+        # length of the list. Everything else keeps album order.
+        rows.sort(key=lambda r: (
+            1 if not (r["album"] or "").strip() else 0,
+            sort_key(r["album_artist"] or r["artist"]),
+            r["year"] or 0,
+            sort_key(r["album"]),
+            max(r["disc_number"] or 1, 1),
+            r["track_number"] or 0,
+            sort_key(r["title"]),
+        ))
+        for row in rows:
+            row["truncated"] = truncated
+        return rows
 
     def album_paths(self, album: str, album_artist: str = "") -> list:
         """Candidate files for an album's cover, best first.
 
         Ordered by disc and track so the first one tried is the opening
-        track, which is the most likely to carry the artwork.
+        track, which is the most likely to carry the artwork. Filtered
+        the same way album_tracks is, so a cover lookup for one card
+        cannot pull an image from a different, same-titled album.
         """
-        sql = f"SELECT path FROM tracks WHERE {_EFFECTIVE_ALBUM} = ?"
+        sql = ("SELECT path FROM tracks WHERE "
+               f"{_EFFECTIVE_ALBUM} = ? COLLATE NOCASE")
         args = [album or "Unknown Album"]
         if album_artist:
-            sql += f" AND {_EFFECTIVE_ARTIST} = ?"
+            sql += f" AND ({_GROUP_ARTIST}) = ? COLLATE NOCASE"
             args.append(album_artist)
         sql += f" ORDER BY {_TRACK_ORDER} LIMIT 25"
         return [r["path"] for r in self._rows(sql, tuple(args))]
 
     def album_tracks(self, album: str, album_artist: str = "") -> list:
+        """Every track on the card identified by (album, album_artist).
+
+        The filter matches _GROUP_ARTIST, not the raw album_artist
+        column: a plain equality check would miss a compilation's
+        tracks, most of which do not literally say "Various Artists",
+        and would pull a different same-titled artist's album into this
+        one otherwise. album_artist is optional only for callers that
+        genuinely want every track under a title regardless of card;
+        every caller in this codebase supplies it, since it always has
+        the value albums() produced.
+        """
         sql = f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE {_EFFECTIVE_ALBUM} = ?
+            WHERE {_EFFECTIVE_ALBUM} = ? COLLATE NOCASE
         """
         args = [album or "Unknown Album"]
         if album_artist:
-            sql += f" AND {_EFFECTIVE_ARTIST} = ?"
+            sql += f" AND ({_GROUP_ARTIST}) = ? COLLATE NOCASE"
             args.append(album_artist)
         sql += f" ORDER BY {_TRACK_ORDER}"
         return self._rows(sql, tuple(args))
@@ -465,7 +651,7 @@ class LibraryService:
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE {_EFFECTIVE_ARTIST} = ?
+            WHERE {_EFFECTIVE_ARTIST} = ? COLLATE NOCASE
             ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}
         """, (artist,))
@@ -477,7 +663,7 @@ class LibraryService:
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE genre = ?
+            WHERE genre = ? COLLATE NOCASE
             ORDER BY {_EFFECTIVE_ARTIST} COLLATE NOCASE,
                      CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}

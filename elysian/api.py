@@ -8,6 +8,7 @@ import os
 import queue
 import random
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
@@ -89,22 +90,61 @@ class Api:
         self._library_browser_revision = 0
         self._library_detail_revision = 0
         self._library_scanning = False
+        self._library_refresh_at = 0.0
         self._library_summary = {"tracks": 0, "artists": 0, "albums": 0,
                                  "genres": 0, "duration": 0.0, "roots": []}
-        self._library_browser = {"view": "albums", "items": [], "revision": 0}
+        self._library_browser = {"view": "albums", "items": [], "needle": "",
+                                 "revision": 0}
         self._library_detail = {"kind": "", "key": "", "key2": "",
                                 "title": "", "items": [], "revision": 0}
         # Cover art, resolved only for the cards actually on screen. A
         # library of a thousand albums is a thousand image decodes, and
         # most of them are for cards nobody has scrolled to.
-        self._library_art = {}
+        # Each entry carries the sequence number it arrived at, so the
+        # frontend can ask for only what it has not seen. Returning the
+        # whole map meant several megabytes of base64 crossing the bridge
+        # every time a single cover resolved, which is what made scrolling
+        # a large library stutter.
+        self._library_art = {}          # key -> [seq, data url or ""]
+        self._library_art_seq = 0
         self._library_art_revision = 0
+        # Bumped on every browse or detail request so a query thread that
+        # is still running when a newer one starts can tell it has been
+        # superseded. Without this, a slow query fired first could finish
+        # after a fast one fired later and overwrite it - a filter typed
+        # quickly, a tab switched quickly, or a scan-triggered refresh
+        # landing after a manual request could all show stale results.
+        self._library_browser_gen = 0
+        self._library_detail_gen = 0
         self._library_art_pending = set()
+        # Covers are resolved by a fixed set of workers reading one queue,
+        # not by a pool taking whatever was submitted first. What matters is
+        # the cards on screen now: a queue that cannot be reordered means
+        # they wait behind every album already scrolled past.
+        # Two queues, as the tag scanner uses. Everything is decoded
+        # eventually, but whatever is on screen jumps the whole backlog:
+        # one queue that can only be appended to would put the covers being
+        # looked at behind every album already swept past.
+        self._art_urgent: queue.Queue = queue.Queue()
+        self._art_bulk: queue.Queue = queue.Queue()
+        self._art_workers = []
+        # Keys sitting in the background queue and not yet started. A key
+        # here can be promoted to the urgent queue when it scrolls into
+        # view; the background copy is skipped when a worker reaches it.
+        self._art_bulk_pending = set()
         # The playlist scanner consults the index before opening a file. A
         # track the library already knows costs a local lookup instead of a
         # tag read over a share, which is the expensive thing the whole
         # prefetch scheme exists to ration.
         self._scanner.resolver = self._library.lookup_one
+
+        # Set only by _do_library_play_context, and cleared back to
+        # "playlist" by anything that is an explicit playlist edit (add,
+        # remove, reorder, clear, load an m3u). Informational: transport
+        # itself never branches on it, since the queue it describes IS the
+        # playlist by the time this is set. It exists so the status line
+        # and, later, the UI can say what is actually playing.
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
 
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
@@ -115,6 +155,8 @@ class Api:
             "library_revision": 0, "library_browser_revision": 0,
             "library_detail_revision": 0, "library_art_revision": 0,
             "library_scanning": False,
+            "play_context_source": "playlist", "play_context_kind": "",
+            "play_context_title": "", "current_path": "",
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -373,6 +415,13 @@ class Api:
                 "library_detail_revision": self._library_detail_revision,
                 "library_art_revision": self._library_art_revision,
                 "library_scanning": self._library_scanning,
+                "play_context_source": self._play_context["source"],
+                "play_context_kind": self._play_context["kind"],
+                "play_context_title": self._play_context["title"],
+                # So the library views can show the same play indicator the
+                # playlist does, next to whichever row matches this path,
+                # without leaving the library to see what is playing.
+                "current_path": track.path if track else "",
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
@@ -521,6 +570,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
             # Dropping several folders at once merges their counts. That is
             # rare, and "Added N tracks" for the lot is still the truth.
@@ -589,6 +639,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
         else:
@@ -649,6 +700,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
 
@@ -681,15 +733,18 @@ class Api:
     def clear_playlist(self) -> None:
         self._post("clear_playlist")
 
-    def _do_clear_playlist(self) -> None:
-        """Remove every track and reset playlist-related state.
+    def _reset_playlist_state(self) -> None:
+        """Empty the playlist and everything that describes it.
 
-        Worker-owned, like every other mutation. The frontend clears its
-        local selection immediately, but the source of truth is here.
+        Shared by _do_clear_playlist and _replace_playlist_with_paths so the
+        two cannot drift: both need every piece of per-track state - the
+        shuffle bag, play history, waveform cache, resume point and art
+        cache - left matching an empty playlist before anything new goes
+        in. Invalidating running folder walks and queued tag reads here too
+        stops them spending share round trips on tracks that are about to
+        stop existing.
         """
         self._engine.stop()
-        # Invalidate running folder walks and discard queued tag reads: both
-        # would spend share round trips on tracks that no longer exist.
         self._ingest_gen += 1
         self._folder_added = 0
         self._scanner.drop_all()
@@ -706,8 +761,36 @@ class Api:
         self._resume_id = -1
         self._resume_at = 0.0
         self._art_cache.clear()
+
+    def _do_clear_playlist(self) -> None:
+        """Remove every track and reset playlist-related state.
+
+        Worker-owned, like every other mutation. The frontend clears its
+        local selection immediately, but the source of truth is here.
+        """
+        self._reset_playlist_state()
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         self._bump()
         self._set_status("Playlist cleared")
+
+    def _replace_playlist_with_paths(self, paths) -> int:
+        """Replace the active playlist with exactly these paths, in order.
+
+        Used for library-context playback: the paths are already known
+        good, since they came from the library index rather than a folder
+        walk, so there is nothing here to validate. Returns the number of
+        tracks loaded.
+        """
+        clean = [str(p) for p in (paths or []) if p]
+        if not clean:
+            return 0
+        self._reset_playlist_state()
+        with self._lock:
+            added = self._playlist.add_paths(clean)
+        if self._shuffle:
+            self._rebuild_bag()
+        self._bump()
+        return len(added)
 
     def _do_remove(self, ids) -> None:
         ids = {int(i) for i in ids or []}
@@ -716,6 +799,7 @@ class Api:
         if self._current_id in ids:
             self._do_stop()
         self._playlist.remove_ids(ids)
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         # Only worth reshuffling if shuffle is on. Correctness never depended
         # on this rebuild anyway: _next_id skips ids that no longer exist.
         if self._shuffle:
@@ -725,6 +809,7 @@ class Api:
 
     def _do_reorder(self, dragged_id: int, target_id: int) -> None:
         self._playlist.move(int(dragged_id), int(target_id))
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         self._bump()
 
     # ---- transport -----------------------------------------------------
@@ -950,10 +1035,13 @@ class Api:
 
     def _do_library_remove_root(self, path) -> None:
         removed = self._library.remove_root(path)
+        self._forget_art_misses()
         self._set_status(f"Removed {removed} track(s) from the library")
         self._bump_library()
         self._refresh_library_summary()
-        self._do_library_browser(self._library_browser.get("view", "albums"))
+        self._do_library_browser(
+            self._library_browser.get("view", "albums"),
+            self._library_browser.get("needle", ""))
 
     def _do_library_scan(self, root=None) -> None:
         if self._library_scanning:
@@ -974,23 +1062,42 @@ class Api:
                 return
             self._post("library_scan_done", result)
 
-        def report(done, total):
-            # Posted rather than written directly: the counter is read by
+        def report(totals, folder):
+            # Posted rather than written directly: the counters are read by
             # the snapshot the frontend polls, and that belongs to the
             # worker like everything else it reads.
-            self._post("library_scan_progress", int(done), int(total))
+            self._post("library_scan_progress", dict(totals), str(folder))
 
         threading.Thread(target=work, name="elysian-lib-scan",
                          daemon=True).start()
 
-    def _do_library_scan_progress(self, done, total) -> None:
-        self._set_status(f"Scanning library... {done} of {total}", 60.0)
+    def _do_library_scan_progress(self, totals, folder) -> None:
+        found = int(totals.get("scanned", 0) or 0)
+        folders = int(totals.get("folders", 0) or 0)
+        name = os.path.basename(str(folder).rstrip("\\/")) or folder
+        self._set_status(
+            f"Scanning library: {found} tracks in {folders} folders, {name}",
+            60.0)
+        # Show the new albums as they arrive rather than at the end. Both
+        # queries cost more as the library grows, so they are throttled;
+        # a long scan should not spend its time re-aggregating a table it
+        # is still writing to.
+        now = time.monotonic()
+        if now - self._library_refresh_at >= 2.0:
+            self._library_refresh_at = now
+            self._forget_art_misses()
+            self._library_revision += 1
+            self._refresh_library_summary()
+            self._do_library_browser(
+                self._library_browser.get("view", "albums"),
+                self._library_browser.get("needle", ""))
 
     def _do_library_scan_done(self, result) -> None:
         self._library_scanning = False
         scanned = int(result.get("scanned", 0) or 0)
         updated = int(result.get("updated", 0) or 0)
         removed = int(result.get("removed", 0) or 0)
+        self._library_refresh_at = 0.0
         if result.get("cancelled"):
             self._set_status("Library scan cancelled")
         elif updated or removed:
@@ -1000,39 +1107,65 @@ class Api:
             self._set_status(f"Library up to date, {scanned} tracks")
         self._bump_library()
         self._refresh_library_summary()
-        self._do_library_browser(self._library_browser.get("view", "albums"))
+        self._do_library_browser(
+            self._library_browser.get("view", "albums"),
+            self._library_browser.get("needle", ""))
 
     def _do_library_scan_failed(self, message) -> None:
         self._library_scanning = False
         self._set_status(f"Library scan failed: {message}")
 
-    def _do_library_browser(self, view) -> None:
-        view = view if view in ("albums", "artists", "genres") else "albums"
+    def _do_library_browser(self, view, needle="") -> None:
+        view = (view if view in ("albums", "artists", "genres", "songs")
+                else "albums")
+        needle = str(needle or "")
+        self._library_browser_gen += 1
+        gen = self._library_browser_gen
 
         def work():
+            # Filtering happens here rather than in the frontend, which can
+            # only match what it has already been sent: a song title is not
+            # in the album list, so searching for one found nothing.
             try:
                 if view == "artists":
-                    items = self._library.artists()
+                    items = self._library.artists(needle)
                 elif view == "genres":
-                    items = self._library.genres()
+                    items = self._library.genres(needle)
+                elif view == "songs":
+                    items = self._library.songs(needle)
                 else:
-                    items = self._library.albums()
+                    items = self._library.albums(needle)
             except Exception:
                 log.exception("library browser query failed")
                 items = []
-            self._post("library_browser_ready", view, items)
+            if gen != self._library_browser_gen:
+                return  # a newer request has since been made; this result
+                        # is not wrong, just late, and showing it now would
+                        # silently undo whatever the newer one produced
+            self._post("library_browser_ready", view, items, needle)
 
         threading.Thread(target=work, name="elysian-lib-browse",
                          daemon=True).start()
 
-    def _do_library_browser_ready(self, view, items) -> None:
+    def _do_library_browser_ready(self, view, items, needle="") -> None:
+        if view == "albums" and not needle:
+            # Fill in the whole library in the background. Anything already
+            # cached or queued is skipped, so a refresh during a scan does
+            # not re-queue what is already done.
+            self._do_library_fill_art(
+                [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
+                 for i in (items or [])])
         self._library_browser_revision += 1
         self._library_browser = {"view": view, "items": items,
+                                 "needle": needle,
                                  "revision": self._library_browser_revision}
         self._settings["library_view"] = view
         settings_store.save(self._settings)
 
     def _do_library_detail(self, kind, key, key2="") -> None:
+        self._library_detail_gen += 1
+        gen = self._library_detail_gen
+
         def work():
             try:
                 if kind == "album":
@@ -1052,6 +1185,8 @@ class Api:
             except Exception:
                 log.exception("library detail query failed")
                 items, title = [], ""
+            if gen != self._library_detail_gen:
+                return  # superseded by a later drill-in or double-click
             self._post("library_detail_ready", kind, key, key2, title, items)
 
         threading.Thread(target=work, name="elysian-lib-detail",
@@ -1063,19 +1198,30 @@ class Api:
                                 "title": title, "items": items,
                                 "revision": self._library_detail_revision}
 
-    def _do_library_art(self, album, album_artist) -> None:
-        key = f"{album_artist}\u0000{album}"
-        if key in self._library_art or key in self._library_art_pending:
+    def _start_art_workers(self) -> None:
+        if self._art_workers:
             return
-        self._library_art_pending.add(key)
+        for i in range(4):
+            t = threading.Thread(target=self._art_worker,
+                                 name=f"elysian-lib-art-{i}", daemon=True)
+            t.start()
+            self._art_workers.append(t)
 
-        def work():
+    def _art_worker(self) -> None:
+        while not self._closing:
+            try:
+                key, album, artist = self._art_urgent.get_nowait()
+            except queue.Empty:
+                try:
+                    key, album, artist = self._art_bulk.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if key not in self._art_bulk_pending:
+                    continue        # promoted to urgent, or already done
+                self._art_bulk_pending.discard(key)
             url = None
             try:
-                # First track with a usable image wins. Albums whose opening
-                # track happens to be untagged still get a cover from a
-                # later one rather than showing the placeholder forever.
-                for path in self._library.album_paths(album, album_artist):
+                for path in self._library.album_paths(album, artist):
                     url = self._art.data_url(path)
                     if url:
                         break
@@ -1084,32 +1230,120 @@ class Api:
                 url = None
             self._post("library_art_ready", key, url)
 
-        threading.Thread(target=work, name="elysian-lib-art",
-                         daemon=True).start()
+    def _do_library_visible_art(self, keys) -> None:
+        """Resolve exactly these albums next, in this order.
+
+        Only the urgent queue is emptied. Work for cards that have scrolled
+        away should not be done ahead of what is on screen, but it is still
+        worth doing, so it stays in the background queue rather than being
+        thrown away.
+        """
+        while True:
+            try:
+                dropped = self._art_urgent.get_nowait()
+            except queue.Empty:
+                break
+            self._library_art_pending.discard(dropped[0])
+        self._start_art_workers()
+        for key in keys or []:
+            if key in self._library_art:
+                continue
+            promoted = key in self._art_bulk_pending
+            if promoted:
+                # Waiting in the background queue behind the rest of the
+                # library. Move it to the front rather than skipping it as
+                # already pending, which is what left a scrolled to row
+                # waiting for everything queued ahead of it.
+                self._art_bulk_pending.discard(key)
+            elif key in self._library_art_pending:
+                continue            # already urgent, or being decoded now
+            artist, _, album = str(key).partition("\u0000")
+            self._library_art_pending.add(key)
+            self._art_urgent.put((key, album, artist))
+
+    def _do_library_fill_art(self, keys) -> None:
+        """Queue the rest of the library, behind anything on screen."""
+        self._start_art_workers()
+        for key in keys or []:
+            if key in self._library_art or key in self._library_art_pending:
+                continue
+            artist, _, album = str(key).partition("\u0000")
+            self._library_art_pending.add(key)
+            self._art_bulk_pending.add(key)
+            self._art_bulk.put((key, album, artist))
+
+    def _do_library_art(self, album, album_artist) -> None:
+        key = f"{album_artist}\u0000{album}"
+        if key in self._library_art or key in self._library_art_pending:
+            return
+        self._library_art_pending.add(key)
+        self._start_art_workers()
+        self._art_urgent.put((key, album, album_artist))
+
+    def _forget_art_misses(self) -> None:
+        """Drop remembered "this album has no cover" answers.
+
+        A miss is only true for the tracks indexed at the time it was
+        asked. Folders are committed one at a time, so an album can be half
+        indexed when its card first appears and the track carrying the
+        artwork may not have arrived yet. Keeping that answer meant the
+        cover never appeared however much of the album turned up later.
+        Successful lookups are kept: those cannot become wrong.
+        """
+        missing = [k for k, v in self._library_art.items() if not v[1]]
+        if not missing:
+            return
+        for key in missing:
+            self._library_art.pop(key, None)
+        self._library_art_revision += 1
 
     def _do_library_art_ready(self, key, url) -> None:
         self._library_art_pending.discard(key)
+        self._art_bulk_pending.discard(key)
         # Cached even when nothing was found, so a coverless album is not
         # searched again every time it scrolls past.
-        self._library_art[key] = url or ""
-        while len(self._library_art) > 600:
+        self._library_art_seq += 1
+        self._library_art[key] = [self._library_art_seq, url or ""]
+        while len(self._library_art) > 4000:
             self._library_art.pop(next(iter(self._library_art)), None)
         self._library_art_revision += 1
 
     def _do_library_enqueue(self, paths) -> None:
-        added = self._do_add_audio_paths(paths)
-        if added:
-            self._set_status(f"Added {added} track(s) from the library")
-
-    def _do_library_play(self, paths) -> None:
-        if not paths:
-            return
+        # _do_add_audio_paths already sets an "Added N tracks" status; a
+        # second, near-identical one here just overwrites it a moment
+        # later for no benefit.
         self._do_add_audio_paths(paths)
+
+    def _do_library_play_context(self, paths, start_path, kind="", title="") -> None:
+        """Replace the active playlist with a library-derived queue and play.
+
+        paths is the library view's own current order - an album's track
+        list, an artist's or genre's detail list, or the songs list exactly
+        as displayed - so double-clicking one track in the middle of it
+        continues through the rest of what was on screen rather than
+        stopping or falling back to whatever the playlist held before.
+        start_path is the track actually activated; kind and title describe
+        the source for the status line only, transport never branches on
+        them.
+        """
+        ordered = [str(p) for p in (paths or []) if p]
+        start_path = str(start_path or "")
+        if not ordered or not start_path:
+            return
+        loaded = self._replace_playlist_with_paths(ordered)
+        if not loaded:
+            self._set_status("Nothing to play")
+            return
+        self._play_context = {"source": "library", "kind": str(kind or ""),
+                              "title": str(title or "")}
         with self._lock:
-            index = self._playlist.index_of_path(paths[0])
-            target = self._playlist.id_at(index) if index >= 0 else -1
+            index = self._playlist.index_of_path(start_path)
+            target = (self._playlist.id_at(index) if index >= 0
+                     else self._playlist.id_at(0))
         if target >= 0:
             self._do_play_id(target)
+            if title:
+                self._set_status(f"Playing: {title}")
 
     # ---- library: bridge side -------------------------------------------
 
@@ -1135,8 +1369,8 @@ class Api:
     def library_cancel_scan(self) -> None:
         self._library.cancel()
 
-    def library_request_browser(self, view) -> None:
-        self._post("library_browser", str(view))
+    def library_request_browser(self, view, needle="") -> None:
+        self._post("library_browser", str(view), str(needle or ""))
 
     def library_request_detail(self, kind, key, key2="") -> None:
         self._post("library_detail", str(kind), str(key), str(key2 or ""))
@@ -1162,14 +1396,34 @@ class Api:
     def library_request_art(self, album, album_artist="") -> None:
         self._post("library_art", str(album or ""), str(album_artist or ""))
 
-    def library_get_art(self) -> dict:
-        return dict(self._library_art)
+    def library_visible_art(self, keys) -> None:
+        """The albums on screen right now, nearest the view first."""
+        self._post("library_visible_art",
+                   [str(k) for k in (keys or []) if k])
+
+    def library_get_art(self, since=0) -> dict:
+        """Covers resolved after the caller's last sequence number.
+
+        A pure read of what the worker has already produced, and bounded by
+        how many covers have arrived rather than by library size.
+        """
+        try:
+            mark = int(since or 0)
+        except (TypeError, ValueError):
+            mark = 0
+        fresh = {k: v[1] for k, v in self._library_art.items() if v[0] > mark}
+        return {"seq": self._library_art_seq, "art": fresh,
+                "reset": mark > self._library_art_seq}
 
     def library_enqueue(self, paths) -> None:
         self._post("library_enqueue", [str(p) for p in (paths or []) if p])
 
-    def library_play(self, paths) -> None:
-        self._post("library_play", [str(p) for p in (paths or []) if p])
+    def library_play_context(self, paths, start_path, kind="", title="") -> None:
+        self._post(
+            "library_play_context",
+            [str(p) for p in (paths or []) if p],
+            str(start_path or ""), str(kind or ""), str(title or ""),
+        )
 
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
@@ -1312,7 +1566,10 @@ class Api:
     #: Queued commands whose effects the user expects to survive exit,
     #: applied by _flush_persisted before the session is saved.
     #: restore_session is here so a close moments after launch can never save
-    #: an empty playlist over the previous session. save_m3u is an explicit
+    #: an empty playlist over the previous session. library_play_context
+    #: replaces the whole playlist exactly like clear_playlist, remove and
+    #: reorder, and costs no file I/O to apply here, since add_paths only
+    #: compares strings. save_m3u is an explicit
     #: user action; silently discarding a save the user believes happened is
     #: worse than a slow exit. load_m3u, ingest and open_paths are deliberately
     #: absent: applying them here would stat or read files, possibly over a
@@ -1326,7 +1583,7 @@ class Api:
         "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
-        "clear_playlist",
+        "clear_playlist", "library_play_context",
     })
 
     def _shutdown(self) -> None:
@@ -1342,6 +1599,7 @@ class Api:
             log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
+
         self._engine.stop()
 
     def _flush_persisted(self) -> None:
@@ -1391,8 +1649,8 @@ class Api:
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",
         "library_get_browser", "library_get_detail",
-        "library_enqueue", "library_play",
-        "library_request_art", "library_get_art",
+        "library_enqueue", "library_play_context",
+        "library_request_art", "library_visible_art", "library_get_art",
     })
 
     #: Public for the host process only, never called from JavaScript, but
