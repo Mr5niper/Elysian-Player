@@ -880,9 +880,12 @@ let libRevision = -1;
 let libPending = 0;
 let libScanning = false;
 let libArt = {};                 // "artist\u0000album" -> data url or ""
+let libArtSeq = 0;               // last sequence collected from the backend
 let libArtRevision = -1;
 let libArtSeen = new Set();      // already asked for, so no repeats
-let libArtObserver = null;
+let libCards = new Map();        // album key -> its card element
+let libGridSig = "";             // what the grid currently shows
+let libArtWaiting = false;       // covers asked for but not yet collected
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -973,6 +976,18 @@ function renderLibrary() {
   grid.classList.toggle("hidden", bare);
   if (bare) return;
 
+  /* Rebuilding the grid throws away scroll position, every painted cover
+     and the observer. During a scan the list refreshes every couple of
+     seconds, so rebuild only when the set of entries actually changed. */
+  const sig = libView + "\u0001" + rows.map((it) =>
+    libView === "albums" ? `${it.album_artist}\u0000${it.album}`
+                         : (it.artist || it.genre || "")).join("\u0002");
+  if (sig === libGridSig && grid.childElementCount === rows.length) {
+    paintLibArt();
+    return;
+  }
+  libGridSig = sig;
+
   if (libView === "albums") {
     // Toggle a class rather than an inline display, which would win over
     // the .hidden rule and leave the grid showing behind the track list.
@@ -1033,32 +1048,109 @@ function artKey(card) {
   return `${card.dataset.artist || ""}\u0000${card.dataset.album || ""}`;
 }
 
-function watchLibArt() {
-  if (libArtObserver) libArtObserver.disconnect();
-  const a = api();
-  if (!a || typeof a.library_request_art !== "function") return;
-  libArtObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue;
-      const card = entry.target;
-      const key = artKey(card);
-      if (libArtSeen.has(key)) continue;
-      libArtSeen.add(key);
-      a.library_request_art(card.dataset.album || "", card.dataset.artist || "");
-    }
-  }, { root: $("libgrid"), rootMargin: "200px" });
-  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
-    libArtObserver.observe(c));
+/* Tells the backend which albums are on screen, nearest the top of the
+   view first, whenever that changes. It resolves exactly those and throws
+   away anything queued for cards that have scrolled away.
+
+   An observer was queueing every card it passed, so the covers being
+   looked at waited behind a hundred albums already scrolled past. What
+   matters is what is on screen now. */
+const ART_AHEAD = 400;           // px beyond the view to prepare
+let libArtTimer = 0;
+
+function visibleAlbumKeys() {
+  const grid = $("libgrid");
+  const top = grid.scrollTop - ART_AHEAD;
+  const bottom = grid.scrollTop + grid.clientHeight + ART_AHEAD;
+  const wanted = [];
+  for (const [key, card] of libCards) {
+    if (libArt[key] !== undefined) continue;
+    const y = card.offsetTop;
+    if (y + card.offsetHeight < top || y > bottom) continue;
+    wanted.push([Math.abs(y - grid.scrollTop), key]);
+  }
+  // Nearest the top of the view first, so the row being looked at is
+  // resolved before the ones above and below it.
+  wanted.sort((a, b) => a[0] - b[0]);
+  return wanted.map((w) => w[1]);
 }
 
-function paintLibArt() {
-  $("libgrid").querySelectorAll(".libcard").forEach((card) => {
+function reportVisibleArt() {
+  const a = api();
+  if (!a || typeof a.library_visible_art !== "function") return;
+  if (libView !== "albums" || libDetail || libShowFolders) return;
+  const keys = visibleAlbumKeys();
+  if (!keys.length) return;
+  keys.forEach((k) => libArtSeen.add(k));
+  libArtWaiting = true;
+  a.library_visible_art(keys);
+  schedule();
+}
+
+function watchLibArt() {
+  libCards = new Map();
+  $("libgrid").querySelectorAll(".libcard").forEach((c) =>
+    libCards.set(artKey(c), c));
+  reportVisibleArt();
+}
+
+$("libgrid").addEventListener("scroll", () => {
+  clearTimeout(libArtTimer);
+  libArtTimer = setTimeout(reportVisibleArt, 90);
+}, { passive: true });
+
+/* The only place that knows the shape of a library_get_art reply. It
+   returns an envelope, not a map of covers; assigning that envelope
+   straight to the cache replaced every cover with the words seq, art and
+   reset, which is what emptied the grid after a tab switch. */
+function collectArt(since) {
+  const a = api();
+  if (!a || typeof a.library_get_art !== "function") return;
+  a.library_get_art(since).then((m) => {
+    if (!m || typeof m !== "object") return;
+    // A backend that has restarted, or forgotten misses, reports a
+    // sequence behind ours; start again rather than keeping stale keys.
+    if (m.reset) { libArt = {}; libArtSeen = new Set(); }
+    libArtSeq = m.seq || 0;
+    const fresh = m.art || {};
+    const keys = Object.keys(fresh);
+    if (!keys.length && !m.reset) return;
+    for (const k of keys) libArt[k] = fresh[k];
+    // Anything the backend has forgotten should be asked for again: it
+    // drops "no cover" answers when the index changes, since an album that
+    // was half indexed when it was asked may have gained the track
+    // carrying the artwork since.
+    for (const key of Array.from(libArtSeen)) {
+      if (!(key in libArt)) libArtSeen.delete(key);
+    }
+    paintLibArt(keys);
+    libArtWaiting = visibleAlbumKeys().length > 0;
+    if (libDetail && libDetail.kind === "album") renderLibCover();
+  }).catch(() => {});
+}
+
+function paintLibArt(keys) {
+  const grid = $("libgrid");
+  if (keys && keys.length) {
+    for (const key of keys) {
+      const url = libArt[key];
+      if (!url) continue;
+      const card = libCards.get(key);
+      if (!card) continue;
+      const art = card.querySelector(".art");
+      if (art.dataset.painted === url) continue;
+      art.dataset.painted = url;
+      art.innerHTML = `<img src="${esc(url)}" alt="" loading="lazy">`;
+    }
+    return;
+  }
+  grid.querySelectorAll(".libcard").forEach((card) => {
     const url = libArt[artKey(card)];
     if (!url) return;
     const art = card.querySelector(".art");
     if (art.dataset.painted === url) return;
     art.dataset.painted = url;
-    art.innerHTML = `<img src="${esc(url)}" alt="">`;
+    art.innerHTML = `<img src="${esc(url)}" alt="" loading="lazy">`;
   });
 }
 
@@ -1170,6 +1262,7 @@ function libChosenPaths() {
 
 function setLibView(name) {
   if (libView === name) return;
+  libGridSig = "";
   libView = name;
   libDetail = null;
   libSelected.clear();
@@ -1339,11 +1432,7 @@ function applyLibraryTick(tick) {
       // Resync rather than assume: the backend only announces art it has
       // just resolved, so anything it already had would otherwise never
       // reach a frontend whose cache has been reset.
-      a.library_get_art().then((m) => {
-        if (!m) return;
-        libArt = m;
-        paintLibArt();
-      }).catch(() => {});
+      collectArt(0);
     }).catch(() => {});
   }
   if (tick.library_detail_revision !== libDetailRevision) {
@@ -1359,12 +1448,7 @@ function applyLibraryTick(tick) {
   }
   if (tick.library_art_revision !== libArtRevision) {
     libArtRevision = tick.library_art_revision;
-    a.library_get_art().then((m) => {
-      if (!m) return;
-      libArt = m;
-      paintLibArt();
-      if (libDetail && libDetail.kind === "album") renderLibCover();
-    }).catch(() => {});
+    collectArt(libArtSeq);
   }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
@@ -1576,6 +1660,9 @@ function pollInterval() {
   if (visibleMissing()) return POLL_FILLING;
   // A library request is in flight, or a scan is filling the index.
   if (libPending > 0 || libScanning) return POLL_FILLING;
+  // Covers are collected on the poll, so a resolved one would otherwise
+  // wait up to a second before it appeared.
+  if (libArtWaiting) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }
