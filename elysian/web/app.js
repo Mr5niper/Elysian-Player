@@ -1180,18 +1180,25 @@ function placeInlineAlbumDetail() {
   // already gives any full-width item, just placed where this one needs
   // to land instead of always at the very end.
   const grid = $("libgrid");
+  const detail = $("libdetail");
+  // Detached before measuring, not after: left in place, its own old
+  // position keeps forcing the row break from whatever width it was last
+  // placed at, so a card that would now fit earlier in a wider window
+  // measures as if it were still in the narrower layout - the exact
+  // reason widening the window never let later cards fill in beside the
+  // expanded row instead of starting one of their own further down.
+  if (detail.parentElement === grid) {
+    $("libempty").parentElement.insertBefore(detail, $("libempty"));
+  }
   const cards = Array.from(grid.querySelectorAll(".libcard"));
   const card = cards.find((c) => c.dataset.album === (libDetail.key || "")
                                 && c.dataset.artist === (libDetail.key2 || ""));
-  const detail = $("libdetail");
   if (!card) { detail.classList.add("hidden"); return; }
 
   const top = card.offsetTop;
   const sameRow = cards.filter((c) => Math.abs(c.offsetTop - top) < 4);
   const anchor = sameRow[sameRow.length - 1];
-  if (detail.previousElementSibling !== anchor || detail.parentElement !== grid) {
-    anchor.insertAdjacentElement("afterend", detail);
-  }
+  anchor.insertAdjacentElement("afterend", detail);
 
   const actions = $("libcover-actions");
   if ($("lib-edit").parentElement !== actions) {
@@ -2048,6 +2055,7 @@ function drawWave() {
     x.fillRect(i * bw + bw * 0.22, (h - bh) / 2, Math.max(1, bw * 0.56), bh);
   }
 }
+let libResizeTimer = 0;
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
@@ -2056,6 +2064,17 @@ window.addEventListener("resize", () => {
   // with blank space below until the first scroll. Recompute here; the
   // range early-out makes this free when the height did not actually change.
   renderWindow(false);
+  // An expanded album is inserted right after whichever card was last in
+  // its row at the time it was opened, which forces a row break there:
+  // widening the window afterward means more cards would now fit ahead of
+  // that break, but nothing moves the break itself, so the cards after it
+  // stay stranded in a new row instead of filling in beside the earlier
+  // ones. Debounced, since resizing fires continuously while dragging an
+  // edge and this involves real DOM moves, not just a read.
+  if (libView === "albums" && libDetail && libDetail.kind === "album") {
+    clearTimeout(libResizeTimer);
+    libResizeTimer = setTimeout(placeInlineAlbumDetail, 120);
+  }
 });
 
 /* ---------- state sync ---------- */

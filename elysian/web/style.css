@@ -523,7 +523,7 @@ html, body {
    already scrolls, so a second nested scroll region here would fight it
    rather than help. */
 #libgrid > #libdetail #libtracks {
-  flex: none; overflow-y: visible; max-height: none;
+  flex: 1; overflow-y: visible; max-height: none;
 }
 #libcover-actions {
   display: none; flex-wrap: wrap; gap: 8px; margin-top: 10px;
