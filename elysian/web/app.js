@@ -1183,6 +1183,23 @@ function renderLibrary() {
   grid.classList.toggle("hidden", bare);
   if (bare) return;
 
+  /* Songs is the one view sized to the whole library rather than one
+     album or artist, so during a long scan it is also the one view whose
+     row count keeps growing for the entire scan. The existing signature
+     check below only skips a rebuild when the set is unchanged, which
+     during an active scan it never is: rebuilding several thousand rows
+     costs roughly their count in milliseconds, and paying that cost again
+     on every scan-triggered refresh is what made the interface feel like
+     it was getting slower the longer a scan ran, when the scan itself was
+     not. Once something is already on screen, Songs skips further
+     rebuilds until the scan finishes; switching away and back still shows
+     the current list immediately, since that is a fresh render, not a
+     refresh. */
+  if (libView === "songs" && libScanning && grid.childElementCount > 0) {
+    paintLibArt();
+    return;
+  }
+
   /* Rebuilding the grid throws away scroll position, every painted cover
      and the observer. During a scan the list refreshes every couple of
      seconds, so rebuild only when the set of entries actually changed. */
