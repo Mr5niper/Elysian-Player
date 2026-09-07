@@ -370,6 +370,28 @@ def try_acquire():
     return lock
 
 
+def _allow_foreground() -> None:
+    """Let the running copy take the foreground from us.
+
+    Windows only permits the process that currently owns the foreground to
+    give it away. This process does, having just been launched, and the one
+    being handed to does not: without this its window can only flash in the
+    taskbar instead of coming forward.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        ASFW_ANY = -1
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.AllowSetForegroundWindow.argtypes = [ctypes.c_ulong]
+        user32.AllowSetForegroundWindow.restype = ctypes.c_bool
+        user32.AllowSetForegroundWindow(ctypes.c_ulong(ASFW_ANY))
+    except Exception:
+        log.debug("could not release the foreground", exc_info=True)
+
+
 def hand_off(paths) -> bool:
     """Give these paths to the running instance. True if it accepted.
 
@@ -377,6 +399,7 @@ def hand_off(paths) -> bool:
     hand-off and the next, and giving up on the first miss would open a
     second player over a gap of a millisecond.
     """
+    _allow_foreground()
     for attempt in range(6):
         try:
             if _win_hand_off(paths) if IS_WINDOWS else _unix_hand_off(paths):

@@ -50,6 +50,69 @@ def _argv_paths() -> list[str]:
     return found
 
 
+def _raise_to_front(window) -> None:
+    """Bring the player forward, not just flash its taskbar button.
+
+    restore() and show() ask politely, and Windows refuses when the calling
+    process does not own the foreground: the button flashes and the window
+    stays where it was. Briefly attaching to the foreground window's input
+    queue makes this thread count as part of it, which is what lets
+    SetForegroundWindow succeed. The launching copy has already released
+    the foreground; see single_instance._allow_foreground.
+    """
+    try:
+        window.restore()
+        window.show()
+    except Exception:
+        log.debug("could not restore the window", exc_info=True)
+    if sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        u = ctypes.WinDLL("user32", use_last_error=True)
+        k = ctypes.WinDLL("kernel32", use_last_error=True)
+        u.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+        u.FindWindowW.restype = wintypes.HWND
+        u.GetForegroundWindow.restype = wintypes.HWND
+        u.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                               ctypes.POINTER(wintypes.DWORD)]
+        u.GetWindowThreadProcessId.restype = wintypes.DWORD
+        u.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD,
+                                        wintypes.BOOL]
+        u.AttachThreadInput.restype = wintypes.BOOL
+        u.SetForegroundWindow.argtypes = [wintypes.HWND]
+        u.SetForegroundWindow.restype = wintypes.BOOL
+        u.BringWindowToTop.argtypes = [wintypes.HWND]
+        u.BringWindowToTop.restype = wintypes.BOOL
+        u.ShowWindow.argtypes = [wintypes.HWND, ctypes.c_int]
+        u.ShowWindow.restype = wintypes.BOOL
+        u.IsIconic.argtypes = [wintypes.HWND]
+        u.IsIconic.restype = wintypes.BOOL
+        k.GetCurrentThreadId.restype = wintypes.DWORD
+
+        SW_RESTORE = 9
+        hwnd = u.FindWindowW(None, config.APP_NAME)
+        if not hwnd:
+            return
+        if u.IsIconic(hwnd):
+            u.ShowWindow(hwnd, SW_RESTORE)
+        fg = u.GetForegroundWindow()
+        target = u.GetWindowThreadProcessId(fg, None) if fg else 0
+        mine = k.GetCurrentThreadId()
+        attached = bool(target and target != mine
+                        and u.AttachThreadInput(target, mine, True))
+        try:
+            u.BringWindowToTop(hwnd)
+            u.SetForegroundWindow(hwnd)
+        finally:
+            if attached:
+                u.AttachThreadInput(target, mine, False)
+    except Exception:
+        log.debug("could not bring the window forward", exc_info=True)
+
+
 def run() -> int:
     log.info("Elysian Player %s starting", config.APP_VERSION)
     # If a copy is already running, hand it the file and exit rather than
@@ -117,11 +180,7 @@ def run() -> int:
                 api.open_paths(paths)
                 # Launching with no file should still surface the window
                 # rather than appear to do nothing.
-                try:
-                    win.restore()
-                    win.show()
-                except Exception:
-                    log.debug("could not raise the window", exc_info=True)
+                _raise_to_front(win)
             single_instance.serve(lock, incoming)
 
         api.boot()
