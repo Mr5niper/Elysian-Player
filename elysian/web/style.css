@@ -86,6 +86,10 @@ html, body {
 }
 .panelhead h1 { font-size: 15px; font-weight: 500; }
 .headicons { display: flex; gap: 14px; color: var(--muted); }
+/* Hidden in the library, where they would act on the playlist behind it.
+   No global .hidden rule exists, so this class needs its own, declared
+   after the base or it would lose on source order. */
+.headicons.hidden { display: none; }
 .headicons svg { width: 16px; height: 16px; }
 .headicons svg:hover { stroke: var(--text); }
 
@@ -353,6 +357,7 @@ html, body {
   margin-bottom: 8px; flex-shrink: 0; font-size: 13px;
 }
 #libcrumb.hidden { display: none; }
+#libcrumb .tbtn.hidden { display: none; }
 #libcrumb .spacer { flex: 1; }
 #libcrumb-title {
   font-weight: 500; overflow: hidden;
@@ -467,6 +472,9 @@ html, body {
   padding: 0 10px; border-radius: 7px; font-size: 12.5px;
 }
 .librow:hover { background: rgba(255,255,255,0.05); }
+/* The songs list can hold thousands of rows. Offscreen ones are kept out
+   of the layout budget the same way the album cards are. */
+.librow.song { content-visibility: auto; contain-intrinsic-size: auto 30px; }
 .librow.selected { background: rgba(192,57,47,0.18); }
 .librow .n, .librow .d { color: var(--muted); font-size: 11px; }
 .librow .n { text-align: center; }

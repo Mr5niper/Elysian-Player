@@ -50,6 +50,10 @@ function setView(name) {
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
   $("view-library").classList.toggle("hidden", name !== "library");
+  // Add files and Add folder put tracks in the playlist, so they have
+  // nothing to do with the library, which has its own Folders panel.
+  document.querySelector(".headicons")
+          .classList.toggle("hidden", name === "library");
   $("panel-title").textContent =
     name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>
@@ -935,7 +939,7 @@ function libraryOpened() {
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
       libPending++;
-      a.library_request_browser(libView);
+      a.library_request_browser(libView, $("libfilter").value.trim());
       schedule();
     };
     if (typeof a.library_get_state === "function") {
@@ -951,15 +955,11 @@ function libraryOpened() {
   renderLibrary();
 }
 
+/* The list as it should be shown. The backend has already applied the
+   filter, including against track titles, so filtering here as well would
+   throw away the albums that matched on a song name. */
 function libFiltered() {
-  const needle = $("libfilter").value.trim().toLowerCase();
-  if (!needle) return libItems;
-  return libItems.filter((it) => {
-    const hay = libView === "albums"
-      ? `${it.album} ${it.album_artist}`
-      : (libView === "artists" ? it.artist : it.genre);
-    return (hay || "").toLowerCase().includes(needle);
-  });
+  return libItems;
 }
 
 const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
@@ -987,7 +987,15 @@ function renderLibrary() {
     return;
   }
 
-  crumb.classList.toggle("hidden", !showingDetail);
+  const songsView = libView === "songs" && !showingDetail;
+  crumb.classList.toggle("hidden", !showingDetail && !songsView);
+  $("lib-back").classList.toggle("hidden", songsView);
+  if (songsView) {
+    const shown = libItems.length;
+    const capped = libItems.length && libItems[0].truncated;
+    $("libcrumb-title").textContent =
+      capped ? `First ${shown} songs, filter to narrow` : `${shown} songs`;
+  }
   if (showingDetail) {
     $("libcrumb-title").textContent = libDetail.title || "";
     grid.classList.add("hidden");
@@ -1031,6 +1039,43 @@ function renderLibrary() {
       </div>`).join("");
     paintLibArt();
     watchLibArt();
+  } else if (libView === "songs") {
+    // Individual tracks. Selecting works as it does in the playlist, and
+    // the buttons above act on the selection, so there is nothing to
+    // drill into: a song is already the thing you wanted.
+    grid.classList.add("aslist");
+    // Broken into album sections, as the artist and genre views are. The
+    // backend returns them in album order, so this only has to notice
+    // where one ends and the next begins. Track number replaces the blank
+    // first column, and the album is dropped from the row since the
+    // heading above already carries it.
+    const out = [];
+    let section = null;
+    for (const t of rows) {
+      const who = t.album_artist || t.artist || "";
+      const album = (t.album || "").trim();
+      // Everything with no album tag shares one heading at the end rather
+      // than one per artist, which repeated the same words down the page.
+      // Those rows keep their artist in the column, so nothing is lost.
+      const key = album ? `${who}\u0000${album}` : "\u0000";
+      if (key !== section) {
+        section = key;
+        const bits = [];
+        if (album && who) bits.push(`<span class="by">${esc(who)}</span>`);
+        if (album && t.year) bits.push(`<span class="yr">${t.year}</span>`);
+        out.push(`<div class="libsection">${esc(album || "Not part of an album")}`
+                 + `${bits.join("")}</div>`);
+      }
+      out.push(`<div class="librow song" data-path="${esc(t.path)}">
+        <div class="n">${t.track_number || ""}</div>
+        <div class="t">${esc(t.title)}</div>
+        <div class="a">${esc(t.artist)}</div>
+        <div class="al"></div>
+        <div class="d">${fmt(t.duration || 0)}</div>
+      </div>`);
+    }
+    grid.innerHTML = out.join("");
+    paintLibSelection();
   } else {
     // Artists and genres are a list rather than a grid: there is no
     // artwork to show, and a name reads better on one line than boxed.
@@ -1277,17 +1322,24 @@ function renderLibTracks(items) {
 }
 
 function paintLibSelection() {
-  $("libtracks").querySelectorAll(".librow").forEach((row) =>
-    row.classList.toggle("selected", libSelected.has(row.dataset.path)));
+  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+    .forEach((row) => row.classList.toggle(
+      "selected", libSelected.has(row.dataset.path)));
 }
 
 function libChosenPaths() {
+  if (libView === "songs" && !libDetail) {
+    const all = libRowPaths(".song");
+    return libSelected.size ? all.filter((p) => libSelected.has(p)) : all;
+  }
   if (!libDetail) return [];
   if (libSelected.size) {
     return libDetail.items.map((t) => t.path).filter((p) => libSelected.has(p));
   }
   return libDetail.items.map((t) => t.path);
 }
+
+const LIB_VIEWS = ["albums", "artists", "genres", "songs"];
 
 function setLibView(name) {
   if (libView === name) return;
@@ -1301,7 +1353,7 @@ function setLibView(name) {
   const a = api();
   if (a) {
     libPending++;
-    a.library_request_browser(name);
+    a.library_request_browser(name, $("libfilter").value.trim());
     schedule();
   }
 }
@@ -1311,7 +1363,22 @@ function setLibView(name) {
 document.querySelectorAll(".libtab").forEach((b) =>
   b.addEventListener("click", () => setLibView(b.dataset.lib)));
 
-$("libfilter").addEventListener("input", () => renderLibrary());
+let libFilterTimer = 0;
+$("libfilter").addEventListener("input", () => {
+  // Asked of the backend, not applied to what is already loaded: a song
+  // title is not in the album list, so matching locally could never find
+  // one. Debounced, since this is a query rather than an array filter.
+  clearTimeout(libFilterTimer);
+  libFilterTimer = setTimeout(() => {
+    const a = api();
+    if (!a) return;
+    libDetail = null;
+    libAnchor = null;
+    libPending++;
+    a.library_request_browser(libView, $("libfilter").value.trim());
+    schedule();
+  }, 180);
+});
 
 $("libfolders").addEventListener("click", (e) => {
   if (libConfirmRemove && !e.target.closest("[data-remove]")) {
@@ -1320,7 +1387,33 @@ $("libfolders").addEventListener("click", (e) => {
   }
 });
 
+$("libgrid").addEventListener("dblclick", (e) => {
+  const row = e.target.closest(".librow.song");
+  if (!row) return;
+  const a = api();
+  if (a) a.library_play([row.dataset.path]);
+});
+
 $("libgrid").addEventListener("click", (e) => {
+  const song = e.target.closest(".librow.song");
+  if (song) {
+    const path = song.dataset.path;
+    if (e.shiftKey) {
+      const run = libAnchor === null ? null : libRange(libAnchor, path, ".song");
+      if (run) {
+        if (!e.ctrlKey) libSelected = new Set();
+        run.forEach((x) => libSelected.add(x));
+      } else { libSelected = new Set([path]); libAnchor = path; }
+    } else if (e.ctrlKey) {
+      libSelected.has(path) ? libSelected.delete(path) : libSelected.add(path);
+      libAnchor = path;
+    } else {
+      libSelected = new Set([path]);
+      libAnchor = path;
+    }
+    paintLibSelection();
+    return;
+  }
   const card = e.target.closest(".libcard, .librow");
   if (!card) return;
   const item = libFiltered()[Number(card.dataset.i)];
@@ -1345,13 +1438,13 @@ $("libgrid").addEventListener("click", (e) => {
    The run is measured over the rows as displayed, which in an artist or
    genre view are split by album headings: a range spanning two albums
    selects what is visually between them and nothing else. */
-function libRowPaths() {
-  return Array.from($("libtracks").querySelectorAll(".librow"))
-              .map((r) => r.dataset.path);
+function libRowPaths(sel) {
+  const scope = sel ? `#libgrid .librow${sel}` : "#libtracks .librow";
+  return Array.from(document.querySelectorAll(scope)).map((r) => r.dataset.path);
 }
 
-function libRange(fromPath, toPath) {
-  const paths = libRowPaths();
+function libRange(fromPath, toPath, sel) {
+  const paths = libRowPaths(sel);
   let a = paths.indexOf(fromPath);
   let b = paths.indexOf(toPath);
   if (a < 0 || b < 0) return null;
