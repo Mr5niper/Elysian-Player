@@ -112,8 +112,17 @@ class Api:
         # not by a pool taking whatever was submitted first. What matters is
         # the cards on screen now: a queue that cannot be reordered means
         # they wait behind every album already scrolled past.
-        self._art_queue: queue.Queue = queue.Queue()
+        # Two queues, as the tag scanner uses. Everything is decoded
+        # eventually, but whatever is on screen jumps the whole backlog:
+        # one queue that can only be appended to would put the covers being
+        # looked at behind every album already swept past.
+        self._art_urgent: queue.Queue = queue.Queue()
+        self._art_bulk: queue.Queue = queue.Queue()
         self._art_workers = []
+        # Keys sitting in the background queue and not yet started. A key
+        # here can be promoted to the urgent queue when it scrolls into
+        # view; the background copy is skipped when a worker reaches it.
+        self._art_bulk_pending = set()
         # The playlist scanner consults the index before opening a file. A
         # track the library already knows costs a local lookup instead of a
         # tag read over a share, which is the expensive thing the whole
@@ -1058,6 +1067,13 @@ class Api:
                          daemon=True).start()
 
     def _do_library_browser_ready(self, view, items) -> None:
+        if view == "albums":
+            # Fill in the whole library in the background. Anything already
+            # cached or queued is skipped, so a refresh during a scan does
+            # not re-queue what is already done.
+            self._do_library_fill_art(
+                [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
+                 for i in (items or [])])
         self._library_browser_revision += 1
         self._library_browser = {"view": view, "items": items,
                                  "revision": self._library_browser_revision}
@@ -1107,9 +1123,15 @@ class Api:
     def _art_worker(self) -> None:
         while not self._closing:
             try:
-                key, album, artist = self._art_queue.get(timeout=0.25)
+                key, album, artist = self._art_urgent.get_nowait()
             except queue.Empty:
-                continue
+                try:
+                    key, album, artist = self._art_bulk.get(timeout=0.25)
+                except queue.Empty:
+                    continue
+                if key not in self._art_bulk_pending:
+                    continue        # promoted to urgent, or already done
+                self._art_bulk_pending.discard(key)
             url = None
             try:
                 for path in self._library.album_paths(album, artist):
@@ -1124,24 +1146,44 @@ class Api:
     def _do_library_visible_art(self, keys) -> None:
         """Resolve exactly these albums next, in this order.
 
-        Called whenever the visible cards change. The queue is emptied
-        first: work for cards that have scrolled away is not worth doing
-        ahead of what is on screen, and leaving it there is what made
-        covers appear long after they were needed.
+        Only the urgent queue is emptied. Work for cards that have scrolled
+        away should not be done ahead of what is on screen, but it is still
+        worth doing, so it stays in the background queue rather than being
+        thrown away.
         """
         while True:
             try:
-                dropped = self._art_queue.get_nowait()
+                dropped = self._art_urgent.get_nowait()
             except queue.Empty:
                 break
             self._library_art_pending.discard(dropped[0])
+        self._start_art_workers()
+        for key in keys or []:
+            if key in self._library_art:
+                continue
+            promoted = key in self._art_bulk_pending
+            if promoted:
+                # Waiting in the background queue behind the rest of the
+                # library. Move it to the front rather than skipping it as
+                # already pending, which is what left a scrolled to row
+                # waiting for everything queued ahead of it.
+                self._art_bulk_pending.discard(key)
+            elif key in self._library_art_pending:
+                continue            # already urgent, or being decoded now
+            artist, _, album = str(key).partition("\u0000")
+            self._library_art_pending.add(key)
+            self._art_urgent.put((key, album, artist))
+
+    def _do_library_fill_art(self, keys) -> None:
+        """Queue the rest of the library, behind anything on screen."""
         self._start_art_workers()
         for key in keys or []:
             if key in self._library_art or key in self._library_art_pending:
                 continue
             artist, _, album = str(key).partition("\u0000")
             self._library_art_pending.add(key)
-            self._art_queue.put((key, album, artist))
+            self._art_bulk_pending.add(key)
+            self._art_bulk.put((key, album, artist))
 
     def _do_library_art(self, album, album_artist) -> None:
         key = f"{album_artist}\u0000{album}"
@@ -1149,7 +1191,7 @@ class Api:
             return
         self._library_art_pending.add(key)
         self._start_art_workers()
-        self._art_queue.put((key, album, album_artist))
+        self._art_urgent.put((key, album, album_artist))
 
     def _forget_art_misses(self) -> None:
         """Drop remembered "this album has no cover" answers.
@@ -1170,11 +1212,12 @@ class Api:
 
     def _do_library_art_ready(self, key, url) -> None:
         self._library_art_pending.discard(key)
+        self._art_bulk_pending.discard(key)
         # Cached even when nothing was found, so a coverless album is not
         # searched again every time it scrolls past.
         self._library_art_seq += 1
         self._library_art[key] = [self._library_art_seq, url or ""]
-        while len(self._library_art) > 900:
+        while len(self._library_art) > 4000:
             self._library_art.pop(next(iter(self._library_art)), None)
         self._library_art_revision += 1
 
