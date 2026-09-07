@@ -1049,13 +1049,17 @@ function renderLibrary() {
     let section = null;
     for (const t of rows) {
       const who = t.album_artist || t.artist || "";
-      const key = `${who}\u0000${t.album || ""}`;
+      const album = (t.album || "").trim();
+      // Everything with no album tag shares one heading at the end rather
+      // than one per artist, which repeated the same words down the page.
+      // Those rows keep their artist in the column, so nothing is lost.
+      const key = album ? `${who}\u0000${album}` : "\u0000";
       if (key !== section) {
         section = key;
         const bits = [];
-        if (who) bits.push(`<span class="by">${esc(who)}</span>`);
-        if (t.year) bits.push(`<span class="yr">${t.year}</span>`);
-        out.push(`<div class="libsection">${esc(t.album || "Not part of an album")}`
+        if (album && who) bits.push(`<span class="by">${esc(who)}</span>`);
+        if (album && t.year) bits.push(`<span class="yr">${t.year}</span>`);
+        out.push(`<div class="libsection">${esc(album || "Not part of an album")}`
                  + `${bits.join("")}</div>`);
       }
       out.push(`<div class="librow song" data-path="${esc(t.path)}">

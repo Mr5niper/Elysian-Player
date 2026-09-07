@@ -557,8 +557,8 @@ class LibraryService:
                    duration, track_number, disc_number, year
             FROM tracks
             {where}
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
-                     CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+            ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+                     COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}
             LIMIT ?
         """, tuple(args) + (int(limit) + 1,))
@@ -567,9 +567,12 @@ class LibraryService:
             rows = rows[:limit]
         # Re-sorted here so leading punctuation is ignored, which SQL
         # collation cannot do; within an album the SQL order is kept.
+        # Tracks with no album tag collect at the very end rather than
+        # after each artist's records, where they were scattered down the
+        # length of the list. Everything else keeps album order.
         rows.sort(key=lambda r: (
-            sort_key(r["album_artist"] or r["artist"]),
             1 if not (r["album"] or "").strip() else 0,
+            sort_key(r["album_artist"] or r["artist"]),
             r["year"] or 0,
             sort_key(r["album"]),
             max(r["disc_number"] or 1, 1),
