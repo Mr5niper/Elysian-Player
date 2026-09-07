@@ -903,6 +903,10 @@ document.addEventListener("keydown", (e) => {
 let libView = "albums";          // albums | artists | genres
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
+// Set just before requesting an album's detail for a card double-click,
+// which has no track list of its own to play yet. Consumed by whichever
+// detail result arrives next; see the library_detail_revision handler.
+let libPlayAlbumOnDetail = null;
 let libSelected = new Set();     // paths selected in a detail list
 let libAnchor = null;            // where a shift range measures from
 let libOpened = false;
@@ -1339,6 +1343,69 @@ function libChosenPaths() {
   return libDetail.items.map((t) => t.path);
 }
 
+/* What a double-click in the library plays: the current view's own order,
+   not just the one track clicked. An album's track list, an artist's or
+   genre's detail list, or the songs list exactly as displayed - so
+   continuing past the clicked track carries on through the rest of what
+   was actually on screen, the way opening an album and hitting play
+   naturally continues into the next track. */
+function libraryContextPayload(startPath) {
+  startPath = String(startPath || "");
+  if (!startPath) return null;
+
+  if (libView === "songs" && !libDetail) {
+    const paths = libItems.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: "songs", title: "Songs" };
+  }
+  if (libDetail && Array.isArray(libDetail.items) && libDetail.items.length) {
+    const paths = libDetail.items.map((t) => t.path).filter(Boolean);
+    // The backend labels a search result "Search: eclipse" for its own
+    // detail title; libDetail.key is the bare search text, which reads
+    // better here than repeating that label back.
+    const title = libDetail.kind === "search"
+      ? (libDetail.key || libDetail.title || "") : (libDetail.title || "");
+    return { paths, startPath, kind: libDetail.kind || "library", title };
+  }
+  return null;
+}
+
+function playLibraryContextFrom(startPath) {
+  const a = api();
+  if (!a) return;
+  const payload = libraryContextPayload(startPath);
+  // No context to build a queue from - a row reached some way this does
+  // not anticipate - still has to play something, so it becomes a queue
+  // of just that one track rather than doing nothing.
+  const p = payload && payload.paths && payload.paths.length
+    ? payload : { paths: [startPath], startPath, kind: "", title: "" };
+  a.library_play_context(p.paths, p.startPath, p.kind, p.title);
+  setView("playlists");
+}
+
+function orderedSelectedLibraryPaths() {
+  const chosen = new Set(libChosenPaths());
+  if (!chosen.size) return [];
+  if (libView === "songs" && !libDetail) {
+    return libItems.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  if (libDetail && Array.isArray(libDetail.items)) {
+    return libDetail.items.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  return Array.from(chosen);
+}
+
+/* An album card carries only the summary shown on it - no track paths - so
+   double-clicking it has to fetch the album before anything can play. The
+   fetch is the same one a single click already makes; this only adds a
+   flag saying what to do once it lands, rather than opening the album pane
+   the user did not ask to see. */
+function playAlbumCardFromStart(item) {
+  const a = api();
+  if (!a) return;
+  libPlayAlbumOnDetail = { album: item.album || "", artist: item.album_artist || "" };
+  a.library_request_detail("album", item.album, item.album_artist);
+}
+
 const LIB_VIEWS = ["albums", "artists", "genres", "songs"];
 
 function setLibView(name) {
@@ -1389,9 +1456,11 @@ $("libfolders").addEventListener("click", (e) => {
 
 $("libgrid").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow.song");
-  if (!row) return;
-  const a = api();
-  if (a) a.library_play([row.dataset.path]);
+  if (row) { playLibraryContextFrom(row.dataset.path); return; }
+  const card = e.target.closest(".libcard");
+  if (!card) return;
+  const item = libFiltered()[Number(card.dataset.i)];
+  if (item) playAlbumCardFromStart(item);
 });
 
 $("libgrid").addEventListener("click", (e) => {
@@ -1479,8 +1548,7 @@ $("libtracks").addEventListener("click", (e) => {
 $("libtracks").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow");
   if (!row) return;
-  const a = api();
-  if (a) a.library_play([row.dataset.path]);
+  playLibraryContextFrom(row.dataset.path);
 });
 
 $("lib-back").addEventListener("click", () => {
@@ -1495,7 +1563,17 @@ $("lib-queue").addEventListener("click", () => {
 });
 $("lib-play").addEventListener("click", () => {
   const a = api();
-  if (a) a.library_play(libChosenPaths());
+  if (!a) return;
+  const paths = orderedSelectedLibraryPaths();
+  if (!paths.length) return;
+  const kind = libDetail ? (libDetail.kind || "library")
+                        : (libView === "songs" ? "songs" : "library");
+  const title = libDetail
+    ? (libDetail.kind === "search" ? (libDetail.key || libDetail.title || "")
+                                   : (libDetail.title || ""))
+    : (libView === "songs" ? "Songs" : "");
+  a.library_play_context(paths, paths[0], kind, title);
+  setView("playlists");
 });
 $("lib-folders").addEventListener("click", () => {
   libShowFolders = !libShowFolders;
@@ -1562,6 +1640,21 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_detail().then((d) => {
       if (!d || !d.kind) return;
+      // Consumed by whichever detail lands next, matching or not: if
+      // something else changed the selection in between, a stale double
+      // click waiting for its album is less useful than one that already
+      // moved on.
+      const wantPlay = libPlayAlbumOnDetail;
+      libPlayAlbumOnDetail = null;
+      if (wantPlay && d.kind === "album" && d.key === wantPlay.album
+          && (d.key2 || "") === wantPlay.artist) {
+        const paths = (d.items || []).map((t) => t.path).filter(Boolean);
+        if (paths.length) {
+          a.library_play_context(paths, paths[0], "album", d.title || "");
+          setView("playlists");
+        }
+        return;
+      }
       libDetail = d;
       libSelected.clear();
       libAnchor = null;

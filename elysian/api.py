@@ -130,6 +130,14 @@ class Api:
         # prefetch scheme exists to ration.
         self._scanner.resolver = self._library.lookup_one
 
+        # Set only by _do_library_play_context, and cleared back to
+        # "playlist" by anything that is an explicit playlist edit (add,
+        # remove, reorder, clear, load an m3u). Informational: transport
+        # itself never branches on it, since the queue it describes IS the
+        # playlist by the time this is set. It exists so the status line
+        # and, later, the UI can say what is actually playing.
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
+
         self._snapshot: dict = {
             "current_id": -1, "playing": False, "paused": False,
             "position": 0.0, "duration": 0.0, "volume": self._engine.volume,
@@ -139,6 +147,8 @@ class Api:
             "library_revision": 0, "library_browser_revision": 0,
             "library_detail_revision": 0, "library_art_revision": 0,
             "library_scanning": False,
+            "play_context_source": "playlist", "play_context_kind": "",
+            "play_context_title": "",
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -397,6 +407,9 @@ class Api:
                 "library_detail_revision": self._library_detail_revision,
                 "library_art_revision": self._library_art_revision,
                 "library_scanning": self._library_scanning,
+                "play_context_source": self._play_context["source"],
+                "play_context_kind": self._play_context["kind"],
+                "play_context_title": self._play_context["title"],
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision
@@ -545,6 +558,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
             # Dropping several folders at once merges their counts. That is
             # rare, and "Added N tracks" for the lot is still the truth.
@@ -613,6 +627,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
             self._set_status(f"Added {len(added)} track{'s' if len(added) != 1 else ''}")
         else:
@@ -673,6 +688,7 @@ class Api:
         if added and self._shuffle:
             self._extend_shuffle_bag(added_ids)
         if added:
+            self._play_context = {"source": "playlist", "kind": "", "title": ""}
             self._bump()
         self._set_status(f"Loaded {len(added)} track{'s' if len(added) != 1 else ''}")
 
@@ -705,15 +721,18 @@ class Api:
     def clear_playlist(self) -> None:
         self._post("clear_playlist")
 
-    def _do_clear_playlist(self) -> None:
-        """Remove every track and reset playlist-related state.
+    def _reset_playlist_state(self) -> None:
+        """Empty the playlist and everything that describes it.
 
-        Worker-owned, like every other mutation. The frontend clears its
-        local selection immediately, but the source of truth is here.
+        Shared by _do_clear_playlist and _replace_playlist_with_paths so the
+        two cannot drift: both need every piece of per-track state - the
+        shuffle bag, play history, waveform cache, resume point and art
+        cache - left matching an empty playlist before anything new goes
+        in. Invalidating running folder walks and queued tag reads here too
+        stops them spending share round trips on tracks that are about to
+        stop existing.
         """
         self._engine.stop()
-        # Invalidate running folder walks and discard queued tag reads: both
-        # would spend share round trips on tracks that no longer exist.
         self._ingest_gen += 1
         self._folder_added = 0
         self._scanner.drop_all()
@@ -730,8 +749,36 @@ class Api:
         self._resume_id = -1
         self._resume_at = 0.0
         self._art_cache.clear()
+
+    def _do_clear_playlist(self) -> None:
+        """Remove every track and reset playlist-related state.
+
+        Worker-owned, like every other mutation. The frontend clears its
+        local selection immediately, but the source of truth is here.
+        """
+        self._reset_playlist_state()
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         self._bump()
         self._set_status("Playlist cleared")
+
+    def _replace_playlist_with_paths(self, paths) -> int:
+        """Replace the active playlist with exactly these paths, in order.
+
+        Used for library-context playback: the paths are already known
+        good, since they came from the library index rather than a folder
+        walk, so there is nothing here to validate. Returns the number of
+        tracks loaded.
+        """
+        clean = [str(p) for p in (paths or []) if p]
+        if not clean:
+            return 0
+        self._reset_playlist_state()
+        with self._lock:
+            added = self._playlist.add_paths(clean)
+        if self._shuffle:
+            self._rebuild_bag()
+        self._bump()
+        return len(added)
 
     def _do_remove(self, ids) -> None:
         ids = {int(i) for i in ids or []}
@@ -740,6 +787,7 @@ class Api:
         if self._current_id in ids:
             self._do_stop()
         self._playlist.remove_ids(ids)
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         # Only worth reshuffling if shuffle is on. Correctness never depended
         # on this rebuild anyway: _next_id skips ids that no longer exist.
         if self._shuffle:
@@ -749,6 +797,7 @@ class Api:
 
     def _do_reorder(self, dragged_id: int, target_id: int) -> None:
         self._playlist.move(int(dragged_id), int(target_id))
+        self._play_context = {"source": "playlist", "kind": "", "title": ""}
         self._bump()
 
     # ---- transport -----------------------------------------------------
@@ -1235,15 +1284,36 @@ class Api:
         if added:
             self._set_status(f"Added {added} track(s) from the library")
 
-    def _do_library_play(self, paths) -> None:
-        if not paths:
+    def _do_library_play_context(self, paths, start_path, kind="", title="") -> None:
+        """Replace the active playlist with a library-derived queue and play.
+
+        paths is the library view's own current order - an album's track
+        list, an artist's or genre's detail list, or the songs list exactly
+        as displayed - so double-clicking one track in the middle of it
+        continues through the rest of what was on screen rather than
+        stopping or falling back to whatever the playlist held before.
+        start_path is the track actually activated; kind and title describe
+        the source for the status line only, transport never branches on
+        them.
+        """
+        ordered = [str(p) for p in (paths or []) if p]
+        start_path = str(start_path or "")
+        if not ordered or not start_path:
             return
-        self._do_add_audio_paths(paths)
+        loaded = self._replace_playlist_with_paths(ordered)
+        if not loaded:
+            self._set_status("Nothing to play")
+            return
+        self._play_context = {"source": "library", "kind": str(kind or ""),
+                              "title": str(title or "")}
         with self._lock:
-            index = self._playlist.index_of_path(paths[0])
-            target = self._playlist.id_at(index) if index >= 0 else -1
+            index = self._playlist.index_of_path(start_path)
+            target = (self._playlist.id_at(index) if index >= 0
+                     else self._playlist.id_at(0))
         if target >= 0:
             self._do_play_id(target)
+            if title:
+                self._set_status(f"Playing: {title}")
 
     # ---- library: bridge side -------------------------------------------
 
@@ -1318,8 +1388,12 @@ class Api:
     def library_enqueue(self, paths) -> None:
         self._post("library_enqueue", [str(p) for p in (paths or []) if p])
 
-    def library_play(self, paths) -> None:
-        self._post("library_play", [str(p) for p in (paths or []) if p])
+    def library_play_context(self, paths, start_path, kind="", title="") -> None:
+        self._post(
+            "library_play_context",
+            [str(p) for p in (paths or []) if p],
+            str(start_path or ""), str(kind or ""), str(title or ""),
+        )
 
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
@@ -1462,7 +1536,10 @@ class Api:
     #: Queued commands whose effects the user expects to survive exit,
     #: applied by _flush_persisted before the session is saved.
     #: restore_session is here so a close moments after launch can never save
-    #: an empty playlist over the previous session. save_m3u is an explicit
+    #: an empty playlist over the previous session. library_play_context
+    #: replaces the whole playlist exactly like clear_playlist, remove and
+    #: reorder, and costs no file I/O to apply here, since add_paths only
+    #: compares strings. save_m3u is an explicit
     #: user action; silently discarding a save the user believes happened is
     #: worse than a slow exit. load_m3u, ingest and open_paths are deliberately
     #: absent: applying them here would stat or read files, possibly over a
@@ -1476,7 +1553,7 @@ class Api:
         "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
-        "clear_playlist",
+        "clear_playlist", "library_play_context",
     })
 
     def _shutdown(self) -> None:
@@ -1542,7 +1619,7 @@ class Api:
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",
         "library_get_browser", "library_get_detail",
-        "library_enqueue", "library_play",
+        "library_enqueue", "library_play_context",
         "library_request_art", "library_visible_art", "library_get_art",
     })
 
