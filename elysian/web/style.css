@@ -99,15 +99,31 @@ html, body {
 
 /* ---- now playing ---- */
 #view-now { justify-content: center; }
-#nowplaying { display: flex; gap: 24px; align-items: center; }
-#artwrap { flex-shrink: 0; text-align: center; width: 240px; }
+/* The artwork grows with the window rather than sitting at one size, so
+   maximising the player actually shows the cover larger. What limits it is
+   the window height less the chrome above and below plus the two lines of
+   text underneath, which measures at 248px; 260 leaves a little air. The
+   floor keeps it visible on a short window, the ceiling stops it eating a
+   very tall one. */
+#nowplaying {
+  /* Also bounded by width, or a tall narrow window grows the artwork
+     until the waveform beside it has almost nothing left. */
+  --np-art: clamp(150px, min(calc(100vh - 260px), 40vw), 480px);
+  display: flex; gap: 24px; align-items: center;
+}
+#artwrap { flex-shrink: 0; text-align: center; width: var(--np-art); }
 #art {
-  width: 240px; height: 240px;
+  width: var(--np-art); height: var(--np-art);
   border-radius: 12px;
   background: var(--panel-2) center/cover no-repeat;
   display: flex; align-items: center; justify-content: center;
 }
-#art svg { width: 64px; height: 64px; stroke: var(--accent-dim); }
+/* The placeholder scales with it rather than sitting small in a large box. */
+#art svg {
+  width: clamp(48px, calc(var(--np-art) * 0.27), 120px);
+  height: clamp(48px, calc(var(--np-art) * 0.27), 120px);
+  stroke: var(--accent-dim);
+}
 #np-title {
   font-size: 14px; font-weight: 600; margin-top: 11px;
   letter-spacing: 0.6px; white-space: nowrap;
