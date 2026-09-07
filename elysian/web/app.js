@@ -1154,13 +1154,71 @@ function libFiltered() {
 
 const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
 
+function restoreInlineAlbumUI() {
+  // Idempotent: safe to call whether or not anything actually needs
+  // moving back. Called whenever the current render is not an inline
+  // album, so switching to an artist, a genre, Songs, or Folders while
+  // one was expanded never leaves it - or its buttons - stranded inside
+  // the grid.
+  const detail = $("libdetail");
+  if (detail.parentElement === $("libgrid")) {
+    $("libempty").parentElement.insertBefore(detail, $("libempty"));
+  }
+  const spacer = $("libcrumb").querySelector(".spacer");
+  if (spacer && $("lib-edit").previousElementSibling !== spacer) {
+    spacer.insertAdjacentElement("afterend", $("lib-edit"));
+    $("lib-edit").insertAdjacentElement("afterend", $("lib-queue"));
+    $("lib-queue").insertAdjacentElement("afterend", $("lib-play"));
+  }
+}
+
+function placeInlineAlbumDetail() {
+  // Finds the card the expanded album belongs to, then inserts the detail
+  // panel right after the last card sharing that card's row, so a grid
+  // item spanning every column starts a fresh row of its own and pushes
+  // whatever comes after down - the same behaviour a plain CSS grid
+  // already gives any full-width item, just placed where this one needs
+  // to land instead of always at the very end.
+  const grid = $("libgrid");
+  const cards = Array.from(grid.querySelectorAll(".libcard"));
+  const card = cards.find((c) => c.dataset.album === (libDetail.key || "")
+                                && c.dataset.artist === (libDetail.key2 || ""));
+  const detail = $("libdetail");
+  if (!card) { detail.classList.add("hidden"); return; }
+
+  const top = card.offsetTop;
+  const sameRow = cards.filter((c) => Math.abs(c.offsetTop - top) < 4);
+  const anchor = sameRow[sameRow.length - 1];
+  if (detail.previousElementSibling !== anchor || detail.parentElement !== grid) {
+    anchor.insertAdjacentElement("afterend", detail);
+  }
+
+  const actions = $("libcover-actions");
+  if ($("lib-edit").parentElement !== actions) {
+    actions.appendChild($("lib-edit"));
+    actions.appendChild($("lib-queue"));
+    actions.appendChild($("lib-play"));
+  }
+
+  detail.classList.remove("hidden");
+  renderLibCover();
+  renderLibTracks(libDetail.items);
+}
+
 function renderLibrary() {
   const grid = $("libgrid");
   const tracks = $("libtracks");
   const crumb = $("libcrumb");
   const empty = $("libempty");
   const folders = $("libfolders");
-  const showingDetail = libDetail !== null;
+  // An album opened from the grid expands in place next to the other
+  // cards rather than replacing the browse area; an artist or genre still
+  // does, since there is no single row of cards for those to slot beside.
+  const inlineAlbum = libView === "albums" && libDetail !== null
+                     && libDetail.kind === "album";
+  const showingDetail = libDetail !== null && !inlineAlbum;
+
+  if (!inlineAlbum) restoreInlineAlbumUI();
 
   // Managing folders replaces the browse area rather than floating over
   // it, so there is never a question of which thing a click belongs to.
@@ -1196,7 +1254,7 @@ function renderLibrary() {
     return;
   }
 
-  $("libdetail").classList.add("hidden");
+  if (!inlineAlbum) $("libdetail").classList.add("hidden");
   const rows = libFiltered();
   const bare = rows.length === 0;
   empty.classList.toggle("hidden", !bare);
@@ -1241,13 +1299,32 @@ function renderLibrary() {
   const sig = libView + "\u0001" + rows.map((it) =>
     libView === "albums" ? `${it.album_artist}\u0000${it.album}`
                          : (it.artist || it.genre || "")).join("\u0002");
-  if (sig === libGridSig && grid.childElementCount === rows.length) {
+  // Counted separately from grid.childElementCount: an expanded album
+  // leaves #libdetail sitting inside this same grid, which would
+  // otherwise always be one more than rows.length and defeat this check
+  // every single time an album is open, even when nothing about the
+  // album list itself changed.
+  const cardCount = libView === "albums"
+    ? grid.querySelectorAll(".libcard").length : grid.childElementCount;
+  if (sig === libGridSig && cardCount === rows.length) {
     paintLibArt();
+    if (inlineAlbum) placeInlineAlbumDetail();
     return;
   }
   libGridSig = sig;
 
   if (libView === "albums") {
+    // Detached unconditionally, not just when leaving inline mode: moving
+    // straight from one expanded album to another never passes through
+    // "not inline", so #libdetail can still be a child of this grid right
+    // here. innerHTML below destroys every current child of the grid, and
+    // that used to include #libdetail itself whenever this ran - not
+    // moved, deleted, along with everything inside it and the buttons
+    // that had been moved into it. Once gone, artist and genre detail
+    // broke too, since they share the same element.
+    if ($("libdetail").parentElement === grid) {
+      $("libempty").parentElement.insertBefore($("libdetail"), $("libempty"));
+    }
     // Toggle a class rather than an inline display, which would win over
     // the .hidden rule and leave the grid showing behind the track list.
     grid.classList.remove("aslist");
@@ -1261,6 +1338,7 @@ function renderLibrary() {
       </div>`).join("");
     paintLibArt();
     watchLibArt();
+    if (inlineAlbum) placeInlineAlbumDetail();
   } else if (libView === "songs") {
     // Individual tracks. Selecting works as it does in the playlist, and
     // the buttons above act on the selection, so there is nothing to
@@ -1733,6 +1811,17 @@ $("libgrid").addEventListener("click", (e) => {
   if (!item) return;
   const a = api();
   if (!a) return;
+  if (libView === "albums" && libDetail && libDetail.kind === "album"
+      && libDetail.key === (item.album || "")
+      && libDetail.key2 === (item.album_artist || "")) {
+    // The card you just clicked is the one already expanded: close it
+    // rather than asking the backend for the same tracks again.
+    libDetail = null;
+    libSelected.clear();
+    libAnchor = null;
+    renderLibrary();
+    return;
+  }
   libSelected.clear();
   libAnchor = null;
   libPending++;
