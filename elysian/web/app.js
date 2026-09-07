@@ -1066,10 +1066,21 @@ $("tag-save").addEventListener("click", () => {
   a.library_save_editor(libEditor.paths, changes);
 });
 
+/* Windows paths are case-insensitive, and the path for whatever is
+   currently playing can reach the frontend from a different source than
+   the library's own listing did - added by drag-and-drop, by file
+   association, or typed with a different drive-letter case somewhere -
+   while still naming the identical file. Comparing the raw strings meant
+   a track playing from outside the library never matched its own row
+   here at all. */
+function pathKey(path) {
+  return String(path || "").toLowerCase();
+}
+
 function rebuildLibRowIndex() {
   libRowsByPath = new Map();
   document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
-          .forEach((row) => libRowsByPath.set(row.dataset.path, row));
+          .forEach((row) => libRowsByPath.set(pathKey(row.dataset.path), row));
   libPlayingRow = null;         // the old reference no longer points at a
                                  // live row after the rebuild that just ran
   paintLibPlaying();
@@ -1082,7 +1093,7 @@ function paintLibPlaying() {
     if (cell) cell.textContent = libPlayingRow.dataset.num || "";
     libPlayingRow = null;
   }
-  const row = libPlayingPath ? libRowsByPath.get(libPlayingPath) : null;
+  const row = libPlayingPath ? libRowsByPath.get(pathKey(libPlayingPath)) : null;
   if (!row) return;
   row.classList.add("playing");
   const cell = row.querySelector(".n");
