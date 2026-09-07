@@ -900,9 +900,13 @@ document.addEventListener("keydown", (e) => {
    and content-visibility keeps offscreen cards off the layout budget
    without the machinery that the track list genuinely needs. */
 
-let libView = "albums";          // albums | artists | genres
+let libView = "albums";          // albums | artists | genres | songs
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
+// Set just before requesting an album's detail for a card double-click,
+// which has no track list of its own to play yet. Consumed by whichever
+// detail result arrives next; see the library_detail_revision handler.
+let libPlayAlbumOnDetail = null;
 let libSelected = new Set();     // paths selected in a detail list
 let libAnchor = null;            // where a shift range measures from
 let libOpened = false;
@@ -919,6 +923,41 @@ let libArtSeen = new Set();      // already asked for, so no repeats
 let libCards = new Map();        // album key -> its card element
 let libGridSig = "";             // what the grid currently shows
 let libArtWaiting = false;       // covers asked for but not yet collected
+
+// The path of the track currently playing, and where to find its row
+// without walking the list. The songs and detail lists are not
+// virtualised the way the playlist is, so scanning every row on every
+// tick - as a large library easily has tens of thousands of them - would
+// cost real time for something that changes once per track. A map from
+// path to element, rebuilt only when the rows themselves change, keeps
+// showing or moving the indicator to two lookups regardless of list size.
+let libPlayingPath = "";
+let libPlayingRow = null;
+let libRowsByPath = new Map();
+
+function rebuildLibRowIndex() {
+  libRowsByPath = new Map();
+  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+          .forEach((row) => libRowsByPath.set(row.dataset.path, row));
+  libPlayingRow = null;         // the old reference no longer points at a
+                                 // live row after the rebuild that just ran
+  paintLibPlaying();
+}
+
+function paintLibPlaying() {
+  if (libPlayingRow) {
+    libPlayingRow.classList.remove("playing");
+    const cell = libPlayingRow.querySelector(".n");
+    if (cell) cell.textContent = libPlayingRow.dataset.num || "";
+    libPlayingRow = null;
+  }
+  const row = libPlayingPath ? libRowsByPath.get(libPlayingPath) : null;
+  if (!row) return;
+  row.classList.add("playing");
+  const cell = row.querySelector(".n");
+  if (cell) cell.textContent = "\u25B6";
+  libPlayingRow = row;
+}
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -1066,7 +1105,7 @@ function renderLibrary() {
         out.push(`<div class="libsection">${esc(album || "Not part of an album")}`
                  + `${bits.join("")}</div>`);
       }
-      out.push(`<div class="librow song" data-path="${esc(t.path)}">
+      out.push(`<div class="librow song" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
         <div class="n">${t.track_number || ""}</div>
         <div class="t">${esc(t.title)}</div>
         <div class="a">${esc(t.artist)}</div>
@@ -1076,6 +1115,7 @@ function renderLibrary() {
     }
     grid.innerHTML = out.join("");
     paintLibSelection();
+    rebuildLibRowIndex();
   } else {
     // Artists and genres are a list rather than a grid: there is no
     // artwork to show, and a name reads better on one line than boxed.
@@ -1094,7 +1134,7 @@ function renderLibrary() {
 }
 
 function trackRow(t, showAlbum) {
-  return `<div class="librow" data-path="${esc(t.path)}">
+  return `<div class="librow" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
       <div class="n">${t.track_number || ""}</div>
       <div class="t">${esc(t.title)}</div>
       <div class="a">${esc(t.artist)}</div>
@@ -1300,6 +1340,7 @@ function renderLibTracks(items) {
     // since its rows can come from anywhere.
     box.innerHTML = items.map((t) => trackRow(t, kind !== "album")).join("");
     paintLibSelection();
+    rebuildLibRowIndex();
     return;
   }
   const html = [];
@@ -1319,6 +1360,7 @@ function renderLibTracks(items) {
   }
   box.innerHTML = html.join("");
   paintLibSelection();
+  rebuildLibRowIndex();
 }
 
 function paintLibSelection() {
@@ -1339,7 +1381,67 @@ function libChosenPaths() {
   return libDetail.items.map((t) => t.path);
 }
 
-const LIB_VIEWS = ["albums", "artists", "genres", "songs"];
+/* What a double-click in the library plays: the current view's own order,
+   not just the one track clicked. An album's track list, an artist's or
+   genre's detail list, or the songs list exactly as displayed - so
+   continuing past the clicked track carries on through the rest of what
+   was actually on screen, the way opening an album and hitting play
+   naturally continues into the next track. */
+function libraryContextPayload(startPath) {
+  startPath = String(startPath || "");
+  if (!startPath) return null;
+
+  if (libView === "songs" && !libDetail) {
+    const paths = libItems.map((t) => t.path).filter(Boolean);
+    return { paths, startPath, kind: "songs", title: "Songs" };
+  }
+  if (libDetail && Array.isArray(libDetail.items) && libDetail.items.length) {
+    const paths = libDetail.items.map((t) => t.path).filter(Boolean);
+    // The backend labels a search result "Search: eclipse" for its own
+    // detail title; libDetail.key is the bare search text, which reads
+    // better here than repeating that label back.
+    const title = libDetail.kind === "search"
+      ? (libDetail.key || libDetail.title || "") : (libDetail.title || "");
+    return { paths, startPath, kind: libDetail.kind || "library", title };
+  }
+  return null;
+}
+
+function playLibraryContextFrom(startPath) {
+  const a = api();
+  if (!a) return;
+  const payload = libraryContextPayload(startPath);
+  // No context to build a queue from - a row reached some way this does
+  // not anticipate - still has to play something, so it becomes a queue
+  // of just that one track rather than doing nothing.
+  const p = payload && payload.paths && payload.paths.length
+    ? payload : { paths: [startPath], startPath, kind: "", title: "" };
+  a.library_play_context(p.paths, p.startPath, p.kind, p.title);
+}
+
+function orderedSelectedLibraryPaths() {
+  const chosen = new Set(libChosenPaths());
+  if (!chosen.size) return [];
+  if (libView === "songs" && !libDetail) {
+    return libItems.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  if (libDetail && Array.isArray(libDetail.items)) {
+    return libDetail.items.map((t) => t.path).filter((p) => chosen.has(p));
+  }
+  return Array.from(chosen);
+}
+
+/* An album card carries only the summary shown on it - no track paths - so
+   double-clicking it has to fetch the album before anything can play. The
+   fetch is the same one a single click already makes; this only adds a
+   flag saying what to do once it lands, rather than opening the album pane
+   the user did not ask to see. */
+function playAlbumCardFromStart(item) {
+  const a = api();
+  if (!a) return;
+  libPlayAlbumOnDetail = { album: item.album || "", artist: item.album_artist || "" };
+  a.library_request_detail("album", item.album, item.album_artist);
+}
 
 function setLibView(name) {
   if (libView === name) return;
@@ -1389,9 +1491,11 @@ $("libfolders").addEventListener("click", (e) => {
 
 $("libgrid").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow.song");
-  if (!row) return;
-  const a = api();
-  if (a) a.library_play([row.dataset.path]);
+  if (row) { playLibraryContextFrom(row.dataset.path); return; }
+  const card = e.target.closest(".libcard");
+  if (!card) return;
+  const item = libFiltered()[Number(card.dataset.i)];
+  if (item) playAlbumCardFromStart(item);
 });
 
 $("libgrid").addEventListener("click", (e) => {
@@ -1479,8 +1583,7 @@ $("libtracks").addEventListener("click", (e) => {
 $("libtracks").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow");
   if (!row) return;
-  const a = api();
-  if (a) a.library_play([row.dataset.path]);
+  playLibraryContextFrom(row.dataset.path);
 });
 
 $("lib-back").addEventListener("click", () => {
@@ -1495,7 +1598,16 @@ $("lib-queue").addEventListener("click", () => {
 });
 $("lib-play").addEventListener("click", () => {
   const a = api();
-  if (a) a.library_play(libChosenPaths());
+  if (!a) return;
+  const paths = orderedSelectedLibraryPaths();
+  if (!paths.length) return;
+  const kind = libDetail ? (libDetail.kind || "library")
+                        : (libView === "songs" ? "songs" : "library");
+  const title = libDetail
+    ? (libDetail.kind === "search" ? (libDetail.key || libDetail.title || "")
+                                   : (libDetail.title || ""))
+    : (libView === "songs" ? "Songs" : "");
+  a.library_play_context(paths, paths[0], kind, title);
 });
 $("lib-folders").addEventListener("click", () => {
   libShowFolders = !libShowFolders;
@@ -1562,6 +1674,20 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_detail().then((d) => {
       if (!d || !d.kind) return;
+      // Consumed by whichever detail lands next, matching or not: if
+      // something else changed the selection in between, a stale double
+      // click waiting for its album is less useful than one that already
+      // moved on.
+      const wantPlay = libPlayAlbumOnDetail;
+      libPlayAlbumOnDetail = null;
+      if (wantPlay && d.kind === "album" && d.key === wantPlay.album
+          && (d.key2 || "") === wantPlay.artist) {
+        const paths = (d.items || []).map((t) => t.path).filter(Boolean);
+        if (paths.length) {
+          a.library_play_context(paths, paths[0], "album", d.title || "");
+        }
+        return;
+      }
       libDetail = d;
       libSelected.clear();
       libAnchor = null;
@@ -1643,6 +1769,10 @@ function applyTick(s) {
 
   state.current_id = s.current_id;
   state.playing = playing;
+  if (s.current_path !== libPlayingPath) {
+    libPlayingPath = s.current_path || "";
+    paintLibPlaying();
+  }
   state.position = position;
   state.duration = s.duration;
   state.shuffle = shuffle;
