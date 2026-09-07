@@ -1751,7 +1751,7 @@ function setLibView(name) {
     detail: libDetail
       ? { kind: libDetail.kind, key: libDetail.key, key2: libDetail.key2 || "" }
       : null,
-    scrollTop: $("libgrid").scrollTop,
+    anchor: captureVisibleLibAnchor(),
   };
   libGridSig = "";
   libView = name;
@@ -1766,7 +1766,7 @@ function setLibView(name) {
     a.library_request_browser(name, $("libfilter").value.trim());
     const saved = libTabState[name];
     if (saved) {
-      scheduleLibScrollRestore(name, saved.scrollTop);
+      scheduleLibScrollRestore(name, saved.anchor);
       if (saved.detail) {
         libPending++;
         a.library_request_detail(saved.detail.kind, saved.detail.key,
@@ -1777,19 +1777,26 @@ function setLibView(name) {
   }
 }
 
-/* The scroll position a tab is restored to has to wait for that tab's
-   content - the browse list, and the reopened album or artist if there
-   was one - to actually exist, and that arrives asynchronously from the
-   backend at some point after this runs. Retried across a few animation
-   frames rather than tied to any specific render call, so it does not
-   matter which of those two arrives first or how renderLibrary happens to
-   be structured; it just keeps nudging the scroll into place until the
-   content is tall enough for that position to mean something, then stops
-   trying once it has, or once the user has already navigated elsewhere. */
+/* The item a tab is restored to has to wait for that tab's content - the
+   browse list, and the reopened album or artist if there was one - to
+   actually exist, and that arrives asynchronously from the backend at
+   some point after this runs. Retried across several animation frames
+   rather than tied to any specific render call, so it does not matter
+   which of those two arrives first or how renderLibrary happens to be
+   structured; it just keeps looking for the remembered card or row until
+   it exists, then stops once it is found, or once the user has already
+   navigated elsewhere.
+   
+   An anchor, not a saved scrollTop pixel value: a plain pixel offset only
+   means the same thing again if nothing above it changed height between
+   leaving and returning, and album art can keep arriving in the
+   background well after the tab first renders - restoring a fixed number
+   before that settles, then never revisiting it, is what left the view a
+   couple of rows off from where it actually was. */
 let libPendingScrollRestore = null;
 
-function scheduleLibScrollRestore(view, scrollTop) {
-  libPendingScrollRestore = { view, scrollTop, tries: 0 };
+function scheduleLibScrollRestore(view, anchor) {
+  libPendingScrollRestore = { view, anchor, tries: 0 };
   requestAnimationFrame(tryRestoreLibScroll);
 }
 
@@ -1797,9 +1804,9 @@ function tryRestoreLibScroll() {
   const p = libPendingScrollRestore;
   if (!p) return;
   if (libView !== p.view) { libPendingScrollRestore = null; return; }
-  $("libgrid").scrollTop = p.scrollTop;
+  scrollToVisibleLibAnchor(p.anchor);
   p.tries++;
-  if (p.tries < 8) requestAnimationFrame(tryRestoreLibScroll);
+  if (p.tries < 30) requestAnimationFrame(tryRestoreLibScroll);
   else libPendingScrollRestore = null;
 }
 
@@ -2105,31 +2112,63 @@ function drawWave() {
   }
 }
 let libResizeTimer = 0;
-/* Whichever album card sits topmost-and-leftmost, fully in view, right
-   now. A resize learns of the new layout only after the browser has
-   already reflowed it, by which point the old positions are gone, so
-   there is nothing left to ask "what was visible before this happened" -
-   the only way to answer that afterward is to have already been keeping
-   track. Kept current here on scroll and after every grid render, then
-   used on resize to put the same card back where it was. */
+/* Whichever card or row sits topmost-and-leftmost, fully in view, right
+   now - identified by whatever stable key that kind of item has (album +
+   artist for a card, path for a track or song row, list index for a
+   plain artist/genre row). A reflow, a tab switch, or content quietly
+   changing height in the background - album art arriving after the
+   fact - all mean a remembered pixel offset stops meaning the same thing
+   it did when it was captured; finding the actual item again sidesteps
+   that regardless of what moved between saving and restoring. */
+function captureVisibleLibAnchor() {
+  const grid = $("libgrid");
+  const gridRect = grid.getBoundingClientRect();
+  const items = grid.querySelectorAll(".libcard, .librow");
+  let best = null;
+  for (const el of items) {
+    const r = el.getBoundingClientRect();
+    if (r.height === 0) continue;
+    if (r.top < gridRect.top - 1 || r.bottom > gridRect.bottom + 1) continue;
+    if (!best || r.top < best.top - 1
+        || (Math.abs(r.top - best.top) < 2 && r.left < best.left)) {
+      best = { top: r.top, left: r.left, el };
+    }
+  }
+  if (!best) return null;
+  const el = best.el;
+  if (el.classList.contains("libcard")) {
+    return { album: el.dataset.album || "", artist: el.dataset.artist || "" };
+  }
+  if (el.dataset.path) return { path: el.dataset.path };
+  if (el.dataset.i !== undefined) return { i: el.dataset.i };
+  return null;
+}
+
+function scrollToVisibleLibAnchor(anchor) {
+  if (!anchor) return false;
+  const grid = $("libgrid");
+  let el = null;
+  if ("album" in anchor) {
+    el = Array.from(grid.querySelectorAll(".libcard")).find(
+      (c) => c.dataset.album === anchor.album && c.dataset.artist === anchor.artist);
+  } else if ("path" in anchor) {
+    el = Array.from(grid.querySelectorAll(".librow")).find(
+      (r) => r.dataset.path === anchor.path);
+  } else if ("i" in anchor) {
+    el = Array.from(grid.querySelectorAll(".librow")).find(
+      (r) => r.dataset.i === anchor.i);
+  }
+  if (!el) return false;
+  grid.scrollTop = el.offsetTop;
+  return true;
+}
+
 let libAlbumAnchor = null;
 let libAnchorTimer = 0;
 
 function captureLibAlbumAnchor() {
-  const grid = $("libgrid");
-  const gridRect = grid.getBoundingClientRect();
-  const cards = grid.querySelectorAll(".libcard");
-  let best = null;
-  for (const c of cards) {
-    const r = c.getBoundingClientRect();
-    if (r.top < gridRect.top - 1 || r.bottom > gridRect.bottom + 1) continue;
-    if (!best || r.top < best.top - 1
-        || (Math.abs(r.top - best.top) < 2 && r.left < best.left)) {
-      best = { top: r.top, left: r.left, album: c.dataset.album,
-               artist: c.dataset.artist };
-    }
-  }
-  if (best) libAlbumAnchor = { album: best.album, artist: best.artist };
+  const a = captureVisibleLibAnchor();
+  if (a && "album" in a) libAlbumAnchor = a;
 }
 
 $("libgrid").addEventListener("scroll", () => {
@@ -2139,11 +2178,7 @@ $("libgrid").addEventListener("scroll", () => {
 }, { passive: true });
 
 function restoreLibAlbumAnchor() {
-  if (!libAlbumAnchor) return;
-  const card = Array.from($("libgrid").querySelectorAll(".libcard")).find(
-    (c) => c.dataset.album === libAlbumAnchor.album
-        && c.dataset.artist === libAlbumAnchor.artist);
-  if (card) $("libgrid").scrollTop = card.offsetTop;
+  scrollToVisibleLibAnchor(libAlbumAnchor);
 }
 
 /* Which card ends up the anchor after an expanded album reflows: the row
@@ -2162,7 +2197,7 @@ function scrollExpandedAlbumIntoView(grew) {
   }
 }
 
-let libLastWinArea = window.innerWidth * window.innerHeight;
+let libResizeBaseline = window.innerWidth * window.innerHeight;
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
@@ -2171,9 +2206,6 @@ window.addEventListener("resize", () => {
   // with blank space below until the first scroll. Recompute here; the
   // range early-out makes this free when the height did not actually change.
   renderWindow(false);
-  const area = window.innerWidth * window.innerHeight;
-  const grew = area >= libLastWinArea;
-  libLastWinArea = area;
   // An expanded album is inserted right after whichever card was last in
   // its row at the time it was opened, which forces a row break there:
   // widening the window afterward means more cards would now fit ahead of
@@ -2181,16 +2213,26 @@ window.addEventListener("resize", () => {
   // stay stranded in a new row instead of filling in beside the earlier
   // ones. Debounced, since resizing fires continuously while dragging an
   // edge and this involves real DOM moves, not just a read.
-  if (libView === "albums" && libDetail && libDetail.kind === "album") {
-    clearTimeout(libResizeTimer);
-    libResizeTimer = setTimeout(() => {
+  //
+  // Whether the window grew or shrank is decided once the gesture settles,
+  // not on every one of these events: maximising or restoring animates
+  // through several intermediate sizes, each firing its own resize event,
+  // and comparing against whatever the immediately preceding one happened
+  // to be could catch the tail end of that animation rather than the
+  // gesture as a whole - which is what made restoring after a maximise
+  // sometimes read as "grew" and land on the wrong end of the tracklist.
+  clearTimeout(libResizeTimer);
+  libResizeTimer = setTimeout(() => {
+    const area = window.innerWidth * window.innerHeight;
+    const grew = area >= libResizeBaseline;
+    libResizeBaseline = area;
+    if (libView === "albums" && libDetail && libDetail.kind === "album") {
       placeInlineAlbumDetail();
       scrollExpandedAlbumIntoView(grew);
-    }, 120);
-  } else if (libView === "albums") {
-    clearTimeout(libResizeTimer);
-    libResizeTimer = setTimeout(restoreLibAlbumAnchor, 120);
-  }
+    } else if (libView === "albums") {
+      restoreLibAlbumAnchor();
+    }
+  }, 120);
 });
 
 /* ---------- state sync ---------- */
