@@ -21,6 +21,7 @@ from .services import settings as settings_store
 from .services.art import ArtProvider
 from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
+from .services.tag_editor import write_many as _write_tags
 from .services.waveform import peaks_for
 
 from .logs import get as _get_logger
@@ -117,6 +118,17 @@ class Api:
         self._library_browser_gen = 0
         self._library_detail_gen = 0
         self._library_art_pending = set()
+        # The tag editor. Unlike everything else the library owns, opening
+        # or saving here means writing to the user's actual files, which is
+        # why it gets its own revision rather than riding the browser or
+        # detail ones: those two describe what SQLite says, this describes
+        # a real file operation that can fail per file and takes a moment.
+        self._library_editor_revision = 0
+        self._library_editor = {
+            "open": False, "loading": False, "saving": False,
+            "paths": [], "count": 0, "data": {}, "mixed": {},
+            "errors": [], "saved": 0, "failed": 0,
+        }
         # Covers are resolved by a fixed set of workers reading one queue,
         # not by a pool taking whatever was submitted first. What matters is
         # the cards on screen now: a queue that cannot be reordered means
@@ -155,6 +167,7 @@ class Api:
             "library_revision": 0, "library_browser_revision": 0,
             "library_detail_revision": 0, "library_art_revision": 0,
             "library_scanning": False,
+            "library_editor_revision": 0,
             "play_context_source": "playlist", "play_context_kind": "",
             "play_context_title": "", "current_path": "",
         }
@@ -415,6 +428,7 @@ class Api:
                 "library_detail_revision": self._library_detail_revision,
                 "library_art_revision": self._library_art_revision,
                 "library_scanning": self._library_scanning,
+                "library_editor_revision": self._library_editor_revision,
                 "play_context_source": self._play_context["source"],
                 "play_context_kind": self._play_context["kind"],
                 "play_context_title": self._play_context["title"],
@@ -1345,6 +1359,161 @@ class Api:
             if title:
                 self._set_status(f"Playing: {title}")
 
+    def _refresh_playlist_paths(self, paths) -> int:
+        """Apply freshly written tags to any playlist rows for these files.
+
+        Without this, a track already sitting in the playlist would keep
+        showing its old title and artist until it was rescanned some other
+        way. apply_metadata only touches title, artist, album and length,
+        which is also all the playlist row ever displays; genre, track
+        number and the rest are library-only and need nothing here.
+        """
+        fresh = self._library.lookup(paths)
+        if not fresh:
+            return 0
+        wanted = {pathutil.key(p) for p in paths}
+        changed = 0
+        with self._lock:
+            for track_id, track in zip(self._playlist.ids, self._playlist.tracks):
+                if pathutil.key(track.path) not in wanted:
+                    continue
+                info = fresh.get(track.path)
+                if info is None:
+                    # lookup() keys its result by the exact path it was
+                    # asked with, which may differ in case or separators
+                    # from how this row's path happens to be spelled.
+                    info = next((v for p, v in fresh.items()
+                                if pathutil.same(p, track.path)), None)
+                if info is None:
+                    continue
+                before = track.length
+                apply_metadata(track, info)
+                self._playlist.adjust_length(track.length - before)
+                self._dirty.add(track_id)
+                changed += 1
+            if changed:
+                self._meta_revision += 1
+        return changed
+
+    def _do_library_open_editor(self, paths) -> None:
+        """Load current tags for these files into the editor, off the worker.
+
+        The library DB already has this, so opening the editor costs a
+        query, not a fresh read of every selected file.
+        """
+        clean = [str(p) for p in (paths or []) if p]
+        if not clean:
+            return
+        self._library_editor = {
+            "open": True, "loading": True, "saving": False,
+            "paths": clean, "count": len(clean), "data": {}, "mixed": {},
+            "errors": [], "saved": 0, "failed": 0,
+        }
+        self._bump_library_editor()
+
+        def work():
+            try:
+                payload = self._library.edit_payload(clean)
+            except Exception:
+                log.exception("could not build the tag editor payload")
+                payload = {"count": 0, "paths": [], "data": {}, "mixed": {}}
+            self._post("library_editor_ready", payload)
+
+        threading.Thread(target=work, name="elysian-lib-editor-open",
+                         daemon=True).start()
+
+    def _do_library_editor_ready(self, payload) -> None:
+        if not self._library_editor.get("open"):
+            return  # closed before the lookup finished; nothing to show
+        self._library_editor = {
+            "open": True, "loading": False, "saving": False,
+            "paths": payload.get("paths", []), "count": payload.get("count", 0),
+            "data": payload.get("data", {}), "mixed": payload.get("mixed", {}),
+            "errors": [], "saved": 0, "failed": 0,
+        }
+        self._bump_library_editor()
+
+    def _do_library_close_editor(self) -> None:
+        self._library_editor = {
+            "open": False, "loading": False, "saving": False,
+            "paths": [], "count": 0, "data": {}, "mixed": {},
+            "errors": [], "saved": 0, "failed": 0,
+        }
+        self._bump_library_editor()
+
+    def _do_library_save_editor(self, paths, changes) -> None:
+        """Write the edited tags to disk, off the worker, then reindex.
+
+        The write itself can touch a file on a slow share, which is why it
+        runs on its own thread rather than here: the worker also owns
+        transport, and a write that took a second would be a second of
+        nothing else in this app responding either.
+        """
+        clean = [str(p) for p in (paths or []) if p]
+        changes = dict(changes or {})
+        if not clean or not changes:
+            self._do_library_close_editor()
+            return
+        self._library_editor["saving"] = True
+        self._bump_library_editor()
+
+        def work():
+            try:
+                result = _write_tags(clean, changes)
+            except Exception as exc:
+                log.exception("tag save failed outright")
+                self._post("library_save_failed", str(exc))
+                return
+            written = [r["path"] for r in result["results"] if r["ok"]]
+            errors = [r for r in result["results"] if not r["ok"]]
+            reindexed = 0
+            if written:
+                try:
+                    reindexed = self._library.refresh_paths(written)
+                except Exception:
+                    log.exception("could not reindex after saving tags")
+            self._post("library_save_done", result, written, errors)
+
+        threading.Thread(target=work, name="elysian-lib-editor-save",
+                         daemon=True).start()
+
+    def _do_library_save_done(self, result, written, errors) -> None:
+        ok = result.get("ok", 0)
+        failed = result.get("failed", 0)
+        if written:
+            self._refresh_playlist_paths(written)
+            self._library_revision += 1
+            self._refresh_library_summary()
+            self._do_library_browser(self._library_browser.get("view", "albums"),
+                                     self._library_browser.get("needle", ""))
+            if self._library_detail.get("kind"):
+                d = self._library_detail
+                self._do_library_detail(d.get("kind", ""), d.get("key", ""),
+                                        d.get("key2", ""))
+        if failed:
+            # Keep the editor open so the failures are visible, rather than
+            # closing over a partial save the user never saw happen.
+            self._library_editor["saving"] = False
+            self._library_editor["errors"] = [str(e.get("error", ""))
+                                              for e in errors]
+            self._library_editor["saved"] = ok
+            self._library_editor["failed"] = failed
+            self._bump_library_editor()
+            self._set_status(f"Saved {ok}, failed {failed}")
+        else:
+            self._do_library_close_editor()
+            self._set_status(f"Saved tags for {ok} track"
+                             f"{'s' if ok != 1 else ''}")
+
+    def _do_library_save_failed(self, message) -> None:
+        self._library_editor["saving"] = False
+        self._library_editor["errors"] = [message]
+        self._bump_library_editor()
+        self._set_status("Could not save tags")
+
+    def _bump_library_editor(self) -> None:
+        self._library_editor_revision += 1
+
     # ---- library: bridge side -------------------------------------------
 
     def library_add_folder(self) -> int:
@@ -1424,6 +1593,19 @@ class Api:
             [str(p) for p in (paths or []) if p],
             str(start_path or ""), str(kind or ""), str(title or ""),
         )
+
+    def library_open_editor(self, paths) -> None:
+        self._post("library_open_editor", [str(p) for p in (paths or []) if p])
+
+    def library_close_editor(self) -> None:
+        self._post("library_close_editor")
+
+    def library_save_editor(self, paths, changes) -> None:
+        self._post("library_save_editor",
+                   [str(p) for p in (paths or []) if p], dict(changes or {}))
+
+    def library_get_editor_state(self) -> dict:
+        return dict(self._library_editor)
 
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may
@@ -1651,6 +1833,8 @@ class Api:
         "library_get_browser", "library_get_detail",
         "library_enqueue", "library_play_context",
         "library_request_art", "library_visible_art", "library_get_art",
+        "library_open_editor", "library_close_editor",
+        "library_save_editor", "library_get_editor_state",
     })
 
     #: Public for the host process only, never called from JavaScript, but

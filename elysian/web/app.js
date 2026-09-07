@@ -830,6 +830,10 @@ function isTypingTarget(el) {
 }
 
 document.addEventListener("keydown", (e) => {
+  if (tagModalOpen()) {
+    if (e.key === "Escape") { e.preventDefault(); closeTagEditor(); }
+    return;
+  }
   if (modalOpen()) {
     // The dialog owns the keyboard: Escape declines, and Enter or Space
     // activate whichever button holds focus (the browser default). Nothing
@@ -885,6 +889,11 @@ document.addEventListener("keydown", (e) => {
     if (!onControl && selected.size) intent.playTrack(Array.from(selected)[0]);
   }
   else if (k === "/") { e.preventDefault(); setView("playlists"); $("filter").focus(); }
+  else if (e.ctrlKey && (k === "i" || k === "I") && view === "library") {
+    e.preventDefault();
+    const paths = libEditablePaths();
+    if (paths.length) openTagEditor(paths);
+  }
 });
 
 
@@ -935,10 +944,150 @@ let libPlayingPath = "";
 let libPlayingRow = null;
 let libRowsByPath = new Map();
 
+/* Tag editor. The backend is the source of truth for what is actually in
+   the file, same as everywhere else in this app; libEditor is just the
+   last snapshot of that. libEditorTouched is purely local: which fields
+   the person has actually typed into since the modal opened, so Save can
+   send only those. Without it, every field would be sent on every save,
+   and a batch edit of ten tracks that differ on nothing but genre would
+   silently overwrite all nine other fields with whatever the (blank,
+   "multiple values") box happened to show. */
+let libEditorRevision = -1;
+let libEditor = { open: false, loading: false, saving: false, paths: [],
+                  count: 0, data: {}, mixed: {}, errors: [], saved: 0,
+                  failed: 0 };
+let libEditorTouched = new Set();
+
+function tagModalOpen() {
+  return $("tagmodal").classList.contains("show");
+}
+
+const TAG_FIELD_INPUTS = {
+  title: "tag-title", artist: "tag-artist", album: "tag-album",
+  album_artist: "tag-album-artist", genre: "tag-genre",
+  track_number: "tag-track-number", track_total: "tag-track-total",
+  disc_number: "tag-disc-number", disc_total: "tag-disc-total",
+  year: "tag-year",
+};
+
+function openTagEditor(paths) {
+  const a = api();
+  if (!a || !paths.length) return;
+  libEditorTouched.clear();
+  a.library_open_editor(paths);
+}
+
+function closeTagEditor() {
+  const a = api();
+  if (a) a.library_close_editor();
+  $("tagmodal").classList.remove("show");
+  libEditorTouched.clear();
+}
+
+function renderTagEditor() {
+  const modal = $("tagmodal");
+  modal.classList.toggle("show", libEditor.open);
+  if (!libEditor.open) return;
+
+  const n = libEditor.count;
+  $("tagmodal-sub").textContent = n === 1 ? "1 track"
+    : `${n} tracks${libEditor.loading ? "" : " selected"}`;
+
+  for (const [field, id] of Object.entries(TAG_FIELD_INPUTS)) {
+    const el = $(id);
+    // A field already being typed into is left alone even if a fresher
+    // snapshot arrives mid-edit, so a slow save elsewhere cannot overwrite
+    // what someone is in the middle of typing.
+    if (libEditorTouched.has(field)) continue;
+    const mixed = !!libEditor.mixed[field];
+    const value = libEditor.data[field];
+    el.placeholder = mixed ? "(multiple values)" : "";
+    el.value = mixed ? "" : (value || value === 0 ? String(value) : "");
+  }
+  const comp = $("tag-compilation");
+  if (!libEditorTouched.has("compilation")) {
+    comp.indeterminate = !!libEditor.mixed.compilation;
+    comp.checked = !comp.indeterminate && !!libEditor.data.compilation;
+  }
+
+  const errs = $("tagmodal-errors");
+  if (libEditor.errors && libEditor.errors.length) {
+    errs.classList.remove("hidden");
+    const shown = libEditor.errors.slice(0, 4);
+    errs.textContent = (libEditor.failed
+      ? `Saved ${libEditor.saved}, failed ${libEditor.failed}. `
+      : "") + shown.join(" ");
+  } else {
+    errs.classList.add("hidden");
+  }
+
+  $("tag-save").disabled = libEditor.saving || libEditor.loading;
+  $("tag-cancel").disabled = libEditor.saving;
+}
+
+/* Only what was actually touched, per field. A blank text box or a 0 in a
+   number box the person never clicked is not "the user cleared this", it
+   is "this box still shows whatever renderTagEditor put there", which for
+   a mixed field is nothing at all. */
+function collectTagChanges() {
+  const changes = {};
+  for (const [field, id] of Object.entries(TAG_FIELD_INPUTS)) {
+    if (!libEditorTouched.has(field)) continue;
+    const el = $(id);
+    if (field === "year" || field.endsWith("_number") || field.endsWith("_total")) {
+      const n = parseInt(el.value, 10);
+      changes[field] = Number.isFinite(n) && n > 0 ? n : 0;
+    } else {
+      changes[field] = el.value.trim();
+    }
+  }
+  if (libEditorTouched.has("compilation")) {
+    changes.compilation = $("tag-compilation").checked ? 1 : 0;
+  }
+  return changes;
+}
+
+for (const id of Object.values(TAG_FIELD_INPUTS)) {
+  $(id).addEventListener("input", () => libEditorTouched.add(
+    Object.keys(TAG_FIELD_INPUTS).find((f) => TAG_FIELD_INPUTS[f] === id)));
+}
+$("tag-compilation").addEventListener("change", () => {
+  libEditorTouched.add("compilation");
+  $("tag-compilation").indeterminate = false;
+});
+
+$("lib-edit").addEventListener("click", () => openTagEditor(libEditablePaths()));
+$("tag-cancel").addEventListener("click", closeTagEditor);
+$("tag-save").addEventListener("click", () => {
+  const a = api();
+  if (!a || !libEditor.paths.length) return;
+  const changes = collectTagChanges();
+  if (!Object.keys(changes).length) { closeTagEditor(); return; }
+  a.library_save_editor(libEditor.paths, changes);
+});
+
+/* Windows paths are case-insensitive, and the path for whatever is
+   currently playing can reach the frontend from a different source than
+   the library's own listing did - added by drag-and-drop, by file
+   association, or typed with a different drive-letter case somewhere -
+   while still naming the identical file. Comparing the raw strings meant
+   a track playing from outside the library never matched its own row
+   here at all. */
+function pathKey(path) {
+  return String(path || "").toLowerCase();
+}
+
 function rebuildLibRowIndex() {
+  // Scanning both containers together let a row left behind in the one
+  // you just left - never removed, only hidden - silently win the map
+  // entry over the actual current row for the same file, whichever the
+  // combined query happened to reach last. Only the container that is
+  // actually the current view can hold a row worth indexing.
+  const scope = libDetail !== null ? "#libtracks .librow"
+                                   : "#libgrid .librow.song";
   libRowsByPath = new Map();
-  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
-          .forEach((row) => libRowsByPath.set(row.dataset.path, row));
+  document.querySelectorAll(scope)
+          .forEach((row) => libRowsByPath.set(pathKey(row.dataset.path), row));
   libPlayingRow = null;         // the old reference no longer points at a
                                  // live row after the rebuild that just ran
   paintLibPlaying();
@@ -951,7 +1100,7 @@ function paintLibPlaying() {
     if (cell) cell.textContent = libPlayingRow.dataset.num || "";
     libPlayingRow = null;
   }
-  const row = libPlayingPath ? libRowsByPath.get(libPlayingPath) : null;
+  const row = libPlayingPath ? libRowsByPath.get(pathKey(libPlayingPath)) : null;
   if (!row) return;
   row.classList.add("playing");
   const cell = row.querySelector(".n");
@@ -1051,6 +1200,38 @@ function renderLibrary() {
   empty.classList.toggle("hidden", !bare);
   grid.classList.toggle("hidden", bare);
   if (bare) return;
+
+  /* Songs is the one view sized to the whole library rather than one
+     album or artist, so during a long scan it is also the one view whose
+     row count keeps growing for the entire scan. The existing signature
+     check below only skips a rebuild when the set is unchanged, which
+     during an active scan it never is: rebuilding several thousand rows
+     costs roughly their count in milliseconds, and paying that cost again
+     on every scan-triggered refresh is what made the interface feel like
+     it was getting slower the longer a scan ran, when the scan itself was
+     not. Once something is already on screen, Songs skips further
+     rebuilds until the scan finishes; switching away and back still shows
+     the current list immediately, since that is a fresh render, not a
+     refresh. */
+  if (libView === "songs" && libScanning && grid.childElementCount > 0
+      && libGridSig.startsWith("songs\u0001")) {
+    // Checking for any content at all, rather than specifically Songs
+    // content, meant returning here after visiting another tab mid-scan
+    // left whatever that tab last drew - album cards, artist rows -
+    // sitting there under the Songs tab, since the guard skipped the
+    // rebuild that would have replaced it. Skipping only applies when the
+    // grid still genuinely holds the Songs list from before.
+    //
+    // Reindexing here, not just repainting: visiting another view in
+    // between replaces libRowsByPath with that view's own rows, so the
+    // frozen Songs rows already on screen need reindexing too - but that
+    // is a plain querySelectorAll over what already exists, not the HTML
+    // string construction that made a full rebuild expensive, so it costs
+    // nothing close to that even on a large list.
+    paintLibArt();
+    rebuildLibRowIndex();
+    return;
+  }
 
   /* Rebuilding the grid throws away scroll position, every painted cover
      and the observer. During a scan the list refreshes every couple of
@@ -1367,6 +1548,9 @@ function paintLibSelection() {
   document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
     .forEach((row) => row.classList.toggle(
       "selected", libSelected.has(row.dataset.path)));
+  // Editing writes to real files, so unlike Play or Add to playlist there
+  // is no sensible "nothing selected" behaviour to fall back to.
+  $("lib-edit").disabled = libSelected.size === 0;
 }
 
 function libChosenPaths() {
@@ -1379,6 +1563,17 @@ function libChosenPaths() {
     return libDetail.items.map((t) => t.path).filter((p) => libSelected.has(p));
   }
   return libDetail.items.map((t) => t.path);
+}
+
+/* Deliberately stricter than libChosenPaths: Play and Add to playlist both
+   treat no selection as "everything in view", which is fine, since neither
+   touches a file. Editing tags writes to the actual files on disk, so
+   nothing is editable until something is explicitly selected - there is no
+   safe reading of "edit tags with nothing selected" the way there is for
+   playing or queuing. */
+function libEditablePaths() {
+  if (!libSelected.size) return [];
+  return libChosenPaths();
 }
 
 /* What a double-click in the library plays: the current view's own order,
@@ -1707,6 +1902,14 @@ function applyLibraryTick(tick) {
     libArtRevision = tick.library_art_revision;
     collectArt(libArtSeq);
   }
+  if (tick.library_editor_revision !== libEditorRevision) {
+    libEditorRevision = tick.library_editor_revision;
+    a.library_get_editor_state().then((st) => {
+      if (!st) return;
+      libEditor = st;
+      renderTagEditor();
+    }).catch(() => {});
+  }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
     a.library_get_state().then((st) => {
@@ -1924,6 +2127,7 @@ function pollInterval() {
   // Covers are collected on the poll, so a resolved one would otherwise
   // wait up to a second before it appeared.
   if (libArtWaiting) return POLL_FILLING;
+  if (libEditor.loading || libEditor.saving) return POLL_FILLING;
   if (scanOutstanding > 0) return POLL_PLAYING;
   return state.playing ? POLL_PLAYING : POLL_IDLE;
 }
