@@ -24,6 +24,7 @@ Three things here are deliberate rather than incidental:
   uses, so the same file reached by a different spelling is one row.
 """
 import os
+import re
 import sqlite3
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -76,6 +77,27 @@ _EFFECTIVE_ALBUM = "COALESCE(NULLIF(album,''), 'Unknown Album')"
 _TRACK_ORDER = ("CASE WHEN disc_number <= 0 THEN 1 ELSE disc_number END, "
                 "CASE WHEN track_number <= 0 THEN 1 ELSE 0 END, "
                 "track_number, title COLLATE NOCASE")
+
+
+_LEADING_JUNK = re.compile(r"^[^0-9a-z]+", re.IGNORECASE)
+
+
+def sort_key(name) -> str:
+    """How a name should file alphabetically.
+
+    Leading punctuation is ignored, so '"Weird Al" Yankovic' files under W
+    rather than ahead of everything, and case is ignored, so it does not
+    matter how a tagger capitalised it. If a name is nothing but
+    punctuation the original is used, which at least sorts consistently.
+    """
+    text = (name or "").strip()
+    stripped = _LEADING_JUNK.sub("", text)
+    return (stripped or text).casefold()
+
+
+def _escape_like(needle: str) -> str:
+    return (needle.replace("\\", "\\\\")
+                  .replace("%", "\\%").replace("_", "\\_"))
 
 
 def _like_prefix(root: str) -> str:
@@ -425,65 +447,116 @@ class LibraryService:
         data["roots"] = self.get_roots()
         return data
 
-    def albums(self) -> list:
+    def _match(self, needle, fields):
+        """SQL fragment and arguments restricting rows to a search.
+
+        Each view searches its own subject: the albums tab matches album
+        and artist names, and songs match titles. Matching titles in the
+        album tab meant a search for a song silently changed what the album
+        grid meant.
+        """
+        text = (needle or "").strip()
+        if not text:
+            return "", []
+        like = "%" + _escape_like(text) + "%"
+        clause = "(" + " OR ".join(
+            f"{f} LIKE ? ESCAPE '\\'" for f in fields) + ")"
+        return clause, [like] * len(fields)
+
+    def albums(self, needle="") -> list:
         """One row per album, whatever its tracks say about the artist.
 
         The album is the unit here; the artist view already separates by
         band. Grouping by band as well split a compilation into one card
-        per contributing artist whenever the album artist tag was missing,
-        which is exactly when it is needed most.
+        per contributing artist whenever the album artist tag was missing.
 
-        An album naming more than one band is a compilation, and those sort
-        after the single band albums rather than being scattered among them
-        under whichever name happened to come first.
-
-        GROUP BY and ORDER BY repeat the expressions rather than using the
-        output aliases: album and album_artist are real column names too,
-        and SQLite resolves a bare name to the column, which would group by
-        the raw tag instead of the fallback chain.
+        Grouping is case insensitive, or a tagger that wrote NEVERMIND on
+        one track and Nevermind on the rest would produce two albums.
+        Ordering is done in Python rather than SQL so it can ignore leading
+        punctuation; see sort_key.
         """
+        clause, args = self._match(needle, ("album", "album_artist", "artist"))
+        where = f"WHERE {clause}" if clause else ""
         rows = self._rows(f"""
-            SELECT COALESCE(NULLIF(album,''), 'Unknown Album') AS album,
-                   (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))           AS is_comp,
-                   MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))           AS only_artist,
+            SELECT MIN(COALESCE(NULLIF(album,''), 'Unknown Album'))     AS album,
+                   (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))     AS is_comp,
+                   MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))     AS only_artist,
                    MIN(NULLIF(year,0)) AS year,
-                   COUNT(*)            AS tracks,
+                   COUNT(*)      AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            GROUP BY COALESCE(NULLIF(album,''), 'Unknown Album')
-            ORDER BY (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')),
-                     CASE WHEN (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va')) THEN '' ELSE MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) END COLLATE NOCASE,
-                     CASE WHEN MIN(NULLIF(year,0)) IS NULL THEN 1 ELSE 0 END,
-                     MIN(NULLIF(year,0)),
-                     COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
-        """)
+            {where}
+            GROUP BY COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
+        """, tuple(args))
         for row in rows:
             comp = bool(row.pop("is_comp", 0))
             only = (row.pop("only_artist", "") or "").strip()
             row["compilation"] = comp
             row["album_artist"] = "Various Artists" if comp else only
+        # Bands first, alphabetically then by year, with compilations after
+        # them. An album with no year sorts to the end of its band's run.
+        rows.sort(key=lambda r: (
+            1 if r["compilation"] else 0,
+            "" if r["compilation"] else sort_key(r["album_artist"]),
+            1 if not r["year"] else 0,
+            r["year"] or 0,
+            sort_key(r["album"]),
+        ))
         return rows
 
-    def artists(self) -> list:
-        return self._rows(f"""
-            SELECT {_EFFECTIVE_ARTIST} AS artist,
-                   COUNT(*) AS tracks,
-                   COUNT(DISTINCT {_EFFECTIVE_ALBUM}) AS albums,
+    def artists(self, needle="") -> list:
+        clause, args = self._match(needle, ("album_artist", "artist"))
+        where = f"WHERE {clause}" if clause else ""
+        rows = self._rows(f"""
+            SELECT MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) AS artist,
+                   COUNT(*)  AS tracks,
+                   COUNT(DISTINCT COALESCE(NULLIF(album,''), 'Unknown Album')
+                                  COLLATE NOCASE) AS albums,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')
-            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE
-        """)
+            {where}
+            GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE
+        """, tuple(args))
+        rows.sort(key=lambda r: sort_key(r["artist"]))
+        return rows
 
-    def genres(self) -> list:
-        return self._rows("""
-            SELECT genre, COUNT(*) AS tracks,
+    def genres(self, needle="") -> list:
+        clause, args = self._match(needle, ("genre",))
+        where = "AND " + clause if clause else ""
+        rows = self._rows(f"""
+            SELECT MIN(genre) AS genre, COUNT(*) AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
-            WHERE COALESCE(genre,'') <> ''
-            GROUP BY genre
-            ORDER BY genre COLLATE NOCASE
-        """)
+            WHERE COALESCE(genre,'') <> '' {where}
+            GROUP BY genre COLLATE NOCASE
+        """, tuple(args))
+        rows.sort(key=lambda r: sort_key(r["genre"]))
+        return rows
+
+    def songs(self, needle="", limit=3000) -> list:
+        """Individual tracks, for the songs tab.
+
+        Capped rather than unbounded: a large collection is tens of
+        thousands of rows, and every one of them would be built into the
+        page. The cap is reported so the pane can say the list was cut
+        short rather than quietly lying about what is there.
+        """
+        clause, args = self._match(needle, ("title", "artist", "album"))
+        where = f"WHERE {clause}" if clause else ""
+        rows = self._rows(f"""
+            SELECT path, title, artist, album, album_artist, genre,
+                   duration, track_number, disc_number, year
+            FROM tracks
+            {where}
+            LIMIT ?
+        """, tuple(args) + (int(limit) + 1,))
+        truncated = len(rows) > limit
+        if truncated:
+            rows = rows[:limit]
+        rows.sort(key=lambda r: (sort_key(r["title"]), sort_key(r["artist"])))
+        for row in rows:
+            row["truncated"] = truncated
+        return rows
 
     def album_paths(self, album: str, album_artist: str = "") -> list:
         """Candidate files for an album's cover, best first.
@@ -491,7 +564,8 @@ class LibraryService:
         Ordered by disc and track so the first one tried is the opening
         track, which is the most likely to carry the artwork.
         """
-        sql = f"SELECT path FROM tracks WHERE {_EFFECTIVE_ALBUM} = ?"
+        sql = ("SELECT path FROM tracks WHERE "
+               f"{_EFFECTIVE_ALBUM} = ? COLLATE NOCASE")
         sql += f" ORDER BY {_TRACK_ORDER} LIMIT 25"
         return [r["path"] for r in self._rows(sql, (album or "Unknown Album",))]
 
@@ -500,7 +574,7 @@ class LibraryService:
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE {_EFFECTIVE_ALBUM} = ?
+            WHERE {_EFFECTIVE_ALBUM} = ? COLLATE NOCASE
         """
         # No artist filter: the grid shows one card per album, so opening
         # one has to return the whole album. Filtering by the card's artist
@@ -517,7 +591,7 @@ class LibraryService:
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE {_EFFECTIVE_ARTIST} = ?
+            WHERE {_EFFECTIVE_ARTIST} = ? COLLATE NOCASE
             ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}
         """, (artist,))
@@ -529,7 +603,7 @@ class LibraryService:
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
-            WHERE genre = ?
+            WHERE genre = ? COLLATE NOCASE
             ORDER BY {_EFFECTIVE_ARTIST} COLLATE NOCASE,
                      CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}

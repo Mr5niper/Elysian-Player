@@ -93,7 +93,8 @@ class Api:
         self._library_refresh_at = 0.0
         self._library_summary = {"tracks": 0, "artists": 0, "albums": 0,
                                  "genres": 0, "duration": 0.0, "roots": []}
-        self._library_browser = {"view": "albums", "items": [], "revision": 0}
+        self._library_browser = {"view": "albums", "items": [], "needle": "",
+                                 "revision": 0}
         self._library_detail = {"kind": "", "key": "", "key2": "",
                                 "title": "", "items": [], "revision": 0}
         # Cover art, resolved only for the cards actually on screen. A
@@ -1047,27 +1048,34 @@ class Api:
         self._library_scanning = False
         self._set_status(f"Library scan failed: {message}")
 
-    def _do_library_browser(self, view) -> None:
-        view = view if view in ("albums", "artists", "genres") else "albums"
+    def _do_library_browser(self, view, needle="") -> None:
+        view = (view if view in ("albums", "artists", "genres", "songs")
+                else "albums")
+        needle = str(needle or "")
 
         def work():
+            # Filtering happens here rather than in the frontend, which can
+            # only match what it has already been sent: a song title is not
+            # in the album list, so searching for one found nothing.
             try:
                 if view == "artists":
-                    items = self._library.artists()
+                    items = self._library.artists(needle)
                 elif view == "genres":
-                    items = self._library.genres()
+                    items = self._library.genres(needle)
+                elif view == "songs":
+                    items = self._library.songs(needle)
                 else:
-                    items = self._library.albums()
+                    items = self._library.albums(needle)
             except Exception:
                 log.exception("library browser query failed")
                 items = []
-            self._post("library_browser_ready", view, items)
+            self._post("library_browser_ready", view, items, needle)
 
         threading.Thread(target=work, name="elysian-lib-browse",
                          daemon=True).start()
 
-    def _do_library_browser_ready(self, view, items) -> None:
-        if view == "albums":
+    def _do_library_browser_ready(self, view, items, needle="") -> None:
+        if view == "albums" and not needle:
             # Fill in the whole library in the background. Anything already
             # cached or queued is skipped, so a refresh during a scan does
             # not re-queue what is already done.
@@ -1076,6 +1084,7 @@ class Api:
                  for i in (items or [])])
         self._library_browser_revision += 1
         self._library_browser = {"view": view, "items": items,
+                                 "needle": needle,
                                  "revision": self._library_browser_revision}
         self._settings["library_view"] = view
         settings_store.save(self._settings)
@@ -1260,8 +1269,8 @@ class Api:
     def library_cancel_scan(self) -> None:
         self._library.cancel()
 
-    def library_request_browser(self, view) -> None:
-        self._post("library_browser", str(view))
+    def library_request_browser(self, view, needle="") -> None:
+        self._post("library_browser", str(view), str(needle or ""))
 
     def library_request_detail(self, kind, key, key2="") -> None:
         self._post("library_detail", str(kind), str(key), str(key2 or ""))
