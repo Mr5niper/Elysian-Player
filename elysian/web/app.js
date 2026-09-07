@@ -1099,6 +1099,36 @@ $("libgrid").addEventListener("scroll", () => {
   libArtTimer = setTimeout(reportVisibleArt, 90);
 }, { passive: true });
 
+/* The only place that knows the shape of a library_get_art reply. It
+   returns an envelope, not a map of covers; assigning that envelope
+   straight to the cache replaced every cover with the words seq, art and
+   reset, which is what emptied the grid after a tab switch. */
+function collectArt(since) {
+  const a = api();
+  if (!a || typeof a.library_get_art !== "function") return;
+  a.library_get_art(since).then((m) => {
+    if (!m || typeof m !== "object") return;
+    // A backend that has restarted, or forgotten misses, reports a
+    // sequence behind ours; start again rather than keeping stale keys.
+    if (m.reset) { libArt = {}; libArtSeen = new Set(); }
+    libArtSeq = m.seq || 0;
+    const fresh = m.art || {};
+    const keys = Object.keys(fresh);
+    if (!keys.length && !m.reset) return;
+    for (const k of keys) libArt[k] = fresh[k];
+    // Anything the backend has forgotten should be asked for again: it
+    // drops "no cover" answers when the index changes, since an album that
+    // was half indexed when it was asked may have gained the track
+    // carrying the artwork since.
+    for (const key of Array.from(libArtSeen)) {
+      if (!(key in libArt)) libArtSeen.delete(key);
+    }
+    paintLibArt(keys);
+    libArtWaiting = visibleAlbumKeys().length > 0;
+    if (libDetail && libDetail.kind === "album") renderLibCover();
+  }).catch(() => {});
+}
+
 function paintLibArt(keys) {
   const grid = $("libgrid");
   if (keys && keys.length) {
@@ -1402,11 +1432,7 @@ function applyLibraryTick(tick) {
       // Resync rather than assume: the backend only announces art it has
       // just resolved, so anything it already had would otherwise never
       // reach a frontend whose cache has been reset.
-      a.library_get_art().then((m) => {
-        if (!m) return;
-        libArt = m;
-        paintLibArt();
-      }).catch(() => {});
+      collectArt(0);
     }).catch(() => {});
   }
   if (tick.library_detail_revision !== libDetailRevision) {
@@ -1422,27 +1448,7 @@ function applyLibraryTick(tick) {
   }
   if (tick.library_art_revision !== libArtRevision) {
     libArtRevision = tick.library_art_revision;
-    a.library_get_art(libArtSeq).then((m) => {
-      if (!m) return;
-      // A backend that has restarted, or forgotten misses, reports a
-      // sequence behind ours; start again rather than keeping stale keys.
-      if (m.reset) { libArt = {}; libArtSeen = new Set(); }
-      libArtSeq = m.seq || 0;
-      const fresh = m.art || {};
-      const keys = Object.keys(fresh);
-      if (!keys.length && !m.reset) return;
-      for (const k of keys) libArt[k] = fresh[k];
-      // Anything the backend has forgotten should be asked for again. It
-      // drops "no cover" answers when the index changes, since an album
-      // that was half indexed when it was asked may have gained the track
-      // carrying the artwork since.
-      for (const key of Array.from(libArtSeen)) {
-        if (!(key in libArt)) libArtSeen.delete(key);
-      }
-      paintLibArt(keys);
-      libArtWaiting = visibleAlbumKeys().length > 0;
-      if (libDetail && libDetail.kind === "album") renderLibCover();
-    }).catch(() => {});
+    collectArt(libArtSeq);
   }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
