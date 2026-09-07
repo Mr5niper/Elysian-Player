@@ -900,7 +900,7 @@ document.addEventListener("keydown", (e) => {
    and content-visibility keeps offscreen cards off the layout budget
    without the machinery that the track list genuinely needs. */
 
-let libView = "albums";          // albums | artists | genres
+let libView = "albums";          // albums | artists | genres | songs
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
 // Set just before requesting an album's detail for a card double-click,
@@ -1405,8 +1405,6 @@ function playAlbumCardFromStart(item) {
   libPlayAlbumOnDetail = { album: item.album || "", artist: item.album_artist || "" };
   a.library_request_detail("album", item.album, item.album_artist);
 }
-
-const LIB_VIEWS = ["albums", "artists", "genres", "songs"];
 
 function setLibView(name) {
   if (libView === name) return;

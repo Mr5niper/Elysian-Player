@@ -452,7 +452,7 @@ class LibraryService:
         rows = self._rows(f"""
             SELECT COUNT(*) AS tracks,
                    COUNT(DISTINCT {_EFFECTIVE_ARTIST}) AS artists,
-                   COUNT(DISTINCT {_EFFECTIVE_ALBUM}) AS albums,
+                   COUNT(DISTINCT {_EFFECTIVE_ALBUM} || char(31) || ({_GROUP_ARTIST})) AS albums,
                    COUNT(DISTINCT NULLIF(genre,'')) AS genres,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
