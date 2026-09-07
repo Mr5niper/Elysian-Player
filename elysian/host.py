@@ -56,11 +56,13 @@ def run() -> int:
     # opening a second player.
     lock = single_instance.try_acquire()
     if lock is None:
-        opened = _argv_paths()
-        if opened and single_instance.hand_off(opened):
+        # A copy is already running: hand it whatever was opened, or
+        # nothing at all, and let it raise its own window. Launching the
+        # exe again should bring that one forward, never open a second.
+        if single_instance.hand_off(_argv_paths()):
             return 0
-        if not opened and single_instance.hand_off([]):
-            return 0
+        log.warning("another copy is running but would not answer; "
+                    "starting anyway")
 
     api = Api()
     api._assert_bridge_surface()
