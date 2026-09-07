@@ -806,6 +806,25 @@ $("titlebar").addEventListener("dblclick", (e) => {
 
 $("filter").addEventListener("input", () => renderList(true));
 
+/* True for anything the keyboard should be going into rather than the
+   player. Covers text fields, textareas, selects and contenteditable, so a
+   field added later is exempt without anyone having to remember to add it
+   here. Buttons, checkboxes and sliders are not: those want the arrow and
+   space keys to mean what the browser makes them mean. */
+const NOT_TYPING = new Set([
+  "button", "checkbox", "color", "file", "hidden", "image",
+  "radio", "range", "reset", "submit",
+]);
+
+function isTypingTarget(el) {
+  if (!el || !el.tagName) return false;
+  if (el.isContentEditable) return true;
+  const tag = el.tagName.toUpperCase();
+  if (tag === "TEXTAREA" || tag === "SELECT") return true;
+  if (tag !== "INPUT") return false;
+  return !NOT_TYPING.has((el.type || "text").toLowerCase());
+}
+
 document.addEventListener("keydown", (e) => {
   if (modalOpen()) {
     // The dialog owns the keyboard: Escape declines, and Enter or Space
@@ -814,8 +833,18 @@ document.addEventListener("keydown", (e) => {
     if (e.key === "Escape") { e.preventDefault(); closeConfirm(); }
     return;
   }
-  if (e.target === $("filter")) {
-    if (e.key === "Escape") { $("filter").value = ""; $("filter").blur(); renderList(true); }
+  // Anything being typed into owns the keyboard. Naming the one filter
+  // box meant every field added later, the library filter among them,
+  // silently fired the transport shortcuts: a space in a search box
+  // paused the music and the arrows seeked.
+  if (isTypingTarget(e.target)) {
+    if (e.key === "Escape") {
+      const field = e.target;
+      field.value = "";
+      field.blur();
+      if (field === $("filter")) renderList(true);
+      else if (field === $("libfilter")) renderLibrary();
+    }
     return;
   }
   const k = e.key;
