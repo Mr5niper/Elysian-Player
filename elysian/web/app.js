@@ -50,6 +50,10 @@ function setView(name) {
   $("view-now").classList.toggle("hidden", name !== "now");
   $("view-list").classList.toggle("hidden", name !== "playlists");
   $("view-library").classList.toggle("hidden", name !== "library");
+  // Add files and Add folder put tracks in the playlist, so they have
+  // nothing to do with the library, which has its own Folders panel.
+  document.querySelector(".headicons")
+          .classList.toggle("hidden", name === "library");
   $("panel-title").textContent =
     name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>

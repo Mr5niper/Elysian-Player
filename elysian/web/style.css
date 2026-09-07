@@ -86,6 +86,10 @@ html, body {
 }
 .panelhead h1 { font-size: 15px; font-weight: 500; }
 .headicons { display: flex; gap: 14px; color: var(--muted); }
+/* Hidden in the library, where they would act on the playlist behind it.
+   No global .hidden rule exists, so this class needs its own, declared
+   after the base or it would lose on source order. */
+.headicons.hidden { display: none; }
 .headicons svg { width: 16px; height: 16px; }
 .headicons svg:hover { stroke: var(--text); }
 
