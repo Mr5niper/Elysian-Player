@@ -534,12 +534,16 @@ class LibraryService:
         return rows
 
     def songs(self, needle="", limit=3000) -> list:
-        """Individual tracks, for the songs tab.
+        """Individual tracks, grouped by album the way artists and genres are.
 
-        Capped rather than unbounded: a large collection is tens of
-        thousands of rows, and every one of them would be built into the
-        page. The cap is reported so the pane can say the list was cut
-        short rather than quietly lying about what is there.
+        Ordered in SQL as well as in Python: the cap has to take a
+        meaningful first slice, and without an ORDER BY the rows it keeps
+        are whatever the table happened to yield.
+
+        Capped rather than unbounded because a large collection is tens of
+        thousands of rows, every one of which would be built into the page.
+        The cap is reported so the pane can say the list was cut short
+        rather than quietly lying about what is there.
         """
         clause, args = self._match(needle, ("title", "artist", "album"))
         where = f"WHERE {clause}" if clause else ""
@@ -548,12 +552,25 @@ class LibraryService:
                    duration, track_number, disc_number, year
             FROM tracks
             {where}
+            ORDER BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
+                     CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
+                     year, album COLLATE NOCASE, {_TRACK_ORDER}
             LIMIT ?
         """, tuple(args) + (int(limit) + 1,))
         truncated = len(rows) > limit
         if truncated:
             rows = rows[:limit]
-        rows.sort(key=lambda r: (sort_key(r["title"]), sort_key(r["artist"])))
+        # Re-sorted here so leading punctuation is ignored, which SQL
+        # collation cannot do; within an album the SQL order is kept.
+        rows.sort(key=lambda r: (
+            sort_key(r["album_artist"] or r["artist"]),
+            1 if not (r["album"] or "").strip() else 0,
+            r["year"] or 0,
+            sort_key(r["album"]),
+            max(r["disc_number"] or 1, 1),
+            r["track_number"] or 0,
+            sort_key(r["title"]),
+        ))
         for row in rows:
             row["truncated"] = truncated
         return rows

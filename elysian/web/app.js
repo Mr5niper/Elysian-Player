@@ -1040,14 +1040,33 @@ function renderLibrary() {
     // the buttons above act on the selection, so there is nothing to
     // drill into: a song is already the thing you wanted.
     grid.classList.add("aslist");
-    grid.innerHTML = rows.map((t) => `
-      <div class="librow song" data-path="${esc(t.path)}">
-        <div class="n"></div>
+    // Broken into album sections, as the artist and genre views are. The
+    // backend returns them in album order, so this only has to notice
+    // where one ends and the next begins. Track number replaces the blank
+    // first column, and the album is dropped from the row since the
+    // heading above already carries it.
+    const out = [];
+    let section = null;
+    for (const t of rows) {
+      const who = t.album_artist || t.artist || "";
+      const key = `${who}\u0000${t.album || ""}`;
+      if (key !== section) {
+        section = key;
+        const bits = [];
+        if (who) bits.push(`<span class="by">${esc(who)}</span>`);
+        if (t.year) bits.push(`<span class="yr">${t.year}</span>`);
+        out.push(`<div class="libsection">${esc(t.album || "Not part of an album")}`
+                 + `${bits.join("")}</div>`);
+      }
+      out.push(`<div class="librow song" data-path="${esc(t.path)}">
+        <div class="n">${t.track_number || ""}</div>
         <div class="t">${esc(t.title)}</div>
         <div class="a">${esc(t.artist)}</div>
-        <div class="al">${esc(t.album)}</div>
+        <div class="al"></div>
         <div class="d">${fmt(t.duration || 0)}</div>
-      </div>`).join("");
+      </div>`);
+    }
+    grid.innerHTML = out.join("");
     paintLibSelection();
   } else {
     // Artists and genres are a list rather than a grid: there is no
