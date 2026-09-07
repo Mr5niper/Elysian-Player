@@ -18,6 +18,7 @@ import json
 import os
 import sys
 import threading
+import time
 import uuid
 
 from .logs import get as _get_logger
@@ -53,11 +54,40 @@ def _token() -> str:
 
 
 class _Lock:
-    """Marks this process as the owner of the channel."""
+    """Marks this process as the owner of the channel.
+
+    Also carries anything handed over before the player was ready to act
+    on it. Listening began when ownership was claimed, which is seconds
+    before the window exists: a second launch in that gap used to find
+    nothing listening, decide it was the only copy, and open a second
+    player.
+    """
 
     def __init__(self, name: str):
         self.name = name
         self.closed = False
+        self.on_paths = None
+        self.pending = []
+        self.lock = threading.Lock()
+
+    def deliver(self, paths) -> None:
+        with self.lock:
+            handler = self.on_paths
+            if handler is None:
+                self.pending.append(list(paths))
+                return
+        handler(paths)
+
+    def attach(self, on_paths) -> None:
+        """Install the real handler and flush whatever arrived early."""
+        with self.lock:
+            self.on_paths = on_paths
+            waiting, self.pending = self.pending, []
+        for paths in waiting:
+            try:
+                on_paths(paths)
+            except Exception:
+                log.exception("could not act on an early hand-off")
 
     def close(self) -> None:
         self.closed = True
@@ -175,7 +205,7 @@ def _win_hand_off(paths) -> bool:
         _close(handle)
 
 
-def _win_serve(lock, on_paths) -> threading.Thread:
+def _win_listen(lock) -> threading.Thread:
     expected = _token()
 
     def loop():
@@ -200,7 +230,7 @@ def _win_serve(lock, on_paths) -> threading.Thread:
                 paths = [p for p in data.get("paths", [])
                          if isinstance(p, str) and os.path.isfile(p)]
                 _write(handle, b"ok")
-                on_paths(paths)
+                lock.deliver(paths)
             except Exception:
                 log.warning("bad hand-off from another instance", exc_info=True)
                 continue
@@ -225,7 +255,9 @@ def _unix_try_acquire():
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.bind(UNIX_SOCKET)
         s.listen(4)
-        return s
+        held = _Lock(UNIX_SOCKET)
+        held.sock = s
+        return held
 
     try:
         return bind()
@@ -263,7 +295,8 @@ def _unix_hand_off(paths) -> bool:
         return False
 
 
-def _unix_serve(sock, on_paths) -> threading.Thread:
+def _unix_listen(lock) -> threading.Thread:
+    sock = lock.sock
     expected = _token()
 
     def loop():
@@ -295,7 +328,7 @@ def _unix_serve(sock, on_paths) -> threading.Thread:
                     paths = [p for p in data.get("paths", [])
                              if isinstance(p, str) and os.path.isfile(p)]
                     conn.sendall(b"ok")
-                    on_paths(paths)
+                    lock.deliver(paths)
                 except Exception:
                     log.warning("bad hand-off from another instance",
                                 exc_info=True)
@@ -316,32 +349,77 @@ def try_acquire():
     before single-instance existed.
     """
     try:
-        if IS_WINDOWS:
-            return _win_try_acquire()
-        return _unix_try_acquire()
+        lock = _win_try_acquire() if IS_WINDOWS else _unix_try_acquire()
     except Exception:
         log.warning("single-instance check unavailable; starting without it",
                     exc_info=True)
         return _Lock("unavailable")
+    if lock is None:
+        return None
+    # Listen straight away. Waiting until the window was ready left several
+    # seconds during which a second launch found nothing listening and
+    # opened itself; anything handed over in the meantime is held on the
+    # lock until serve() installs the real handler.
+    try:
+        if IS_WINDOWS:
+            _win_listen(lock)
+        else:
+            _unix_listen(lock)
+    except Exception:
+        log.error("could not listen for other instances", exc_info=True)
+    return lock
+
+
+def _allow_foreground() -> None:
+    """Let the running copy take the foreground from us.
+
+    Windows only permits the process that currently owns the foreground to
+    give it away. This process does, having just been launched, and the one
+    being handed to does not: without this its window can only flash in the
+    taskbar instead of coming forward.
+    """
+    if not IS_WINDOWS:
+        return
+    try:
+        import ctypes
+
+        ASFW_ANY = -1
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.AllowSetForegroundWindow.argtypes = [ctypes.c_ulong]
+        user32.AllowSetForegroundWindow.restype = ctypes.c_bool
+        user32.AllowSetForegroundWindow(ctypes.c_ulong(ASFW_ANY))
+    except Exception:
+        log.debug("could not release the foreground", exc_info=True)
 
 
 def hand_off(paths) -> bool:
-    """Give these paths to the running instance. True if it accepted."""
-    try:
-        if IS_WINDOWS:
-            return _win_hand_off(paths)
-        return _unix_hand_off(paths)
-    except Exception:
-        log.debug("hand-off unavailable", exc_info=True)
-        return False
+    """Give these paths to the running instance. True if it accepted.
+
+    Retried briefly: the owner is momentarily without a pipe between one
+    hand-off and the next, and giving up on the first miss would open a
+    second player over a gap of a millisecond.
+    """
+    _allow_foreground()
+    for attempt in range(6):
+        try:
+            if _win_hand_off(paths) if IS_WINDOWS else _unix_hand_off(paths):
+                return True
+        except Exception:
+            log.debug("hand-off attempt failed", exc_info=True)
+        time.sleep(0.15)
+    return False
 
 
 def serve(lock, on_paths):
-    """Listen for hand-offs from later instances."""
-    try:
-        if IS_WINDOWS:
-            return _win_serve(lock, on_paths)
-        return _unix_serve(lock, on_paths)
-    except Exception:
-        log.error("could not listen for other instances", exc_info=True)
+    """Install the handler for hand-offs, and replay any that came early.
+
+    Listening itself started in try_acquire(); this only says what to do
+    with what arrives.
+    """
+    if lock is None:
         return None
+    try:
+        lock.attach(on_paths)
+    except Exception:
+        log.error("could not accept hand-offs", exc_info=True)
+    return None
