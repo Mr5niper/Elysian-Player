@@ -156,7 +156,7 @@ class Api:
             "library_detail_revision": 0, "library_art_revision": 0,
             "library_scanning": False,
             "play_context_source": "playlist", "play_context_kind": "",
-            "play_context_title": "",
+            "play_context_title": "", "current_path": "",
         }
         self._full: dict = {"tracks": [], "title": "", "artist": "",
                             "art": None, "revision": -1}
@@ -418,6 +418,10 @@ class Api:
                 "play_context_source": self._play_context["source"],
                 "play_context_kind": self._play_context["kind"],
                 "play_context_title": self._play_context["title"],
+                # So the library views can show the same play indicator the
+                # playlist does, next to whichever row matches this path,
+                # without leaving the library to see what is playing.
+                "current_path": track.path if track else "",
             }
             if self._revision != self._full_revision:
                 self._full_revision = self._revision

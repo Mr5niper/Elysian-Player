@@ -488,6 +488,10 @@ html, body {
   padding: 0 10px; border-radius: 7px; font-size: 12.5px;
 }
 .librow:hover { background: rgba(255,255,255,0.05); }
+/* Same treatment as the playlist's own playing row, so a track looks the
+   same whether you are watching it from the playlist or from the library. */
+.librow.playing { background: var(--accent-wash); }
+.librow.playing .t { color: var(--accent-hi); font-weight: 500; }
 /* The songs list can hold thousands of rows. Offscreen ones are kept out
    of the layout budget the same way the album cards are. */
 .librow.song { content-visibility: auto; contain-intrinsic-size: auto 30px; }

@@ -923,6 +923,41 @@ let libArtSeen = new Set();      // already asked for, so no repeats
 let libCards = new Map();        // album key -> its card element
 let libGridSig = "";             // what the grid currently shows
 let libArtWaiting = false;       // covers asked for but not yet collected
+
+// The path of the track currently playing, and where to find its row
+// without walking the list. The songs and detail lists are not
+// virtualised the way the playlist is, so scanning every row on every
+// tick - as a large library easily has tens of thousands of them - would
+// cost real time for something that changes once per track. A map from
+// path to element, rebuilt only when the rows themselves change, keeps
+// showing or moving the indicator to two lookups regardless of list size.
+let libPlayingPath = "";
+let libPlayingRow = null;
+let libRowsByPath = new Map();
+
+function rebuildLibRowIndex() {
+  libRowsByPath = new Map();
+  document.querySelectorAll("#libtracks .librow, #libgrid .librow.song")
+          .forEach((row) => libRowsByPath.set(row.dataset.path, row));
+  libPlayingRow = null;         // the old reference no longer points at a
+                                 // live row after the rebuild that just ran
+  paintLibPlaying();
+}
+
+function paintLibPlaying() {
+  if (libPlayingRow) {
+    libPlayingRow.classList.remove("playing");
+    const cell = libPlayingRow.querySelector(".n");
+    if (cell) cell.textContent = libPlayingRow.dataset.num || "";
+    libPlayingRow = null;
+  }
+  const row = libPlayingPath ? libRowsByPath.get(libPlayingPath) : null;
+  if (!row) return;
+  row.classList.add("playing");
+  const cell = row.querySelector(".n");
+  if (cell) cell.textContent = "\u25B6";
+  libPlayingRow = row;
+}
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -1070,7 +1105,7 @@ function renderLibrary() {
         out.push(`<div class="libsection">${esc(album || "Not part of an album")}`
                  + `${bits.join("")}</div>`);
       }
-      out.push(`<div class="librow song" data-path="${esc(t.path)}">
+      out.push(`<div class="librow song" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
         <div class="n">${t.track_number || ""}</div>
         <div class="t">${esc(t.title)}</div>
         <div class="a">${esc(t.artist)}</div>
@@ -1080,6 +1115,7 @@ function renderLibrary() {
     }
     grid.innerHTML = out.join("");
     paintLibSelection();
+    rebuildLibRowIndex();
   } else {
     // Artists and genres are a list rather than a grid: there is no
     // artwork to show, and a name reads better on one line than boxed.
@@ -1098,7 +1134,7 @@ function renderLibrary() {
 }
 
 function trackRow(t, showAlbum) {
-  return `<div class="librow" data-path="${esc(t.path)}">
+  return `<div class="librow" data-path="${esc(t.path)}" data-num="${t.track_number || ""}">
       <div class="n">${t.track_number || ""}</div>
       <div class="t">${esc(t.title)}</div>
       <div class="a">${esc(t.artist)}</div>
@@ -1304,6 +1340,7 @@ function renderLibTracks(items) {
     // since its rows can come from anywhere.
     box.innerHTML = items.map((t) => trackRow(t, kind !== "album")).join("");
     paintLibSelection();
+    rebuildLibRowIndex();
     return;
   }
   const html = [];
@@ -1323,6 +1360,7 @@ function renderLibTracks(items) {
   }
   box.innerHTML = html.join("");
   paintLibSelection();
+  rebuildLibRowIndex();
 }
 
 function paintLibSelection() {
@@ -1379,7 +1417,6 @@ function playLibraryContextFrom(startPath) {
   const p = payload && payload.paths && payload.paths.length
     ? payload : { paths: [startPath], startPath, kind: "", title: "" };
   a.library_play_context(p.paths, p.startPath, p.kind, p.title);
-  setView("playlists");
 }
 
 function orderedSelectedLibraryPaths() {
@@ -1571,7 +1608,6 @@ $("lib-play").addEventListener("click", () => {
                                    : (libDetail.title || ""))
     : (libView === "songs" ? "Songs" : "");
   a.library_play_context(paths, paths[0], kind, title);
-  setView("playlists");
 });
 $("lib-folders").addEventListener("click", () => {
   libShowFolders = !libShowFolders;
@@ -1649,7 +1685,6 @@ function applyLibraryTick(tick) {
         const paths = (d.items || []).map((t) => t.path).filter(Boolean);
         if (paths.length) {
           a.library_play_context(paths, paths[0], "album", d.title || "");
-          setView("playlists");
         }
         return;
       }
@@ -1734,6 +1769,10 @@ function applyTick(s) {
 
   state.current_id = s.current_id;
   state.playing = playing;
+  if (s.current_path !== libPlayingPath) {
+    libPlayingPath = s.current_path || "";
+    paintLibPlaying();
+  }
   state.position = position;
   state.duration = s.duration;
   state.shuffle = shuffle;
