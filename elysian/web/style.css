@@ -517,7 +517,7 @@ html, body {
    which an inline row does not do: a fixed, more modest size reads as part
    of the grid instead of a full pane bolted under it. */
 #libgrid > #libdetail #libcover {
-  --cover: 220px; max-height: none;
+  max-height: none;
 }
 /* Every track shown at once, no inner scrollbar: the grid around it
    already scrolls, so a second nested scroll region here would fight it
