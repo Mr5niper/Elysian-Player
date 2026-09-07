@@ -546,7 +546,11 @@ class LibraryService:
         budget. It is reported when reached, so the pane can say the list
         was cut short rather than quietly lying about what is there.
         """
-        clause, args = self._match(needle, ("title", "artist", "album"))
+        # Titles only. Matching the album name as well returned every track
+        # on an album whose title happened to contain the search, which is
+        # what the albums tab is for; here the rows are songs, so the
+        # search should be too.
+        clause, args = self._match(needle, ("title",))
         where = f"WHERE {clause}" if clause else ""
         rows = self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
