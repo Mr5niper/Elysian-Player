@@ -1605,7 +1605,19 @@ class Api:
                    [str(p) for p in (paths or []) if p], dict(changes or {}))
 
     def library_get_editor_state(self) -> dict:
-        return dict(self._library_editor)
+        src = self._library_editor
+        return {
+            "open": bool(src.get("open", False)),
+            "loading": bool(src.get("loading", False)),
+            "saving": bool(src.get("saving", False)),
+            "paths": list(src.get("paths", [])),
+            "count": int(src.get("count", 0) or 0),
+            "data": dict(src.get("data", {})),
+            "mixed": dict(src.get("mixed", {})),
+            "errors": list(src.get("errors", [])),
+            "saved": int(src.get("saved", 0) or 0),
+            "failed": int(src.get("failed", 0) or 0),
+        }
 
     # ---- bridge: enqueue and return immediately -------------------------
     # Each of these can touch a file on a network share, so none of them may

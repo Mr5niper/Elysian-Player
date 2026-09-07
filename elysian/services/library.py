@@ -795,6 +795,116 @@ class LibraryService:
                 con.close()
         return [found[p] for p in wanted if p in found]
 
+    def _read_fresh(self, paths) -> dict:
+        """Read exact files once. Returns {path: fresh_row_dict}.
+
+        Shared by edit_payload and refresh_paths so a file is only ever
+        opened once for either purpose: reading it to populate the editor
+        and reading it to reindex after a save are the same operation on
+        the same file, and used to happen twice for no reason whenever
+        edit_payload called refresh_paths afterward. fresh_row_dict carries
+        everything either caller needs - key and dir for the database
+        write, the editable fields for the form - so this is the only
+        place that has to know both.
+        """
+        fresh = {}
+        for path in paths:
+            try:
+                meta = read_metadata(path)
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            except Exception:
+                log.exception("could not read %s", path)
+                continue
+            fresh[path] = {
+                "path": path, "key": pathutil.key(path),
+                "dir": pathutil.key(os.path.dirname(path)),
+                "modified_at": float(mtime or 0.0),
+                "title": meta.get("title", "") or Path(path).stem,
+                "artist": meta.get("artist", ""), "album": meta.get("album", ""),
+                "album_artist": (meta.get("album_artist", "")
+                                or meta.get("artist", "")),
+                "genre": meta.get("genre", ""),
+                "duration": float(meta.get("length", 0.0) or 0.0),
+                "track_number": int(meta.get("track_number", 0) or 0),
+                "track_total": int(meta.get("track_total", 0) or 0),
+                "disc_number": int(meta.get("disc_number", 0) or 0),
+                "disc_total": int(meta.get("disc_total", 0) or 0),
+                "year": int(meta.get("year", 0) or 0),
+                "compilation": int(meta.get("compilation", 0) or 0),
+            }
+        return fresh
+
+    def _write_changed(self, fresh_by_path) -> int:
+        """Upsert already-read rows, skipping any that already match.
+
+        Takes rows _read_fresh already produced rather than reading paths
+        itself, so the compare-before-write optimization and the
+        single-read guarantee both hold no matter which caller reaches
+        this: neither has to read a file to find out whether the other
+        already did.
+        """
+        if not fresh_by_path:
+            return 0
+        by_key = {row["key"]: path for path, row in fresh_by_path.items()}
+        current = {}
+        with self._lock:
+            con = self._connect()
+            try:
+                keys = list(by_key)
+                for i in range(0, len(keys), 400):
+                    chunk = keys[i:i + 400]
+                    sql = ("SELECT key, title, artist, album, album_artist, "
+                           "genre, duration, track_number, track_total, "
+                           "disc_number, disc_total, year, compilation, "
+                           "modified_at FROM tracks WHERE key IN (%s)"
+                           % ",".join("?" * len(chunk)))
+                    for row in con.execute(sql, chunk):
+                        current[by_key[row["key"]]] = dict(row)
+            except Exception:
+                log.exception("could not read the current rows to compare")
+            finally:
+                con.close()
+
+        now = time.time()
+        rows = []
+        for path, fresh in fresh_by_path.items():
+            existing = current.get(path)
+            if existing is not None:
+                same_mtime = abs(float(existing.get("modified_at") or 0.0)
+                                 - fresh["modified_at"]) < 1e-4
+                same_tags = all(
+                    (abs(existing.get(f, 0.0) - fresh[f]) < 1e-3
+                     if f == "duration" else existing.get(f) == fresh[f])
+                    for f in ("title", "artist", "album", "album_artist",
+                             "genre", "duration", "track_number", "track_total",
+                             "disc_number", "disc_total", "year", "compilation"))
+                if same_mtime and same_tags:
+                    continue   # index already matches the file exactly
+            rows.append((
+                fresh["path"], fresh["key"], fresh["title"], fresh["artist"],
+                fresh["album"], fresh["album_artist"], fresh["genre"],
+                fresh["duration"], fresh["track_number"], fresh["disc_number"],
+                fresh["year"], fresh["compilation"], fresh["dir"],
+                fresh["track_total"], fresh["disc_total"],
+                fresh["modified_at"], now,
+            ))
+        if not rows:
+            return 0
+        with self._lock:
+            con = self._connect()
+            try:
+                for i in range(0, len(rows), BATCH_SIZE):
+                    con.executemany(_UPSERT, rows[i:i + BATCH_SIZE])
+                con.commit()
+            except Exception:
+                log.exception("could not write refreshed tags to the index")
+                return 0
+            finally:
+                con.close()
+        return len(rows)
+
     def edit_payload(self, paths) -> dict:
         """Build the editor's form from the files themselves, not the index.
 
@@ -809,29 +919,23 @@ class LibraryService:
         Reading here also refreshes the index for these exact paths as a
         side effect, so a file looked at through the editor is no longer
         the stale one anywhere else in the library either, whether or not
-        anything about it is actually changed and saved.
+        anything about it is actually changed and saved. The read that
+        builds the form and the read that would otherwise happen again to
+        refresh the index are the same read, done once.
         """
         clean = [str(p) for p in dict.fromkeys(paths) if p]
         if not clean:
             return {"count": 0, "paths": [], "data": {}, "mixed": {}}
 
-        rows = []
-        for path in clean:
-            try:
-                meta = read_metadata(path)
-            except Exception:
-                log.exception("could not read %s for the tag editor", path)
-                continue
-            row = dict(meta)
-            row["path"] = path
-            rows.append(row)
+        fresh = self._read_fresh(clean)
 
         try:
-            self.refresh_paths(clean)
+            self._write_changed(fresh)
         except Exception:
             log.exception("could not refresh the index after reading for "
                           "the editor")
 
+        rows = list(fresh.values())
         data, mixed = {}, {}
         for field in self.EDITABLE_FIELDS:
             values = {row.get(field) for row in rows}
@@ -854,95 +958,11 @@ class LibraryService:
     def refresh_paths(self, paths) -> int:
         """Re-read exact files from disk, and write back only what changed.
 
-        Used right after a tag write, and now also when the editor opens:
-        both already have to read the file in full, since there is no way
-        to know what changed without reading it, but that does not mean
-        the database has to be rewritten too. Comparing the fresh read
-        against what is already stored, and skipping the write when they
-        agree, means looking at a file the index already has right costs a
-        read with no write at all, not just no extra file access. Only
-        modified_at always gets touched when it is out of date, since that
-        is what tells a future scan this file does not need reopening.
+        Used right after a tag write. Reading and the compare-before-write
+        skip both live in _read_fresh and _write_changed now, shared with
+        edit_payload, so this is just their sequence for a plain path list.
         """
-        clean = [p for p in dict.fromkeys(paths) if p]
+        clean = [str(p) for p in dict.fromkeys(paths) if p]
         if not clean:
             return 0
-
-        by_key = {pathutil.key(p): p for p in clean}
-        current = {}
-        with self._lock:
-            con = self._connect()
-            try:
-                keys = list(by_key)
-                for i in range(0, len(keys), 400):
-                    chunk = keys[i:i + 400]
-                    sql = ("SELECT key, title, artist, album, album_artist, "
-                           "genre, duration, track_number, track_total, "
-                           "disc_number, disc_total, year, compilation, "
-                           "modified_at FROM tracks WHERE key IN (%s)"
-                           % ",".join("?" * len(chunk)))
-                    for row in con.execute(sql, chunk):
-                        current[by_key[row["key"]]] = dict(row)
-            except Exception:
-                log.exception("could not read the current rows to compare")
-            finally:
-                con.close()
-
-        now = time.time()
-        rows = []
-        for path in clean:
-            try:
-                meta = read_metadata(path)
-                mtime = os.path.getmtime(path)
-            except OSError:
-                continue
-            except Exception:
-                log.exception("could not re-read %s after editing", path)
-                continue
-            key = pathutil.key(path)
-            dkey = pathutil.key(os.path.dirname(path))
-            fresh = {
-                "title": meta.get("title", "") or Path(path).stem,
-                "artist": meta.get("artist", ""), "album": meta.get("album", ""),
-                "album_artist": (meta.get("album_artist", "")
-                                or meta.get("artist", "")),
-                "genre": meta.get("genre", ""),
-                "duration": float(meta.get("length", 0.0) or 0.0),
-                "track_number": int(meta.get("track_number", 0) or 0),
-                "track_total": int(meta.get("track_total", 0) or 0),
-                "disc_number": int(meta.get("disc_number", 0) or 0),
-                "disc_total": int(meta.get("disc_total", 0) or 0),
-                "year": int(meta.get("year", 0) or 0),
-                "compilation": int(meta.get("compilation", 0) or 0),
-            }
-            existing = current.get(path)
-            if existing is not None:
-                same_mtime = abs(float(existing.get("modified_at") or 0.0)
-                                 - mtime) < 1e-4
-                same_tags = all(
-                    (abs(existing.get(f, 0.0) - fresh[f]) < 1e-3
-                     if f == "duration" else existing.get(f) == fresh[f])
-                    for f in fresh)
-                if same_mtime and same_tags:
-                    continue   # index already matches the file exactly
-            rows.append((
-                path, key, fresh["title"], fresh["artist"], fresh["album"],
-                fresh["album_artist"], fresh["genre"], fresh["duration"],
-                fresh["track_number"], fresh["disc_number"], fresh["year"],
-                fresh["compilation"], dkey, fresh["track_total"],
-                fresh["disc_total"], float(mtime or 0.0), now,
-            ))
-        if not rows:
-            return 0
-        with self._lock:
-            con = self._connect()
-            try:
-                for i in range(0, len(rows), BATCH_SIZE):
-                    con.executemany(_UPSERT, rows[i:i + BATCH_SIZE])
-                con.commit()
-            except Exception:
-                log.exception("could not write refreshed tags to the index")
-                return 0
-            finally:
-                con.close()
-        return len(rows)
+        return self._write_changed(self._read_fresh(clean))
