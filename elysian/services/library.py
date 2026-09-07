@@ -796,13 +796,42 @@ class LibraryService:
         return [found[p] for p in wanted if p in found]
 
     def edit_payload(self, paths) -> dict:
-        """Merge current tags for one or many tracks into one editable form.
+        """Build the editor's form from the files themselves, not the index.
 
-        A field where every track agrees carries that value; a field where
-        they differ comes back blank (or 0) with mixed[field] set, so the
-        editor can show "multiple values" instead of a wrong shared one.
+        The index can be a scan behind on purpose: rescanning is not free,
+        so an unchanged file is never reopened until something about it
+        actually changes. That is the right trade-off for browsing, but
+        wrong for an editor, which has to show what the file actually
+        holds right now, not what the last scan happened to see. A schema
+        upgrade that resets a field until the next rescan is exactly the
+        gap that would otherwise leak into this form.
+
+        Reading here also refreshes the index for these exact paths as a
+        side effect, so a file looked at through the editor is no longer
+        the stale one anywhere else in the library either, whether or not
+        anything about it is actually changed and saved.
         """
-        rows = self.tracks_by_paths(paths)
+        clean = [str(p) for p in dict.fromkeys(paths) if p]
+        if not clean:
+            return {"count": 0, "paths": [], "data": {}, "mixed": {}}
+
+        rows = []
+        for path in clean:
+            try:
+                meta = read_metadata(path)
+            except Exception:
+                log.exception("could not read %s for the tag editor", path)
+                continue
+            row = dict(meta)
+            row["path"] = path
+            rows.append(row)
+
+        try:
+            self.refresh_paths(clean)
+        except Exception:
+            log.exception("could not refresh the index after reading for "
+                          "the editor")
+
         data, mixed = {}, {}
         for field in self.EDITABLE_FIELDS:
             values = {row.get(field) for row in rows}
