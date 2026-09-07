@@ -79,6 +79,21 @@ _TRACK_ORDER = ("CASE WHEN disc_number <= 0 THEN 1 ELSE disc_number END, "
                 "track_number, title COLLATE NOCASE")
 
 
+#: What a track counts as belonging to for album grouping. A track that
+#: says it is part of a compilation, or is tagged with a conventional
+#: "Various Artists" style album artist, is grouped by that regardless of
+#: its own artist; anything else groups strictly by its own artist. That
+#: second half matters: without it, any two unrelated single-artist albums
+#: that happen to share a title - "Greatest Hits" is common - would look
+#: like a multi-artist match and get merged into one card with their
+#: tracks interleaved.
+_GROUP_ARTIST = (
+    "CASE WHEN compilation = 1 "
+    f"OR LOWER(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) IN ('various artists','various','va') "
+    "THEN 'Various Artists' "
+    f"ELSE COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') END"
+)
+
 _LEADING_JUNK = re.compile(r"^[^0-9a-z]+", re.IGNORECASE)
 
 
@@ -470,6 +485,12 @@ class LibraryService:
         band. Grouping by band as well split a compilation into one card
         per contributing artist whenever the album artist tag was missing.
 
+        A compilation is grouped by _GROUP_ARTIST rather than by counting
+        how many artists share a title: two unrelated single-artist albums
+        that happen to be called "Greatest Hits" are not the same release,
+        and merging them on title alone put their tracks in one card,
+        interleaved.
+
         Grouping is case insensitive, or a tagger that wrote NEVERMIND on
         one track and Nevermind on the rest would produce two albums.
         Ordering is done in Python rather than SQL so it can ignore leading
@@ -478,21 +499,18 @@ class LibraryService:
         clause, args = self._match(needle, ("album", "album_artist", "artist"))
         where = f"WHERE {clause}" if clause else ""
         rows = self._rows(f"""
-            SELECT MIN(COALESCE(NULLIF(album,''), 'Unknown Album'))     AS album,
-                   (MAX(compilation) = 1 OR COUNT(DISTINCT COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) > 1 OR LOWER(MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))) IN ('various artists','various','va'))     AS is_comp,
-                   MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist'))     AS only_artist,
+            SELECT MIN({_EFFECTIVE_ALBUM}) AS album,
+                   {_GROUP_ARTIST} AS album_artist,
                    MIN(NULLIF(year,0)) AS year,
                    COUNT(*)      AS tracks,
                    COALESCE(SUM(duration),0) AS duration
             FROM tracks
             {where}
-            GROUP BY COALESCE(NULLIF(album,''), 'Unknown Album') COLLATE NOCASE
+            GROUP BY {_EFFECTIVE_ALBUM} COLLATE NOCASE, {_GROUP_ARTIST} COLLATE NOCASE
         """, tuple(args))
         for row in rows:
-            comp = bool(row.pop("is_comp", 0))
-            only = (row.pop("only_artist", "") or "").strip()
-            row["compilation"] = comp
-            row["album_artist"] = "Various Artists" if comp else only
+            row["compilation"] = row["album_artist"] == "Various Artists"
+
         # Bands first, alphabetically then by year, with compilations after
         # them. An album with no year sorts to the end of its band's run.
         rows.sort(key=lambda r: (
@@ -587,26 +605,43 @@ class LibraryService:
         """Candidate files for an album's cover, best first.
 
         Ordered by disc and track so the first one tried is the opening
-        track, which is the most likely to carry the artwork.
+        track, which is the most likely to carry the artwork. Filtered
+        the same way album_tracks is, so a cover lookup for one card
+        cannot pull an image from a different, same-titled album.
         """
         sql = ("SELECT path FROM tracks WHERE "
                f"{_EFFECTIVE_ALBUM} = ? COLLATE NOCASE")
+        args = [album or "Unknown Album"]
+        if album_artist:
+            sql += f" AND ({_GROUP_ARTIST}) = ? COLLATE NOCASE"
+            args.append(album_artist)
         sql += f" ORDER BY {_TRACK_ORDER} LIMIT 25"
-        return [r["path"] for r in self._rows(sql, (album or "Unknown Album",))]
+        return [r["path"] for r in self._rows(sql, tuple(args))]
 
     def album_tracks(self, album: str, album_artist: str = "") -> list:
+        """Every track on the card identified by (album, album_artist).
+
+        The filter matches _GROUP_ARTIST, not the raw album_artist
+        column: a plain equality check would miss a compilation's
+        tracks, most of which do not literally say "Various Artists",
+        and would pull a different same-titled artist's album into this
+        one otherwise. album_artist is optional only for callers that
+        genuinely want every track under a title regardless of card;
+        every caller in this codebase supplies it, since it always has
+        the value albums() produced.
+        """
         sql = f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
             FROM tracks
             WHERE {_EFFECTIVE_ALBUM} = ? COLLATE NOCASE
         """
-        # No artist filter: the grid shows one card per album, so opening
-        # one has to return the whole album. Filtering by the card's artist
-        # would return nothing at all for a compilation, whose card is
-        # labelled Various Artists rather than any name in the tags.
+        args = [album or "Unknown Album"]
+        if album_artist:
+            sql += f" AND ({_GROUP_ARTIST}) = ? COLLATE NOCASE"
+            args.append(album_artist)
         sql += f" ORDER BY {_TRACK_ORDER}"
-        return self._rows(sql, (album or "Unknown Album",))
+        return self._rows(sql, tuple(args))
 
     def artist_tracks(self, artist: str) -> list:
         # Tracks with no album tag sort last rather than first. Their year

@@ -108,6 +108,14 @@ class Api:
         self._library_art = {}          # key -> [seq, data url or ""]
         self._library_art_seq = 0
         self._library_art_revision = 0
+        # Bumped on every browse or detail request so a query thread that
+        # is still running when a newer one starts can tell it has been
+        # superseded. Without this, a slow query fired first could finish
+        # after a fast one fired later and overwrite it - a filter typed
+        # quickly, a tab switched quickly, or a scan-triggered refresh
+        # landing after a manual request could all show stale results.
+        self._library_browser_gen = 0
+        self._library_detail_gen = 0
         self._library_art_pending = set()
         # Covers are resolved by a fixed set of workers reading one queue,
         # not by a pool taking whatever was submitted first. What matters is
@@ -1027,7 +1035,9 @@ class Api:
         self._set_status(f"Removed {removed} track(s) from the library")
         self._bump_library()
         self._refresh_library_summary()
-        self._do_library_browser(self._library_browser.get("view", "albums"))
+        self._do_library_browser(
+            self._library_browser.get("view", "albums"),
+            self._library_browser.get("needle", ""))
 
     def _do_library_scan(self, root=None) -> None:
         if self._library_scanning:
@@ -1074,7 +1084,9 @@ class Api:
             self._forget_art_misses()
             self._library_revision += 1
             self._refresh_library_summary()
-            self._do_library_browser(self._library_browser.get("view", "albums"))
+            self._do_library_browser(
+                self._library_browser.get("view", "albums"),
+                self._library_browser.get("needle", ""))
 
     def _do_library_scan_done(self, result) -> None:
         self._library_scanning = False
@@ -1091,7 +1103,9 @@ class Api:
             self._set_status(f"Library up to date, {scanned} tracks")
         self._bump_library()
         self._refresh_library_summary()
-        self._do_library_browser(self._library_browser.get("view", "albums"))
+        self._do_library_browser(
+            self._library_browser.get("view", "albums"),
+            self._library_browser.get("needle", ""))
 
     def _do_library_scan_failed(self, message) -> None:
         self._library_scanning = False
@@ -1101,6 +1115,8 @@ class Api:
         view = (view if view in ("albums", "artists", "genres", "songs")
                 else "albums")
         needle = str(needle or "")
+        self._library_browser_gen += 1
+        gen = self._library_browser_gen
 
         def work():
             # Filtering happens here rather than in the frontend, which can
@@ -1118,6 +1134,10 @@ class Api:
             except Exception:
                 log.exception("library browser query failed")
                 items = []
+            if gen != self._library_browser_gen:
+                return  # a newer request has since been made; this result
+                        # is not wrong, just late, and showing it now would
+                        # silently undo whatever the newer one produced
             self._post("library_browser_ready", view, items, needle)
 
         threading.Thread(target=work, name="elysian-lib-browse",
@@ -1139,6 +1159,9 @@ class Api:
         settings_store.save(self._settings)
 
     def _do_library_detail(self, kind, key, key2="") -> None:
+        self._library_detail_gen += 1
+        gen = self._library_detail_gen
+
         def work():
             try:
                 if kind == "album":
@@ -1158,6 +1181,8 @@ class Api:
             except Exception:
                 log.exception("library detail query failed")
                 items, title = [], ""
+            if gen != self._library_detail_gen:
+                return  # superseded by a later drill-in or double-click
             self._post("library_detail_ready", kind, key, key2, title, items)
 
         threading.Thread(target=work, name="elysian-lib-detail",
@@ -1280,9 +1305,10 @@ class Api:
         self._library_art_revision += 1
 
     def _do_library_enqueue(self, paths) -> None:
-        added = self._do_add_audio_paths(paths)
-        if added:
-            self._set_status(f"Added {added} track(s) from the library")
+        # _do_add_audio_paths already sets an "Added N tracks" status; a
+        # second, near-identical one here just overwrites it a moment
+        # later for no benefit.
+        self._do_add_audio_paths(paths)
 
     def _do_library_play_context(self, paths, start_path, kind="", title="") -> None:
         """Replace the active playlist with a library-derived queue and play.
