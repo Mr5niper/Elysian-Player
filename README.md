@@ -92,7 +92,14 @@ unreachable.
   album, and Edit Tags lets you change title, artist, album, album artist,
   genre, track and disc number, year, and compilation. A field left alone
   across a mixed selection is shown blank rather than guessed at, and only
-  the fields you actually touch get written.
+  the fields you actually touch get written. Editing the track that's
+  currently playing pauses it just long enough to save, then picks back up
+  right where it left off.
+* **Queue tracks straight from an open album, artist or genre.** Add to
+  playlist queues whatever's selected, or everything shown if nothing is.
+  Add all to playlist always queues everything regardless of selection, so
+  a partial selection never has to be cleared first just to grab the whole
+  thing.
 * **Opening an album shows its cover next to the track list**, with the year,
   track count and total time underneath. The cover comes from the first
   track in the album that actually carries one, so a compilation whose
@@ -109,10 +116,9 @@ unreachable.
   index, never the files themselves.
 * **Double-click a track anywhere in the library and it keeps playing.**
   Whatever you are currently looking at becomes the active queue, in the
-  order shown, starting from the track you clicked. Double-clicking an
-  album's cover plays that album from the first track without opening it
-  first. The library stays open while this happens, and the currently
-  playing track gets the same marker the playlist uses.
+  order shown, starting from the track you clicked. The library stays open
+  while this happens, and the currently playing track gets the same marker
+  the playlist uses.
 * **The playlist reads its tags from this index.** A track the library has
   already seen needs no file opened at all to show its title and artist,
   which is what makes browsing a large collection on a network share feel

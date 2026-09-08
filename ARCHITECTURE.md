@@ -85,6 +85,20 @@ the last scan happened to see, and refreshes the index for those exact files
 as a side effect of that same read. Saving compares the fresh read against
 what is already indexed and writes only the rows that actually changed.
 
+Saving tags on the file currently loaded for playback needs the engine to
+actually let go of it first, and pausing or stopping playback is not
+enough for that: the decoder underneath keeps the file open regardless of
+playback state, confirmed directly against the backend's own file
+descriptor rather than assumed from the Python-level API looking like it
+should have released it. The only thing that releases a file at all is
+loading a different one over it, which is why `PlaybackEngine.release_file()`
+exists separately from `stop()` - it points the engine at a tiny silent
+file generated on the fly, forcing the previous one closed without playing
+anything audible, then the save flow reloads and resumes the original
+track at its saved position once the write finishes. Anything that
+touches playback state around a tag save should call `release_file()`,
+not `stop()`; `stop()` alone will silently leave the file locked.
+
 ## Frontend implementation notes
 
 `ROW_H` in `app.js` and the `.row` height in `style.css` must stay equal, or
