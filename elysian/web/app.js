@@ -1134,6 +1134,12 @@ function libraryOpened() {
       libView = view;
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
+      libGridSig = "";
+      libItems = [];
+      libDetail = null;
+      libSelected.clear();
+      libAnchor = null;
+      renderLibrary();
       libPending++;
       a.library_request_browser(libView, $("libfilter").value.trim());
       schedule();
@@ -1484,9 +1490,22 @@ function watchLibArt() {
   reportVisibleArt();
 }
 
+function updateCurrentLibTabScrollState() {
+  const st = libTabState[libView];
+  if (!st) return;
+  st.gridScrollTop = $("libgrid").scrollTop;
+  st.detailScrollTop = $("libtracks").scrollTop;
+  st.anchor = captureVisibleLibAnchor();
+}
+
 $("libgrid").addEventListener("scroll", () => {
   clearTimeout(libArtTimer);
   libArtTimer = setTimeout(reportVisibleArt, 90);
+  updateCurrentLibTabScrollState();
+}, { passive: true });
+
+$("libtracks").addEventListener("scroll", () => {
+  updateCurrentLibTabScrollState();
 }, { passive: true });
 
 /* The only place that knows the shape of a library_get_art reply. It
@@ -1749,36 +1768,113 @@ function playAlbumCardFromStart(item) {
 // where the list was scrolled, so switching tabs is a visit, not a reset.
 // Populated lazily; a tab visited for the first time this session simply
 // has nothing to restore.
-let libTabState = { albums: null, artists: null, genres: null, songs: null };
+let libTabState = {
+  albums: null,
+  artists: null,
+  genres: null,
+  songs: null,
+};
+
+function cloneLibDetail(d) {
+  if (!d) return null;
+  return {
+    kind: d.kind || "",
+    key: d.key || "",
+    key2: d.key2 || "",
+    title: d.title || "",
+    items: Array.isArray(d.items) ? d.items.slice() : [],
+    revision: d.revision || 0,
+  };
+}
+
+function captureCurrentLibTabState() {
+  return {
+    view: libView,
+    items: Array.isArray(libItems) ? libItems.slice() : [],
+    detail: cloneLibDetail(libDetail),
+    selected: Array.from(libSelected),
+    anchor: captureVisibleLibAnchor(),
+    gridScrollTop: $("libgrid").scrollTop,
+    detailScrollTop: $("libtracks").scrollTop,
+    stale: false,
+  };
+}
+
+function restoreScrollExactly(gridTop, detailTop) {
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const wantGrid = Math.max(0, Number(gridTop) || 0);
+  const wantTracks = Math.max(0, Number(detailTop) || 0);
+
+  grid.scrollTop = wantGrid;
+  tracks.scrollTop = wantTracks;
+
+  requestAnimationFrame(() => {
+    grid.scrollTop = wantGrid;
+    tracks.scrollTop = wantTracks;
+  });
+}
+
+function restoreLibTabState(saved) {
+  if (!saved) return false;
+
+  libItems = Array.isArray(saved.items) ? saved.items.slice() : [];
+  libDetail = cloneLibDetail(saved.detail);
+  libSelected = new Set(saved.selected || []);
+  libAnchor = null;
+  // Reset, not restored from the snapshot: the grid may currently hold a
+  // different tab's cards or rows, left there by whichever tab was shown
+  // last, and a sig that happens to still match this tab's own data would
+  // skip the rebuild that would otherwise replace that leftover content -
+  // the same class of bug fixed before for Songs during a scan, just
+  // triggered by a tab switch instead this time.
+  libGridSig = "";
+
+  renderLibrary();
+  restoreScrollExactly(saved.gridScrollTop, saved.detailScrollTop);
+  paintLibSelection();
+  paintLibPlaying();
+  return true;
+}
+
+function invalidateLibTabState(name) {
+  const st = libTabState[name];
+  if (st) st.stale = true;
+}
+
+function invalidateAllLibTabState() {
+  invalidateLibTabState("albums");
+  invalidateLibTabState("artists");
+  invalidateLibTabState("genres");
+  invalidateLibTabState("songs");
+}
 
 function setLibView(name) {
   if (libView === name) return;
-  libTabState[libView] = {
-    detail: libDetail
-      ? { kind: libDetail.kind, key: libDetail.key, key2: libDetail.key2 || "" }
-      : null,
-    anchor: captureVisibleLibAnchor(),
-  };
-  libGridSig = "";
+
+  libTabState[libView] = captureCurrentLibTabState();
+
   libView = name;
+  document.querySelectorAll(".libtab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.lib === name));
+
+  const saved = libTabState[name];
+  if (saved && !saved.stale) {
+    restoreLibTabState(saved);
+    return;
+  }
+
+  libGridSig = "";
+  libItems = [];
   libDetail = null;
   libSelected.clear();
   libAnchor = null;
-  document.querySelectorAll(".libtab").forEach((b) =>
-    b.classList.toggle("active", b.dataset.lib === name));
+  renderLibrary();
+
   const a = api();
   if (a) {
     libPending++;
     a.library_request_browser(name, $("libfilter").value.trim());
-    const saved = libTabState[name];
-    if (saved) {
-      scheduleLibScrollRestore(name, saved.anchor);
-      if (saved.detail) {
-        libPending++;
-        a.library_request_detail(saved.detail.kind, saved.detail.key,
-                                 saved.detail.key2);
-      }
-    }
     schedule();
   }
 }
@@ -1891,6 +1987,7 @@ $("libgrid").addEventListener("click", (e) => {
     renderLibrary();
     return;
   }
+  libTabState[libView] = captureCurrentLibTabState();
   libSelected.clear();
   libAnchor = null;
   libPending++;
@@ -1958,6 +2055,11 @@ $("lib-back").addEventListener("click", () => {
   libSelected.clear();
   libAnchor = null;
   renderLibrary();
+  restoreScrollExactly(
+    libTabState[libView] ? libTabState[libView].gridScrollTop : $("libgrid").scrollTop,
+    0
+  );
+  libTabState[libView] = captureCurrentLibTabState();
 });
 $("lib-queue").addEventListener("click", () => {
   const a = api();
@@ -2021,12 +2123,23 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_browser().then((b) => {
       if (!b) return;
-      libView = b.view || libView;
+
+      const incomingView = b.view || libView;
+      libView = incomingView;
       libItems = b.items || [];
+
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
-      libDetail = null;
+
+      const saved = libTabState[libView];
+      if (!(saved && !saved.stale && saved.detail)) {
+        libDetail = null;
+      }
+
       renderLibrary();
+      libTabState[libView] = captureCurrentLibTabState();
+      libTabState[libView].stale = false;
+
       // Resync rather than assume: the backend only announces art it has
       // just resolved, so anything it already had would otherwise never
       // reach a frontend whose cache has been reset.
@@ -2056,6 +2169,8 @@ function applyLibraryTick(tick) {
       libSelected.clear();
       libAnchor = null;
       renderLibrary();
+      libTabState[libView] = captureCurrentLibTabState();
+      libTabState[libView].stale = false;
     }).catch(() => {});
   }
   if (tick.library_art_revision !== libArtRevision) {
@@ -2072,6 +2187,7 @@ function applyLibraryTick(tick) {
   }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
+    invalidateAllLibTabState();
     a.library_get_state().then((st) => {
       if (!st) return;
       const bits = [
