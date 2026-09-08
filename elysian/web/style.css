@@ -456,6 +456,14 @@ html, body {
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   grid-auto-rows: min-content;
   padding-right: 4px;
+  /* The browser's own scroll anchoring tries to keep whatever content was
+     visible in place whenever something changes size nearby, which fights
+     an explicit scrollTop assignment made right after rebuilding the
+     tracklist - it would quietly readjust the scroll again on a later
+     reflow, always toward wherever it decided to anchor instead of
+     wherever was just set. Turned off here since scroll position for
+     this container is handled by hand, deliberately, not left to guess. */
+  overflow-anchor: none;
 }
 /* Artists and genres render as rows, so the grid columns are dropped. */
 #libgrid.aslist { display: block; }

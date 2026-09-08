@@ -2192,15 +2192,27 @@ function restoreLibAlbumAnchor() {
    visible above it is still the lead-in, matching how it first looked
    when opened; just the expansion itself when the window shrank, since
    there may no longer be room to show anything above it too. */
+let libExpandScrollTimer = null;
+
 function scrollExpandedAlbumIntoView(grew) {
   const grid = $("libgrid");
   const detail = $("libdetail");
   if (!detail || detail.parentElement !== grid) return;
-  if (grew && detail.previousElementSibling) {
-    grid.scrollTop = detail.previousElementSibling.offsetTop;
-  } else {
-    grid.scrollTop = detail.offsetTop;
-  }
+  // The target keeps shifting for a few frames after this first runs, as
+  // cards above the panel settle from their placeholder size to their
+  // real one, which left the very first assignment landing short of
+  // where the panel actually ends up once everything has settled. Kept
+  // current here instead of trusted once.
+  let tries = 0;
+  const apply = () => {
+    const target = (grew && detail.previousElementSibling)
+      ? detail.previousElementSibling.offsetTop : detail.offsetTop;
+    grid.scrollTop = target;
+    tries++;
+    if (tries < 20) libExpandScrollTimer = requestAnimationFrame(apply);
+  };
+  if (libExpandScrollTimer) cancelAnimationFrame(libExpandScrollTimer);
+  apply();
 }
 
 let libResizeBaseline = window.innerWidth * window.innerHeight;
