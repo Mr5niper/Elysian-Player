@@ -1215,6 +1215,34 @@ function restoreAlbumViewportAnchor(anchor) {
   return true;
 }
 
+/* Maximize visibility of the expanded album: reveal as much of a cut-off
+   bottom as there's room for, but never scroll far enough to push its own
+   top past the top of the viewport - the cover and track 1 stay on
+   screen even when the whole album can't fit at once. One calculation
+   covers both cases: how far down would fully reveal the bottom, and how
+   far down is available before the top would be hidden, and only the
+   smaller of the two is ever applied. */
+function ensureExpandedAlbumVisible() {
+  const grid = $("libgrid");
+  const detail = $("libdetail");
+  if (!detail || detail.parentElement !== grid) return;
+
+  const gridRect = grid.getBoundingClientRect();
+  const detailRect = detail.getBoundingClientRect();
+
+  const roomBeforeHidingTop = detailRect.top - gridRect.top;
+  if (roomBeforeHidingTop < 0) {
+    // Already scrolled past the top - pull it back regardless of the
+    // bottom, since keeping the top visible always wins.
+    grid.scrollTop += roomBeforeHidingTop;
+    return;
+  }
+  const wantDown = detailRect.bottom - gridRect.bottom;
+  if (wantDown > 0) {
+    grid.scrollTop += Math.min(wantDown, roomBeforeHidingTop);
+  }
+}
+
 function placeInlineAlbumDetail() {
   // Finds the card the expanded album belongs to, then inserts the detail
   // panel right after the last card sharing that card's row, so a grid
@@ -2211,10 +2239,20 @@ function applyLibraryTick(tick) {
         // A single extra frame was not always enough elsewhere in this
         // same grid for card sizes to settle from placeholder to real,
         // so this keeps nudging for a short window rather than trusting
-        // one retry.
+        // one retry. Row stability first, then how much of the newly
+        // expanded album itself is visible.
         let tries = 0;
         const settle = () => {
           restoreAlbumViewportAnchor(anchor);
+          ensureExpandedAlbumVisible();
+          tries++;
+          if (tries < 10) requestAnimationFrame(settle);
+        };
+        settle();
+      } else if (libView === "albums" && d.kind === "album") {
+        let tries = 0;
+        const settle = () => {
+          ensureExpandedAlbumVisible();
           tries++;
           if (tries < 10) requestAnimationFrame(settle);
         };
