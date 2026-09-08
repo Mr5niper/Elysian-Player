@@ -1679,10 +1679,26 @@ function updateCurrentLibTabScrollState() {
   st.anchor = captureVisibleLibAnchor();
 }
 
+let libExpandBorderScrollRaf = 0;
 $("libgrid").addEventListener("scroll", () => {
   clearTimeout(libArtTimer);
   libArtTimer = setTimeout(reportVisibleArt, 90);
   updateCurrentLibTabScrollState();
+  // The border connectors are cheap to recompute but not free, and a
+  // scroll gesture can fire this many times per frame, so this caps it
+  // at once per frame rather than running on every single event. Kept
+  // unconditional rather than gated on an album being open: the function
+  // itself already no-ops correctly when nothing is expanded, and a scroll
+  // is exactly the kind of layout change - a card settling from its
+  // content-visibility placeholder size to its real one as it enters
+  // view chief among them - that every other trigger for this same
+  // measurement already exists to catch, just never for a plain scroll.
+  if (!libExpandBorderScrollRaf) {
+    libExpandBorderScrollRaf = requestAnimationFrame(() => {
+      libExpandBorderScrollRaf = 0;
+      updateExpandedBorderConnectors();
+    });
+  }
 }, { passive: true });
 
 $("libtracks").addEventListener("scroll", () => {
