@@ -43,6 +43,10 @@ class Api:
 
         self._settings = settings_store.load()
         self._current_id = -1
+        # Set only while a tag save is releasing the file the engine has
+        # open for the track it's currently playing or paused on; consumed
+        # once that save finishes, whichever way, to put playback back.
+        self._tag_save_resume = None
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
         self._engine.set_volume(self._settings.get("volume", 0.8))
@@ -1459,6 +1463,22 @@ class Api:
         self._library_editor["saving"] = True
         self._bump_library_editor()
 
+        # Writing tags needs to open the file for write, and on Windows a
+        # file the engine already has open for playback can make that fail
+        # outright rather than partially succeed. Stopping first releases
+        # it; _resume_after_tag_save puts it back once the write, whichever
+        # way it goes, is actually done.
+        self._tag_save_resume = None
+        if self._engine.active and self._engine.path:
+            if pathutil.key(self._engine.path) in pathutil.keys(clean):
+                self._tag_save_resume = {
+                    "id": self._current_id,
+                    "position": self._engine.position,
+                    "playing": self._engine.playing,
+                }
+                self._engine.stop()
+                self._bump()
+
         def work():
             try:
                 result = _write_tags(clean, changes)
@@ -1492,6 +1512,7 @@ class Api:
                 d = self._library_detail
                 self._do_library_detail(d.get("kind", ""), d.get("key", ""),
                                         d.get("key2", ""))
+        self._resume_after_tag_save()
         if failed:
             # Keep the editor open so the failures are visible, rather than
             # closing over a partial save the user never saw happen.
@@ -1508,10 +1529,32 @@ class Api:
                              f"{'s' if ok != 1 else ''}")
 
     def _do_library_save_failed(self, message) -> None:
+        self._resume_after_tag_save()
         self._library_editor["saving"] = False
         self._library_editor["errors"] = [message]
         self._bump_library_editor()
         self._set_status("Could not save tags")
+
+    def _resume_after_tag_save(self) -> None:
+        """Put playback back the way a tag save's file release found it.
+
+        Runs whether the save succeeded, partially failed, or failed
+        outright: whatever happened to the write, stopping the engine to
+        release the file is not something the save should leave behind.
+        Skipped if something else already changed which track is current
+        while the save was in flight - a user who moved on in the meantime
+        should not be pulled back to a track they left.
+        """
+        resume = self._tag_save_resume
+        self._tag_save_resume = None
+        if resume is None or resume["id"] != self._current_id:
+            return
+        if self._playlist.by_id(resume["id"]) is None:
+            return
+        self._do_play_id(resume["id"], resume["position"])
+        if not resume["playing"]:
+            self._engine.pause()
+        self._bump()
 
     def _bump_library_editor(self) -> None:
         self._library_editor_revision += 1
