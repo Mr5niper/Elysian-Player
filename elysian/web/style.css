@@ -521,7 +521,7 @@ html, body {
    the card is only as wide as one column and the panel spans every
    column. */
 .libcard.expanded {
-  border: 2px solid var(--accent);
+  border: 2px solid var(--accent-dim);
   border-bottom: none;
   border-radius: 9px 9px 0 0;
 }
@@ -530,7 +530,7 @@ html, body {
   flex: none; max-height: none;
   margin: 0 0 4px;
   padding: 14px;
-  border: 2px solid var(--accent);
+  border: 2px solid var(--accent-dim);
   border-top: none;
   border-radius: 0 0 9px 9px;
 }
@@ -545,7 +545,7 @@ html, body {
 .lib-expand-connector {
   position: absolute;
   border-style: solid;
-  border-color: var(--accent);
+  border-color: var(--accent-dim);
   border-width: 0;
   pointer-events: none;
 }
