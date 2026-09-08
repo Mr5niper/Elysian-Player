@@ -14,9 +14,32 @@ This replaces the pygame.mixer engine and removes four v1 defects outright:
 """
 
 
+import os
+import tempfile
+import wave
+
 from ..logs import get as _get_logger
 
 log = _get_logger("playback")
+
+
+def _silent_wav_path() -> str:
+    """A tiny, valid, silent WAV file loadable by the backend, generated
+    once per run and reused after that.
+
+    Exists for release_file(): the only way the underlying decoder
+    actually lets go of a file is loading a different one over it, so
+    releasing a file without wanting to play anything else still needs
+    somewhere harmless to point at.
+    """
+    path = os.path.join(tempfile.gettempdir(), "elysian_silence.wav")
+    if not os.path.exists(path):
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(44100)
+            w.writeframes(b"\x00\x00" * 4410)  # 0.1s of silence
+    return path
 
 
 class PlaybackError(RuntimeError):
@@ -119,6 +142,25 @@ class PlaybackEngine:
                 self._backend.stop()
             except Exception:
                 log.debug("stop() raised", exc_info=True)
+        self._path = None
+
+    def release_file(self) -> None:
+        """Actually let go of whatever file is loaded, unlike stop().
+
+        stop() only stops the audio stream; the decoder underneath keeps
+        the file open regardless; confirmed directly against the backend
+        rather than assumed, since it is exactly the kind of thing that
+        looks fixed from the Python side while the OS still disagrees. The
+        only way the backend releases a file at all is loading a
+        different one over it, so this points it at a silent placeholder
+        that never actually plays.
+        """
+        if not self._backend:
+            return
+        try:
+            self._backend.load_file(_silent_wav_path())
+        except Exception:
+            log.warning("could not release the current file", exc_info=True)
         self._path = None
 
     def seek(self, seconds: float) -> None:
