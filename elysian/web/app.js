@@ -1185,6 +1185,8 @@ function restoreInlineAlbumUI() {
   if (detail.parentElement === $("libgrid")) {
     $("libempty").parentElement.insertBefore(detail, $("libempty"));
   }
+  const wasExpanded = $("libgrid").querySelector(".libcard.expanded");
+  if (wasExpanded) wasExpanded.classList.remove("expanded");
   const spacer = $("libcrumb").querySelector(".spacer");
   if (spacer && $("lib-edit").previousElementSibling !== spacer) {
     spacer.insertAdjacentElement("afterend", $("lib-edit"));
@@ -1275,6 +1277,9 @@ function placeInlineAlbumDetail() {
   const card = cards.find((c) => c.dataset.album === (libDetail.key || "")
                                 && c.dataset.artist === (libDetail.key2 || ""));
   if (!card) { detail.classList.add("hidden"); return; }
+
+  cards.forEach((c) => { if (c !== card) c.classList.remove("expanded"); });
+  card.classList.add("expanded");
 
   const top = card.offsetTop;
   const sameRow = cards.filter((c) => Math.abs(c.offsetTop - top) < 4);

@@ -514,12 +514,25 @@ html, body {
    an element that is not one of the grid's own children does nothing, so
    this rule is harmless when #libdetail sits in its normal position for
    an artist or genre. */
+/* Marks whichever album card is the one currently expanded. Its own
+   bottom border is dropped so it opens directly into the panel below,
+   which drops its own top border to match - together they read as one
+   continuous outlined shape rather than two separate boxes, even though
+   the card is only as wide as one column and the panel spans every
+   column. */
+.libcard.expanded {
+  border: 2px solid var(--accent);
+  border-bottom: none;
+  border-radius: 9px 9px 0 0;
+}
 #libgrid > #libdetail {
   grid-column: 1 / -1;
   flex: none; max-height: none;
-  margin: 2px 0 4px;
-  padding-top: 14px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  margin: 0 0 4px;
+  padding: 14px;
+  border: 2px solid var(--accent);
+  border-top: none;
+  border-radius: 0 0 9px 9px;
 }
 /* The viewport-relative cover size assumes filling the rest of the window,
    which an inline row does not do: a fixed, more modest size reads as part
