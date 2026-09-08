@@ -1655,7 +1655,15 @@ function visibleAlbumKeys() {
 function reportVisibleArt() {
   const a = api();
   if (!a || typeof a.library_visible_art !== "function") return;
-  if (libView !== "albums" || libDetail || libShowFolders) return;
+  // libDetail is never checked here: within the Albums tab it only ever
+  // means an album expanded inline, not a view that replaces the grid,
+  // so the grid stays visible and scrollable right alongside it - cards
+  // scrolled into view while one is open still need their covers loaded,
+  // same as any other scrolling. Skipping on libDetail was correct back
+  // when opening an album replaced the grid outright; it silently
+  // stopped loading covers the moment inline expansion made scrolling
+  // past an open album possible at all.
+  if (libView !== "albums" || libShowFolders) return;
   const keys = visibleAlbumKeys();
   if (!keys.length) return;
   keys.forEach((k) => libArtSeen.add(k));
@@ -2019,13 +2027,24 @@ function restoreLibTabState(saved) {
   restoreScrollExactly(saved.gridScrollTop, saved.detailScrollTop);
   paintLibSelection();
   paintLibPlaying();
-  // The border connectors measure real layout that has not necessarily
-  // settled yet right after a rebuild - confirmed directly elsewhere in
-  // this same feature, not assumed - and unlike opening or switching an
-  // album, or resizing, nothing was retrying that measurement here, which
-  // is exactly what left it wrong after leaving a tab and coming back.
+  // Both the border connectors and the exact scroll position measure or
+  // depend on real layout that has not necessarily settled yet right
+  // after a rebuild - confirmed directly elsewhere in this same feature,
+  // not assumed. restoreScrollExactly's own two fixed attempts (now,
+  // next frame) aren't always enough - an inline panel with many tracks
+  // in particular can take longer to reach its final height - and unlike
+  // opening or switching an album, or resizing, nothing was retrying
+  // either one here, which is exactly what could leave a tab's scroll
+  // position wrong, and intermittently so, after leaving it and coming
+  // back.
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const wantGrid = Math.max(0, Number(saved.gridScrollTop) || 0);
+  const wantTracks = Math.max(0, Number(saved.detailScrollTop) || 0);
   let tries = 0;
   const settle = () => {
+    grid.scrollTop = wantGrid;
+    tracks.scrollTop = wantTracks;
     updateExpandedBorderConnectors();
     tries++;
     if (tries < 10) requestAnimationFrame(settle);
