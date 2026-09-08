@@ -167,6 +167,15 @@ function renderWindow(force) {
     if (!wanted.has(id)) { el.remove(); rendered.delete(id); }
   });
 
+  // These rows may belong to an entirely different queue than the last
+  // paint saw - playing a track from the library while this view was
+  // hidden replaces it, and a poll tick in the meantime already updated
+  // prev.currentId to match before any row for it existed. Without this,
+  // paintRowStates would see nothing has "changed" and skip painting the
+  // very rows that were just built, leaving the playing highlight missing
+  // until something else (like a click) forced a repaint.
+  prev.selSig = null;
+  prev.currentId = null;
   paintRowStates();
   requestScanVisible();
 }
