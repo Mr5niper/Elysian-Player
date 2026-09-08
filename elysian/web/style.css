@@ -452,7 +452,7 @@ html, body {
    holds thousands of entries rather than tens of thousands. */
 #libgrid {
   flex: 1; min-height: 0; overflow-y: auto; overflow-x: hidden;
-  display: grid; gap: 12px; align-content: start;
+  display: grid; gap: 12px; align-content: start; position: relative;
   grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
   grid-auto-rows: min-content;
   padding-right: 4px;
@@ -514,13 +514,44 @@ html, body {
    an element that is not one of the grid's own children does nothing, so
    this rule is harmless when #libdetail sits in its normal position for
    an artist or genre. */
+/* Marks whichever album card is the one currently expanded. Its own
+   bottom border is dropped so it opens directly into the panel below,
+   which drops its own top border to match - together they read as one
+   continuous outlined shape rather than two separate boxes, even though
+   the card is only as wide as one column and the panel spans every
+   column. */
+.libcard.expanded {
+  border: 2px solid var(--accent-dim);
+  border-bottom: none;
+  border-radius: 9px 9px 0 0;
+}
 #libgrid > #libdetail {
   grid-column: 1 / -1;
   flex: none; max-height: none;
-  margin: 2px 0 4px;
-  padding-top: 14px;
-  border-top: 1px solid rgba(255,255,255,0.06);
+  margin: 0 0 4px;
+  padding: 14px;
+  border: 2px solid var(--accent-dim);
+  border-top: none;
+  border-radius: 0 0 9px 9px;
 }
+/* The card is only ever as wide as one column, and the grid's own gap
+   leaves real vertical space between its bottom edge and the full-width
+   panel's top - so closing the border needs an L shape on each side, not
+   just a horizontal line: over to the panel's edge, then down to meet
+   it. #lib-expand-connector-left/right are plain boxes positioned and
+   sized from JS once the card's actual position is known, each with a
+   border on only two of its sides so the box's own top-left or top-right
+   corner traces exactly that L. */
+.lib-expand-connector {
+  position: absolute;
+  border-style: solid;
+  border-color: var(--accent-dim);
+  border-width: 0;
+  pointer-events: none;
+}
+.lib-expand-connector.hidden { display: none; }
+#lib-expand-connector-left { border-top-width: 2px; border-left-width: 2px; }
+#lib-expand-connector-right { border-top-width: 2px; border-right-width: 2px; }
 /* The viewport-relative cover size assumes filling the rest of the window,
    which an inline row does not do: a fixed, more modest size reads as part
    of the grid instead of a full pane bolted under it. */

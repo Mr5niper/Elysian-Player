@@ -1185,6 +1185,9 @@ function restoreInlineAlbumUI() {
   if (detail.parentElement === $("libgrid")) {
     $("libempty").parentElement.insertBefore(detail, $("libempty"));
   }
+  const wasExpanded = $("libgrid").querySelector(".libcard.expanded");
+  if (wasExpanded) wasExpanded.classList.remove("expanded");
+  updateExpandedBorderConnectors();
   const spacer = $("libcrumb").querySelector(".spacer");
   if (spacer && $("lib-edit").previousElementSibling !== spacer) {
     spacer.insertAdjacentElement("afterend", $("lib-edit"));
@@ -1276,10 +1279,15 @@ function placeInlineAlbumDetail() {
                                 && c.dataset.artist === (libDetail.key2 || ""));
   if (!card) { detail.classList.add("hidden"); return; }
 
+  cards.forEach((c) => { if (c !== card) c.classList.remove("expanded"); });
+  card.classList.add("expanded");
+
   const top = card.offsetTop;
   const sameRow = cards.filter((c) => Math.abs(c.offsetTop - top) < 4);
   const anchor = sameRow[sameRow.length - 1];
   anchor.insertAdjacentElement("afterend", detail);
+
+  updateExpandedBorderConnectors();
 
   const actions = $("libcover-actions");
   if ($("lib-edit").parentElement !== actions) {
@@ -1292,6 +1300,109 @@ function placeInlineAlbumDetail() {
   detail.classList.remove("hidden");
   renderLibCover();
   renderLibTracks(libDetail.items);
+}
+
+/* Bridges the border from the expanded card's own edges out to the full-
+   width panel's, since the card is only ever as wide as one column.
+   Viewport-relative rects, not offsetLeft: the card and the panel don't
+   necessarily share the same offsetParent, but their bounding rects are
+   always directly comparable regardless. Kept as its own step, callable
+   from the same settle loops that already re-check other measurements a
+   few frames after layout changes, since reading it only once - right
+   after inserting the panel - can catch it before the row has actually
+   settled to its final width. */
+function getOrCreateExpandConnector(id, grid) {
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.className = "lib-expand-connector hidden";
+    grid.appendChild(el);
+  } else if (el.parentElement !== grid) {
+    grid.appendChild(el);
+  }
+  return el;
+}
+
+function updateExpandedBorderConnectors() {
+  const grid = $("libgrid");
+  const detail = $("libdetail");
+  const left = getOrCreateExpandConnector("lib-expand-connector-left", grid);
+  const right = getOrCreateExpandConnector("lib-expand-connector-right", grid);
+
+  if (detail.parentElement !== grid) {
+    left.classList.add("hidden");
+    right.classList.add("hidden");
+    return;
+  }
+  const card = grid.querySelector(".libcard.expanded");
+  if (!card) {
+    left.classList.add("hidden");
+    right.classList.add("hidden");
+    return;
+  }
+
+  // Grid-content coordinates, not viewport ones: getBoundingClientRect is
+  // relative to the viewport, but these need to sit in the same
+  // coordinate space the grid's own scrolling content does, which is
+  // what absolute positioning inside a scrolled container actually uses.
+  // gridRect.top is the grid's own fixed position on screen and does not
+  // move as its content scrolls, so the difference between it and any
+  // descendant's rect is exactly how far that descendant currently sits
+  // from the grid's visible top edge - adding scrollTop back converts
+  // that visible offset into the underlying content position.
+  const gridRect = grid.getBoundingClientRect();
+  const cardRect = card.getBoundingClientRect();
+  const panelRect = detail.getBoundingClientRect();
+  const toGridX = (x) => x - gridRect.left;
+  const toGridY = (y) => y - gridRect.top + grid.scrollTop;
+
+  const cardBottom = toGridY(cardRect.bottom);
+  const cardLeft = toGridX(cardRect.left);
+  const cardRight = toGridX(cardRect.right);
+  const panelTop = toGridY(panelRect.top);
+  const panelLeft = toGridX(panelRect.left);
+  const panelRight = toGridX(panelRect.right);
+  const vGap = Math.max(0, panelTop - cardBottom);
+
+  // Shown whenever there's a vertical gap to cover, regardless of how
+  // wide the horizontal one is: a card flush with the panel's own edge -
+  // first or last in its row - has zero horizontal gap, but the grid's
+  // row spacing still leaves a real vertical one, which still needs the
+  // straight-down leg connecting the card's corner to the panel's, even
+  // with no sideways jog beforehand.
+  const leftGap = Math.max(0, cardLeft - panelLeft);
+  if (vGap > 0.5) {
+    // The border sits on this element's own left side, the same side
+    // fixed by `left` - any growth needed to fit the border happens on
+    // the unbordered right side instead, so this stays correctly
+    // anchored even when the gap is smaller than the border itself.
+    const leftWidth = Math.max(leftGap, 2);
+    left.classList.remove("hidden");
+    left.style.left = panelLeft + "px";
+    left.style.width = leftWidth + "px";
+    left.style.top = cardBottom + "px";
+    left.style.height = vGap + "px";
+  } else {
+    left.classList.add("hidden");
+  }
+
+  const rightGap = Math.max(0, panelRight - cardRight);
+  if (vGap > 0.5) {
+    // Here the border sits on the right side - the side that would grow
+    // if width came up short of the border's own thickness - so `left`
+    // has to be computed backward from where the right edge needs to
+    // land, guaranteeing enough width up front rather than trusting the
+    // browser to grow it in the right direction.
+    const rightWidth = Math.max(rightGap, 2);
+    right.classList.remove("hidden");
+    right.style.left = (panelRight - rightWidth) + "px";
+    right.style.width = rightWidth + "px";
+    right.style.top = cardBottom + "px";
+    right.style.height = vGap + "px";
+  } else {
+    right.classList.add("hidden");
+  }
 }
 
 function renderLibrary() {
@@ -1544,7 +1655,15 @@ function visibleAlbumKeys() {
 function reportVisibleArt() {
   const a = api();
   if (!a || typeof a.library_visible_art !== "function") return;
-  if (libView !== "albums" || libDetail || libShowFolders) return;
+  // libDetail is never checked here: within the Albums tab it only ever
+  // means an album expanded inline, not a view that replaces the grid,
+  // so the grid stays visible and scrollable right alongside it - cards
+  // scrolled into view while one is open still need their covers loaded,
+  // same as any other scrolling. Skipping on libDetail was correct back
+  // when opening an album replaced the grid outright; it silently
+  // stopped loading covers the moment inline expansion made scrolling
+  // past an open album possible at all.
+  if (libView !== "albums" || libShowFolders) return;
   const keys = visibleAlbumKeys();
   if (!keys.length) return;
   keys.forEach((k) => libArtSeen.add(k));
@@ -1568,10 +1687,26 @@ function updateCurrentLibTabScrollState() {
   st.anchor = captureVisibleLibAnchor();
 }
 
+let libExpandBorderScrollRaf = 0;
 $("libgrid").addEventListener("scroll", () => {
   clearTimeout(libArtTimer);
   libArtTimer = setTimeout(reportVisibleArt, 90);
   updateCurrentLibTabScrollState();
+  // The border connectors are cheap to recompute but not free, and a
+  // scroll gesture can fire this many times per frame, so this caps it
+  // at once per frame rather than running on every single event. Kept
+  // unconditional rather than gated on an album being open: the function
+  // itself already no-ops correctly when nothing is expanded, and a scroll
+  // is exactly the kind of layout change - a card settling from its
+  // content-visibility placeholder size to its real one as it enters
+  // view chief among them - that every other trigger for this same
+  // measurement already exists to catch, just never for a plain scroll.
+  if (!libExpandBorderScrollRaf) {
+    libExpandBorderScrollRaf = requestAnimationFrame(() => {
+      libExpandBorderScrollRaf = 0;
+      updateExpandedBorderConnectors();
+    });
+  }
 }, { passive: true });
 
 $("libtracks").addEventListener("scroll", () => {
@@ -1892,6 +2027,29 @@ function restoreLibTabState(saved) {
   restoreScrollExactly(saved.gridScrollTop, saved.detailScrollTop);
   paintLibSelection();
   paintLibPlaying();
+  // Both the border connectors and the exact scroll position measure or
+  // depend on real layout that has not necessarily settled yet right
+  // after a rebuild - confirmed directly elsewhere in this same feature,
+  // not assumed. restoreScrollExactly's own two fixed attempts (now,
+  // next frame) aren't always enough - an inline panel with many tracks
+  // in particular can take longer to reach its final height - and unlike
+  // opening or switching an album, or resizing, nothing was retrying
+  // either one here, which is exactly what could leave a tab's scroll
+  // position wrong, and intermittently so, after leaving it and coming
+  // back.
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const wantGrid = Math.max(0, Number(saved.gridScrollTop) || 0);
+  const wantTracks = Math.max(0, Number(saved.detailScrollTop) || 0);
+  let tries = 0;
+  const settle = () => {
+    grid.scrollTop = wantGrid;
+    tracks.scrollTop = wantTracks;
+    updateExpandedBorderConnectors();
+    tries++;
+    if (tries < 10) requestAnimationFrame(settle);
+  };
+  settle();
   return true;
 }
 
@@ -2261,6 +2419,7 @@ function applyLibraryTick(tick) {
         const settle = () => {
           restoreAlbumViewportAnchor(anchor);
           ensureExpandedAlbumVisible();
+          updateExpandedBorderConnectors();
           tries++;
           if (tries < 10) requestAnimationFrame(settle);
         };
@@ -2269,6 +2428,7 @@ function applyLibraryTick(tick) {
         let tries = 0;
         const settle = () => {
           ensureExpandedAlbumVisible();
+          updateExpandedBorderConnectors();
           tries++;
           if (tries < 10) requestAnimationFrame(settle);
         };
@@ -2449,6 +2609,13 @@ function scrollExpandedAlbumIntoView(grew) {
     } else {
       grid.scrollTop = detail.offsetTop;
     }
+    // The connector's own position depends on the current scroll offset,
+    // which this same loop keeps adjusting on every branch above, not
+    // just the shrink one - leaving it out of the other two branches is
+    // what let it settle against a scroll position that kept changing
+    // after that one read, landing wherever the scroll happened to be
+    // partway through rather than where it actually ended up.
+    updateExpandedBorderConnectors();
     tries++;
     if (tries < 20) libExpandScrollTimer = requestAnimationFrame(apply);
   };
