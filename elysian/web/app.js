@@ -757,6 +757,12 @@ const intent = {
     $("max-box").style.display = maxed ? "none" : "";
     $("max-restore").style.display = maxed ? "" : "none";
     $("win-max").title = maxed ? "Restore" : "Maximise";
+    // Growing or shrinking is certain here - unlike a plain drag-resize,
+    // which has to guess from window area - so the resize this triggers
+    // does not have to guess either. Consumed once by that resize's
+    // debounced callback, then cleared, so an unrelated drag afterward
+    // still falls back to the area comparison.
+    libMaximizeToggleGrew = maxed;
     api().win_maximise();
   },
 
@@ -1128,6 +1134,12 @@ function libraryOpened() {
       libView = view;
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
+      libGridSig = "";
+      libItems = [];
+      libDetail = null;
+      libSelected.clear();
+      libAnchor = null;
+      renderLibrary();
       libPending++;
       a.library_request_browser(libView, $("libfilter").value.trim());
       schedule();
@@ -1154,13 +1166,109 @@ function libFiltered() {
 
 const DISC_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/></svg>';
 
+function restoreInlineAlbumUI() {
+  // Idempotent: safe to call whether or not anything actually needs
+  // moving back. Called whenever the current render is not an inline
+  // album, so switching to an artist, a genre, Songs, or Folders while
+  // one was expanded never leaves it - or its buttons - stranded inside
+  // the grid.
+  const detail = $("libdetail");
+  if (detail.parentElement === $("libgrid")) {
+    $("libempty").parentElement.insertBefore(detail, $("libempty"));
+  }
+  const spacer = $("libcrumb").querySelector(".spacer");
+  if (spacer && $("lib-edit").previousElementSibling !== spacer) {
+    spacer.insertAdjacentElement("afterend", $("lib-edit"));
+    $("lib-edit").insertAdjacentElement("afterend", $("lib-queue"));
+    $("lib-queue").insertAdjacentElement("afterend", $("lib-play"));
+  }
+}
+
+// Set right when a different album card is clicked while one is already
+// expanded, before the request for its detail is even sent: the old
+// expansion is still on screen at that moment, so this is the only
+// chance to see where the clicked row actually sits. By the time the
+// detail arrives and the old one collapses to make room for the new
+// one, everything below the old expansion has already reflowed - if the
+// clicked row was below it, collapsing that space shifts the clicked
+// row up before its own detail is inserted back underneath it, which is
+// what pushed it out of view.
+let libPendingAlbumViewportAnchor = null;
+
+function captureAlbumViewportAnchor(card, item) {
+  if (!card || !item) return null;
+  return {
+    album: item.album || "",
+    artist: item.album_artist || "",
+    top: card.getBoundingClientRect().top,
+  };
+}
+
+function restoreAlbumViewportAnchor(anchor) {
+  if (!anchor) return false;
+  const grid = $("libgrid");
+  const card = Array.from(grid.querySelectorAll(".libcard")).find(
+    (c) => c.dataset.album === anchor.album && c.dataset.artist === anchor.artist);
+  if (!card) return false;
+  const delta = card.getBoundingClientRect().top - anchor.top;
+  if (Math.abs(delta) > 0.5) grid.scrollTop += delta;
+  return true;
+}
+
+function placeInlineAlbumDetail() {
+  // Finds the card the expanded album belongs to, then inserts the detail
+  // panel right after the last card sharing that card's row, so a grid
+  // item spanning every column starts a fresh row of its own and pushes
+  // whatever comes after down - the same behaviour a plain CSS grid
+  // already gives any full-width item, just placed where this one needs
+  // to land instead of always at the very end.
+  const grid = $("libgrid");
+  const detail = $("libdetail");
+  // Detached before measuring, not after: left in place, its own old
+  // position keeps forcing the row break from whatever width it was last
+  // placed at, so a card that would now fit earlier in a wider window
+  // measures as if it were still in the narrower layout - the exact
+  // reason widening the window never let later cards fill in beside the
+  // expanded row instead of starting one of their own further down.
+  if (detail.parentElement === grid) {
+    $("libempty").parentElement.insertBefore(detail, $("libempty"));
+  }
+  const cards = Array.from(grid.querySelectorAll(".libcard"));
+  const card = cards.find((c) => c.dataset.album === (libDetail.key || "")
+                                && c.dataset.artist === (libDetail.key2 || ""));
+  if (!card) { detail.classList.add("hidden"); return; }
+
+  const top = card.offsetTop;
+  const sameRow = cards.filter((c) => Math.abs(c.offsetTop - top) < 4);
+  const anchor = sameRow[sameRow.length - 1];
+  anchor.insertAdjacentElement("afterend", detail);
+
+  const actions = $("libcover-actions");
+  if ($("lib-edit").parentElement !== actions) {
+    actions.appendChild($("lib-edit"));
+    actions.appendChild($("lib-queue"));
+    actions.appendChild($("lib-play"));
+  }
+
+  detail.classList.remove("hidden");
+  renderLibCover();
+  renderLibTracks(libDetail.items);
+}
+
 function renderLibrary() {
   const grid = $("libgrid");
   const tracks = $("libtracks");
   const crumb = $("libcrumb");
   const empty = $("libempty");
   const folders = $("libfolders");
-  const showingDetail = libDetail !== null;
+  // An album opened from the grid expands in place next to the other
+  // cards rather than replacing the browse area; an artist or genre still
+  // does, since there is no single row of cards for those to slot beside.
+  const inlineAlbum = libView === "albums" && libDetail !== null
+                     && libDetail.kind === "album";
+  const showingDetail = libDetail !== null && !inlineAlbum;
+
+  if (!inlineAlbum) restoreInlineAlbumUI();
 
   // Managing folders replaces the browse area rather than floating over
   // it, so there is never a question of which thing a click belongs to.
@@ -1196,7 +1304,7 @@ function renderLibrary() {
     return;
   }
 
-  $("libdetail").classList.add("hidden");
+  if (!inlineAlbum) $("libdetail").classList.add("hidden");
   const rows = libFiltered();
   const bare = rows.length === 0;
   empty.classList.toggle("hidden", !bare);
@@ -1241,13 +1349,33 @@ function renderLibrary() {
   const sig = libView + "\u0001" + rows.map((it) =>
     libView === "albums" ? `${it.album_artist}\u0000${it.album}`
                          : (it.artist || it.genre || "")).join("\u0002");
-  if (sig === libGridSig && grid.childElementCount === rows.length) {
+  // Counted separately from grid.childElementCount: an expanded album
+  // leaves #libdetail sitting inside this same grid, which would
+  // otherwise always be one more than rows.length and defeat this check
+  // every single time an album is open, even when nothing about the
+  // album list itself changed.
+  const cardCount = libView === "albums"
+    ? grid.querySelectorAll(".libcard").length : grid.childElementCount;
+  if (sig === libGridSig && cardCount === rows.length) {
     paintLibArt();
+    if (inlineAlbum) placeInlineAlbumDetail();
+    else if (libView === "albums") captureLibAlbumAnchor();
     return;
   }
   libGridSig = sig;
 
   if (libView === "albums") {
+    // Detached unconditionally, not just when leaving inline mode: moving
+    // straight from one expanded album to another never passes through
+    // "not inline", so #libdetail can still be a child of this grid right
+    // here. innerHTML below destroys every current child of the grid, and
+    // that used to include #libdetail itself whenever this ran - not
+    // moved, deleted, along with everything inside it and the buttons
+    // that had been moved into it. Once gone, artist and genre detail
+    // broke too, since they share the same element.
+    if ($("libdetail").parentElement === grid) {
+      $("libempty").parentElement.insertBefore($("libdetail"), $("libempty"));
+    }
     // Toggle a class rather than an inline display, which would win over
     // the .hidden rule and leave the grid showing behind the track list.
     grid.classList.remove("aslist");
@@ -1261,6 +1389,8 @@ function renderLibrary() {
       </div>`).join("");
     paintLibArt();
     watchLibArt();
+    if (inlineAlbum) placeInlineAlbumDetail();
+    else captureLibAlbumAnchor();
   } else if (libView === "songs") {
     // Individual tracks. Selecting works as it does in the playlist, and
     // the buttons above act on the selection, so there is nothing to
@@ -1391,9 +1521,22 @@ function watchLibArt() {
   reportVisibleArt();
 }
 
+function updateCurrentLibTabScrollState() {
+  const st = libTabState[libView];
+  if (!st) return;
+  st.gridScrollTop = $("libgrid").scrollTop;
+  st.detailScrollTop = $("libtracks").scrollTop;
+  st.anchor = captureVisibleLibAnchor();
+}
+
 $("libgrid").addEventListener("scroll", () => {
   clearTimeout(libArtTimer);
   libArtTimer = setTimeout(reportVisibleArt, 90);
+  updateCurrentLibTabScrollState();
+}, { passive: true });
+
+$("libtracks").addEventListener("scroll", () => {
+  updateCurrentLibTabScrollState();
 }, { passive: true });
 
 /* The only place that knows the shape of a library_get_art reply. It
@@ -1652,21 +1795,152 @@ function playAlbumCardFromStart(item) {
   a.library_request_detail("album", item.album, item.album_artist);
 }
 
+// One entry per tab: whatever was drilled into or expanded there, and
+// where the list was scrolled, so switching tabs is a visit, not a reset.
+// Populated lazily; a tab visited for the first time this session simply
+// has nothing to restore.
+let libTabState = {
+  albums: null,
+  artists: null,
+  genres: null,
+  songs: null,
+};
+
+function cloneLibDetail(d) {
+  if (!d) return null;
+  return {
+    kind: d.kind || "",
+    key: d.key || "",
+    key2: d.key2 || "",
+    title: d.title || "",
+    items: Array.isArray(d.items) ? d.items.slice() : [],
+    revision: d.revision || 0,
+  };
+}
+
+function captureCurrentLibTabState() {
+  return {
+    view: libView,
+    items: Array.isArray(libItems) ? libItems.slice() : [],
+    detail: cloneLibDetail(libDetail),
+    selected: Array.from(libSelected),
+    anchor: captureVisibleLibAnchor(),
+    gridScrollTop: $("libgrid").scrollTop,
+    detailScrollTop: $("libtracks").scrollTop,
+    stale: false,
+  };
+}
+
+function restoreScrollExactly(gridTop, detailTop) {
+  const grid = $("libgrid");
+  const tracks = $("libtracks");
+  const wantGrid = Math.max(0, Number(gridTop) || 0);
+  const wantTracks = Math.max(0, Number(detailTop) || 0);
+
+  grid.scrollTop = wantGrid;
+  tracks.scrollTop = wantTracks;
+
+  requestAnimationFrame(() => {
+    grid.scrollTop = wantGrid;
+    tracks.scrollTop = wantTracks;
+  });
+}
+
+function restoreLibTabState(saved) {
+  if (!saved) return false;
+
+  libItems = Array.isArray(saved.items) ? saved.items.slice() : [];
+  libDetail = cloneLibDetail(saved.detail);
+  libSelected = new Set(saved.selected || []);
+  libAnchor = null;
+  // Reset, not restored from the snapshot: the grid may currently hold a
+  // different tab's cards or rows, left there by whichever tab was shown
+  // last, and a sig that happens to still match this tab's own data would
+  // skip the rebuild that would otherwise replace that leftover content -
+  // the same class of bug fixed before for Songs during a scan, just
+  // triggered by a tab switch instead this time.
+  libGridSig = "";
+
+  renderLibrary();
+  restoreScrollExactly(saved.gridScrollTop, saved.detailScrollTop);
+  paintLibSelection();
+  paintLibPlaying();
+  return true;
+}
+
+function invalidateLibTabState(name) {
+  const st = libTabState[name];
+  if (st) st.stale = true;
+}
+
+function invalidateAllLibTabState() {
+  invalidateLibTabState("albums");
+  invalidateLibTabState("artists");
+  invalidateLibTabState("genres");
+  invalidateLibTabState("songs");
+}
+
 function setLibView(name) {
   if (libView === name) return;
-  libGridSig = "";
+
+  libTabState[libView] = captureCurrentLibTabState();
+
   libView = name;
+  document.querySelectorAll(".libtab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.lib === name));
+
+  const saved = libTabState[name];
+  if (saved && !saved.stale) {
+    restoreLibTabState(saved);
+    return;
+  }
+
+  libGridSig = "";
+  libItems = [];
   libDetail = null;
   libSelected.clear();
   libAnchor = null;
-  document.querySelectorAll(".libtab").forEach((b) =>
-    b.classList.toggle("active", b.dataset.lib === name));
+  renderLibrary();
+
   const a = api();
   if (a) {
     libPending++;
     a.library_request_browser(name, $("libfilter").value.trim());
     schedule();
   }
+}
+
+/* The item a tab is restored to has to wait for that tab's content - the
+   browse list, and the reopened album or artist if there was one - to
+   actually exist, and that arrives asynchronously from the backend at
+   some point after this runs. Retried across several animation frames
+   rather than tied to any specific render call, so it does not matter
+   which of those two arrives first or how renderLibrary happens to be
+   structured; it just keeps looking for the remembered card or row until
+   it exists, then stops once it is found, or once the user has already
+   navigated elsewhere.
+   
+   An anchor, not a saved scrollTop pixel value: a plain pixel offset only
+   means the same thing again if nothing above it changed height between
+   leaving and returning, and album art can keep arriving in the
+   background well after the tab first renders - restoring a fixed number
+   before that settles, then never revisiting it, is what left the view a
+   couple of rows off from where it actually was. */
+let libPendingScrollRestore = null;
+
+function scheduleLibScrollRestore(view, anchor) {
+  libPendingScrollRestore = { view, anchor, tries: 0 };
+  requestAnimationFrame(tryRestoreLibScroll);
+}
+
+function tryRestoreLibScroll() {
+  const p = libPendingScrollRestore;
+  if (!p) return;
+  if (libView !== p.view) { libPendingScrollRestore = null; return; }
+  scrollToVisibleLibAnchor(p.anchor);
+  p.tries++;
+  if (p.tries < 30) requestAnimationFrame(tryRestoreLibScroll);
+  else libPendingScrollRestore = null;
 }
 
 /* ---- library wiring ---- */
@@ -1733,6 +2007,21 @@ $("libgrid").addEventListener("click", (e) => {
   if (!item) return;
   const a = api();
   if (!a) return;
+  if (libView === "albums" && libDetail && libDetail.kind === "album"
+      && libDetail.key === (item.album || "")
+      && libDetail.key2 === (item.album_artist || "")) {
+    // The card you just clicked is the one already expanded: close it
+    // rather than asking the backend for the same tracks again.
+    libDetail = null;
+    libSelected.clear();
+    libAnchor = null;
+    renderLibrary();
+    return;
+  }
+  libTabState[libView] = captureCurrentLibTabState();
+  if (libView === "albums" && libDetail && libDetail.kind === "album") {
+    libPendingAlbumViewportAnchor = captureAlbumViewportAnchor(card, item);
+  }
   libSelected.clear();
   libAnchor = null;
   libPending++;
@@ -1800,6 +2089,11 @@ $("lib-back").addEventListener("click", () => {
   libSelected.clear();
   libAnchor = null;
   renderLibrary();
+  restoreScrollExactly(
+    libTabState[libView] ? libTabState[libView].gridScrollTop : $("libgrid").scrollTop,
+    0
+  );
+  libTabState[libView] = captureCurrentLibTabState();
 });
 $("lib-queue").addEventListener("click", () => {
   const a = api();
@@ -1863,12 +2157,23 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_browser().then((b) => {
       if (!b) return;
-      libView = b.view || libView;
+
+      const incomingView = b.view || libView;
+      libView = incomingView;
       libItems = b.items || [];
+
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
-      libDetail = null;
+
+      const saved = libTabState[libView];
+      if (!(saved && !saved.stale && saved.detail)) {
+        libDetail = null;
+      }
+
       renderLibrary();
+      libTabState[libView] = captureCurrentLibTabState();
+      libTabState[libView].stale = false;
+
       // Resync rather than assume: the backend only announces art it has
       // just resolved, so anything it already had would otherwise never
       // reach a frontend whose cache has been reset.
@@ -1898,6 +2203,23 @@ function applyLibraryTick(tick) {
       libSelected.clear();
       libAnchor = null;
       renderLibrary();
+      libTabState[libView] = captureCurrentLibTabState();
+      libTabState[libView].stale = false;
+      if (libView === "albums" && d.kind === "album" && libPendingAlbumViewportAnchor) {
+        const anchor = libPendingAlbumViewportAnchor;
+        libPendingAlbumViewportAnchor = null;
+        // A single extra frame was not always enough elsewhere in this
+        // same grid for card sizes to settle from placeholder to real,
+        // so this keeps nudging for a short window rather than trusting
+        // one retry.
+        let tries = 0;
+        const settle = () => {
+          restoreAlbumViewportAnchor(anchor);
+          tries++;
+          if (tries < 10) requestAnimationFrame(settle);
+        };
+        settle();
+      }
     }).catch(() => {});
   }
   if (tick.library_art_revision !== libArtRevision) {
@@ -1914,6 +2236,7 @@ function applyLibraryTick(tick) {
   }
   if (tick.library_revision !== libRevision) {
     libRevision = tick.library_revision;
+    invalidateAllLibTabState();
     a.library_get_state().then((st) => {
       if (!st) return;
       const bits = [
@@ -1959,6 +2282,116 @@ function drawWave() {
     x.fillRect(i * bw + bw * 0.22, (h - bh) / 2, Math.max(1, bw * 0.56), bh);
   }
 }
+let libResizeTimer = 0;
+/* Whichever card or row sits topmost-and-leftmost, fully in view, right
+   now - identified by whatever stable key that kind of item has (album +
+   artist for a card, path for a track or song row, list index for a
+   plain artist/genre row). A reflow, a tab switch, or content quietly
+   changing height in the background - album art arriving after the
+   fact - all mean a remembered pixel offset stops meaning the same thing
+   it did when it was captured; finding the actual item again sidesteps
+   that regardless of what moved between saving and restoring. */
+function captureVisibleLibAnchor() {
+  const grid = $("libgrid");
+  const gridRect = grid.getBoundingClientRect();
+  const items = grid.querySelectorAll(".libcard, .librow");
+  let best = null;
+  for (const el of items) {
+    const r = el.getBoundingClientRect();
+    if (r.height === 0) continue;
+    if (r.top < gridRect.top - 1 || r.bottom > gridRect.bottom + 1) continue;
+    if (!best || r.top < best.top - 1
+        || (Math.abs(r.top - best.top) < 2 && r.left < best.left)) {
+      best = { top: r.top, left: r.left, el };
+    }
+  }
+  if (!best) return null;
+  const el = best.el;
+  if (el.classList.contains("libcard")) {
+    return { album: el.dataset.album || "", artist: el.dataset.artist || "" };
+  }
+  if (el.dataset.path) return { path: el.dataset.path };
+  if (el.dataset.i !== undefined) return { i: el.dataset.i };
+  return null;
+}
+
+function scrollToVisibleLibAnchor(anchor) {
+  if (!anchor) return false;
+  const grid = $("libgrid");
+  let el = null;
+  if ("album" in anchor) {
+    el = Array.from(grid.querySelectorAll(".libcard")).find(
+      (c) => c.dataset.album === anchor.album && c.dataset.artist === anchor.artist);
+  } else if ("path" in anchor) {
+    el = Array.from(grid.querySelectorAll(".librow")).find(
+      (r) => r.dataset.path === anchor.path);
+  } else if ("i" in anchor) {
+    el = Array.from(grid.querySelectorAll(".librow")).find(
+      (r) => r.dataset.i === anchor.i);
+  }
+  if (!el) return false;
+  grid.scrollTop = el.offsetTop;
+  return true;
+}
+
+let libAlbumAnchor = null;
+let libAnchorTimer = 0;
+
+function captureLibAlbumAnchor() {
+  const a = captureVisibleLibAnchor();
+  if (a && "album" in a) libAlbumAnchor = a;
+}
+
+$("libgrid").addEventListener("scroll", () => {
+  if (libView !== "albums" || libDetail) return;
+  clearTimeout(libAnchorTimer);
+  libAnchorTimer = setTimeout(captureLibAlbumAnchor, 200);
+}, { passive: true });
+
+function restoreLibAlbumAnchor() {
+  scrollToVisibleLibAnchor(libAlbumAnchor);
+}
+
+/* Which card ends up the anchor after an expanded album reflows: the row
+   right above the expansion when the window grew, so what was already
+   visible above it is still the lead-in, matching how it first looked
+   when opened; just the expansion itself when the window shrank, since
+   there may no longer be room to show anything above it too. */
+let libExpandScrollTimer = null;
+
+function scrollExpandedAlbumIntoView(grew) {
+  const grid = $("libgrid");
+  const detail = $("libdetail");
+  if (!detail || detail.parentElement !== grid) return;
+  // The target keeps shifting for a few frames after this first runs, as
+  // cards above the panel settle from their placeholder size to their
+  // real one, which left the very first assignment landing short of
+  // where the panel actually ends up once everything has settled. Kept
+  // current here instead of trusted once.
+  let tries = 0;
+  const apply = () => {
+    const target = (grew && detail.previousElementSibling)
+      ? detail.previousElementSibling.offsetTop : detail.offsetTop;
+    grid.scrollTop = target;
+    tries++;
+    if (tries < 20) libExpandScrollTimer = requestAnimationFrame(apply);
+  };
+  if (libExpandScrollTimer) cancelAnimationFrame(libExpandScrollTimer);
+  apply();
+}
+
+let libResizeBaseline = window.innerWidth * window.innerHeight;
+/* Set by toggleMaximise the instant the button (or a titlebar
+   double-click) is clicked, since growing or shrinking is certain there.
+   A plain area comparison turned out not to be trustworthy for that case
+   even computed once per settled gesture: maximising and restoring both
+   animate through intermediate sizes, and there is no guarantee the
+   settled area ends up correctly bigger or smaller than whatever the
+   comparison baseline was, particularly restoring back to a windowed
+   size that can vary. This sidesteps guessing entirely for that one
+   case, while an ordinary drag-resize - where no such signal exists -
+   still falls back to comparing area. */
+let libMaximizeToggleGrew = null;
 window.addEventListener("resize", () => {
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
@@ -1967,6 +2400,27 @@ window.addEventListener("resize", () => {
   // with blank space below until the first scroll. Recompute here; the
   // range early-out makes this free when the height did not actually change.
   renderWindow(false);
+  // An expanded album is inserted right after whichever card was last in
+  // its row at the time it was opened, which forces a row break there:
+  // widening the window afterward means more cards would now fit ahead of
+  // that break, but nothing moves the break itself, so the cards after it
+  // stay stranded in a new row instead of filling in beside the earlier
+  // ones. Debounced, since resizing fires continuously while dragging an
+  // edge and this involves real DOM moves, not just a read.
+  clearTimeout(libResizeTimer);
+  libResizeTimer = setTimeout(() => {
+    const area = window.innerWidth * window.innerHeight;
+    const grew = libMaximizeToggleGrew !== null
+      ? libMaximizeToggleGrew : area >= libResizeBaseline;
+    libMaximizeToggleGrew = null;
+    libResizeBaseline = area;
+    if (libView === "albums" && libDetail && libDetail.kind === "album") {
+      placeInlineAlbumDetail();
+      scrollExpandedAlbumIntoView(grew);
+    } else if (libView === "albums") {
+      restoreLibAlbumAnchor();
+    }
+  }, 120);
 });
 
 /* ---------- state sync ---------- */
