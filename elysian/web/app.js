@@ -2571,10 +2571,16 @@ function scrollExpandedAlbumIntoView(grew) {
       // than always force-jumping to its exact start regardless of
       // whether anything needed correcting in the first place.
       ensureExpandedAlbumVisible();
-      updateExpandedBorderConnectors();
     } else {
       grid.scrollTop = detail.offsetTop;
     }
+    // The connector's own position depends on the current scroll offset,
+    // which this same loop keeps adjusting on every branch above, not
+    // just the shrink one - leaving it out of the other two branches is
+    // what let it settle against a scroll position that kept changing
+    // after that one read, landing wherever the scroll happened to be
+    // partway through rather than where it actually ended up.
+    updateExpandedBorderConnectors();
     tries++;
     if (tries < 20) libExpandScrollTimer = requestAnimationFrame(apply);
   };
