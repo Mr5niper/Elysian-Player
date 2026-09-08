@@ -82,7 +82,9 @@
           <button class="tbtn" id="lib-back">Back</button>
           <span id="libcrumb-title"></span>
           <span class="spacer"></span>
+          <button class="tbtn" id="lib-edit" disabled>Edit Tags</button>
           <button class="tbtn" id="lib-queue">Add to playlist</button>
+          <button class="tbtn" id="lib-queue-all">Add all to playlist</button>
           <button class="tbtn" id="lib-play">Play</button>
         </div>
 
@@ -103,6 +105,7 @@
             <div class="ct" id="libcover-title"></div>
             <div class="ca" id="libcover-artist"></div>
             <div class="cs" id="libcover-sub"></div>
+            <div id="libcover-actions"></div>
           </div>
           <div id="libtracks"></div>
         </div>
@@ -178,6 +181,61 @@
       <div id="modal-buttons">
         <button class="tbtn" id="modal-yes">Yes</button>
         <button class="tbtn" id="modal-no">No</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="tagmodal">
+    <div id="tagmodal-box">
+      <div id="tagmodal-title">Edit Tags</div>
+      <div id="tagmodal-sub"></div>
+
+      <div id="tagmodal-body">
+        <label>Title
+          <input id="tag-title" type="text" spellcheck="false">
+        </label>
+        <label>Artist
+          <input id="tag-artist" type="text" spellcheck="false">
+        </label>
+        <label>Album
+          <input id="tag-album" type="text" spellcheck="false">
+        </label>
+        <label>Album Artist
+          <input id="tag-album-artist" type="text" spellcheck="false">
+        </label>
+        <label>Genre
+          <input id="tag-genre" type="text" spellcheck="false">
+        </label>
+        <div class="tagrow-pair">
+          <label>Track
+            <input id="tag-track-number" type="number" min="0">
+          </label>
+          <label>of
+            <input id="tag-track-total" type="number" min="0">
+          </label>
+        </div>
+        <div class="tagrow-pair">
+          <label>Disc
+            <input id="tag-disc-number" type="number" min="0">
+          </label>
+          <label>of
+            <input id="tag-disc-total" type="number" min="0">
+          </label>
+        </div>
+        <label>Year
+          <input id="tag-year" type="number" min="0">
+        </label>
+        <label class="checkrow">
+          <input id="tag-compilation" type="checkbox">
+          Part of a compilation
+        </label>
+      </div>
+
+      <div id="tagmodal-errors" class="hidden"></div>
+
+      <div id="tagmodal-buttons">
+        <button class="tbtn" id="tag-cancel">Cancel</button>
+        <button class="tbtn" id="tag-save">Save</button>
       </div>
     </div>
   </div>

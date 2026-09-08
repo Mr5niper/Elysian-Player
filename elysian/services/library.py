@@ -34,7 +34,7 @@ from pathlib import Path
 from .. import config
 from .. import paths as pathutil
 from ..logs import get as _get_logger
-from .scanner import read_metadata
+from .scanner import read_metadata, EDITABLE_TRACK_FIELDS
 
 log = _get_logger("library")
 
@@ -49,7 +49,8 @@ SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
-            "compilation", "dir", "modified_at", "added_at")
+            "compilation", "dir", "track_total", "disc_total",
+            "modified_at", "added_at")
 
 _UPSERT = f"""
     INSERT INTO tracks ({','.join(_COLUMNS)})
@@ -60,7 +61,8 @@ _UPSERT = f"""
         genre=excluded.genre, duration=excluded.duration,
         track_number=excluded.track_number, disc_number=excluded.disc_number,
         year=excluded.year, compilation=excluded.compilation,
-        dir=excluded.dir, modified_at=excluded.modified_at
+        dir=excluded.dir, track_total=excluded.track_total,
+        disc_total=excluded.disc_total, modified_at=excluded.modified_at
 """
 
 #: Falls back through album artist, then track artist, then a placeholder,
@@ -176,6 +178,8 @@ class LibraryService:
                         year          INTEGER DEFAULT 0,
                         compilation   INTEGER DEFAULT 0,
                         dir           TEXT    DEFAULT '',
+                        track_total   INTEGER DEFAULT 0,
+                        disc_total    INTEGER DEFAULT 0,
                         modified_at   REAL    DEFAULT 0,
                         added_at      REAL    DEFAULT 0
                     );
@@ -202,6 +206,14 @@ class LibraryService:
                     con.execute("UPDATE tracks SET modified_at = 0")
                     log.info("library upgraded; a rescan will fill in the "
                              "compilation flag")
+                if "track_total" not in have:
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN track_total INTEGER DEFAULT 0")
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN disc_total INTEGER DEFAULT 0")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in the "
+                             "track and disc totals")
                 # Indexes are created after the column checks above, not in
                 # the schema script: on an existing table the CREATE TABLE is
                 # skipped, so an index naming a newly added column would fail
@@ -341,7 +353,9 @@ class LibraryService:
                     int(meta.get("disc_number", 0) or 0),
                     int(meta.get("year", 0) or 0),
                     int(meta.get("compilation", 0) or 0),
-                    dkey, float(mtime or 0.0), now,
+                    dkey, int(meta.get("track_total", 0) or 0),
+                    int(meta.get("disc_total", 0) or 0),
+                    float(mtime or 0.0), now,
                 ))
 
         stale = [k for k in known if k not in seen]
@@ -554,22 +568,21 @@ class LibraryService:
     def songs(self, needle="", limit=50000) -> list:
         """Individual tracks, grouped by album the way artists and genres are.
 
-        Ordered in SQL as well as in Python: the cap has to take a
-        meaningful first slice, and without an ORDER BY the rows it keeps
-        are whatever the table happened to yield.
-
-        The limit is a backstop against a pathological collection, not a
-        working limit: ten thousand songs build in about 150ms and cost
-        nothing to scroll, since offscreen rows are kept out of the layout
-        budget. It is reported when reached, so the pane can say the list
-        was cut short rather than quietly lying about what is there.
+        Songs is the only browse surface that can run into many thousands
+        of visible rows. While filtering, returning a sensible slice
+        quickly matters more than proving how many matches exist, since
+        each settled keystroke rebuilds the frontend list from scratch -
+        unfiltered Songs keeps the large backstop, filtered Songs uses a
+        much smaller working cap.
         """
         # Titles only. Matching the album name as well returned every track
         # on an album whose title happened to contain the search, which is
         # what the albums tab is for; here the rows are songs, so the
         # search should be too.
-        clause, args = self._match(needle, ("title",))
+        text = (needle or "").strip()
+        clause, args = self._match(text, ("title",))
         where = f"WHERE {clause}" if clause else ""
+        effective_limit = 1500 if text else int(limit)
         rows = self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
@@ -579,10 +592,10 @@ class LibraryService:
                      COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}
             LIMIT ?
-        """, tuple(args) + (int(limit) + 1,))
-        truncated = len(rows) > limit
+        """, tuple(args) + (effective_limit + 1,))
+        truncated = len(rows) > effective_limit
         if truncated:
-            rows = rows[:limit]
+            rows = rows[:effective_limit]
         # Re-sorted here so leading punctuation is ignored, which SQL
         # collation cannot do; within an album the SQL order is kept.
         # Tracks with no album tag collect at the very end rather than
@@ -735,3 +748,217 @@ class LibraryService:
             finally:
                 con.close()
         return found
+
+    # ---- the tag editor uses these --------------------------------------
+
+    #: The fields the editor can show or change. Defined once in
+    #: scanner.py and shared with tag_editor.py, so the editor payload,
+    #: the mixed-value aggregation, and the writer's idea of "what is
+    #: editable" cannot quietly drift apart from each other.
+    EDITABLE_FIELDS = EDITABLE_TRACK_FIELDS
+
+    def tracks_by_paths(self, paths) -> list:
+        """Current indexed rows for exact files, in the order asked for.
+
+        Missing from the index entirely (should not happen: every path this
+        is called with came from something the library itself rendered) is
+        simply absent from the result rather than an error.
+        """
+        wanted = [p for p in dict.fromkeys(paths) if p]
+        if not wanted:
+            return []
+        by_key = {pathutil.key(p): p for p in wanted}
+        found = {}
+        with self._lock:
+            con = self._connect()
+            try:
+                keys = list(by_key)
+                for i in range(0, len(keys), 400):
+                    chunk = keys[i:i + 400]
+                    sql = ("SELECT key, path, title, artist, album, "
+                           "album_artist, genre, duration, track_number, "
+                           "track_total, disc_number, disc_total, year, "
+                           "compilation FROM tracks WHERE key IN (%s)"
+                           % ",".join("?" * len(chunk)))
+                    for row in con.execute(sql, chunk):
+                        d = dict(row)
+                        d["path"] = by_key[row["key"]]
+                        d.pop("key", None)
+                        found[d["path"]] = d
+            except Exception:
+                log.exception("library tracks_by_paths failed")
+            finally:
+                con.close()
+        return [found[p] for p in wanted if p in found]
+
+    def _read_fresh(self, paths) -> dict:
+        """Read exact files once. Returns {path: fresh_row_dict}.
+
+        Shared by edit_payload and refresh_paths so a file is only ever
+        opened once for either purpose: reading it to populate the editor
+        and reading it to reindex after a save are the same operation on
+        the same file, and used to happen twice for no reason whenever
+        edit_payload called refresh_paths afterward. fresh_row_dict carries
+        everything either caller needs - key and dir for the database
+        write, the editable fields for the form - so this is the only
+        place that has to know both.
+        """
+        fresh = {}
+        for path in paths:
+            try:
+                meta = read_metadata(path)
+                mtime = os.path.getmtime(path)
+            except OSError:
+                continue
+            except Exception:
+                log.exception("could not read %s", path)
+                continue
+            fresh[path] = {
+                "path": path, "key": pathutil.key(path),
+                "dir": pathutil.key(os.path.dirname(path)),
+                "modified_at": float(mtime or 0.0),
+                "title": meta.get("title", "") or Path(path).stem,
+                "artist": meta.get("artist", ""), "album": meta.get("album", ""),
+                "album_artist": (meta.get("album_artist", "")
+                                or meta.get("artist", "")),
+                "genre": meta.get("genre", ""),
+                "duration": float(meta.get("length", 0.0) or 0.0),
+                "track_number": int(meta.get("track_number", 0) or 0),
+                "track_total": int(meta.get("track_total", 0) or 0),
+                "disc_number": int(meta.get("disc_number", 0) or 0),
+                "disc_total": int(meta.get("disc_total", 0) or 0),
+                "year": int(meta.get("year", 0) or 0),
+                "compilation": int(meta.get("compilation", 0) or 0),
+            }
+        return fresh
+
+    def _write_changed(self, fresh_by_path) -> int:
+        """Upsert already-read rows, skipping any that already match.
+
+        Takes rows _read_fresh already produced rather than reading paths
+        itself, so the compare-before-write optimization and the
+        single-read guarantee both hold no matter which caller reaches
+        this: neither has to read a file to find out whether the other
+        already did.
+        """
+        if not fresh_by_path:
+            return 0
+        by_key = {row["key"]: path for path, row in fresh_by_path.items()}
+        current = {}
+        with self._lock:
+            con = self._connect()
+            try:
+                keys = list(by_key)
+                for i in range(0, len(keys), 400):
+                    chunk = keys[i:i + 400]
+                    sql = ("SELECT key, title, artist, album, album_artist, "
+                           "genre, duration, track_number, track_total, "
+                           "disc_number, disc_total, year, compilation, "
+                           "modified_at FROM tracks WHERE key IN (%s)"
+                           % ",".join("?" * len(chunk)))
+                    for row in con.execute(sql, chunk):
+                        current[by_key[row["key"]]] = dict(row)
+            except Exception:
+                log.exception("could not read the current rows to compare")
+            finally:
+                con.close()
+
+        now = time.time()
+        rows = []
+        for path, fresh in fresh_by_path.items():
+            existing = current.get(path)
+            if existing is not None:
+                same_mtime = abs(float(existing.get("modified_at") or 0.0)
+                                 - fresh["modified_at"]) < 1e-4
+                same_tags = all(
+                    (abs(existing.get(f, 0.0) - fresh[f]) < 1e-3
+                     if f == "duration" else existing.get(f) == fresh[f])
+                    for f in ("title", "artist", "album", "album_artist",
+                             "genre", "duration", "track_number", "track_total",
+                             "disc_number", "disc_total", "year", "compilation"))
+                if same_mtime and same_tags:
+                    continue   # index already matches the file exactly
+            rows.append((
+                fresh["path"], fresh["key"], fresh["title"], fresh["artist"],
+                fresh["album"], fresh["album_artist"], fresh["genre"],
+                fresh["duration"], fresh["track_number"], fresh["disc_number"],
+                fresh["year"], fresh["compilation"], fresh["dir"],
+                fresh["track_total"], fresh["disc_total"],
+                fresh["modified_at"], now,
+            ))
+        if not rows:
+            return 0
+        with self._lock:
+            con = self._connect()
+            try:
+                for i in range(0, len(rows), BATCH_SIZE):
+                    con.executemany(_UPSERT, rows[i:i + BATCH_SIZE])
+                con.commit()
+            except Exception:
+                log.exception("could not write refreshed tags to the index")
+                return 0
+            finally:
+                con.close()
+        return len(rows)
+
+    def edit_payload(self, paths) -> dict:
+        """Build the editor's form from the files themselves, not the index.
+
+        The index can be a scan behind on purpose: rescanning is not free,
+        so an unchanged file is never reopened until something about it
+        actually changes. That is the right trade-off for browsing, but
+        wrong for an editor, which has to show what the file actually
+        holds right now, not what the last scan happened to see. A schema
+        upgrade that resets a field until the next rescan is exactly the
+        gap that would otherwise leak into this form.
+
+        Reading here also refreshes the index for these exact paths as a
+        side effect, so a file looked at through the editor is no longer
+        the stale one anywhere else in the library either, whether or not
+        anything about it is actually changed and saved. The read that
+        builds the form and the read that would otherwise happen again to
+        refresh the index are the same read, done once.
+        """
+        clean = [str(p) for p in dict.fromkeys(paths) if p]
+        if not clean:
+            return {"count": 0, "paths": [], "data": {}, "mixed": {}}
+
+        fresh = self._read_fresh(clean)
+
+        try:
+            self._write_changed(fresh)
+        except Exception:
+            log.exception("could not refresh the index after reading for "
+                          "the editor")
+
+        rows = list(fresh.values())
+        data, mixed = {}, {}
+        for field in self.EDITABLE_FIELDS:
+            values = {row.get(field) for row in rows}
+            if len(values) <= 1:
+                data[field] = next(iter(values), "" if field in
+                                   ("title", "artist", "album", "album_artist",
+                                    "genre") else 0)
+            else:
+                data[field] = "" if field in (
+                    "title", "artist", "album", "album_artist", "genre"
+                ) else 0
+                mixed[field] = True
+        return {
+            "count": len(rows),
+            "paths": [row["path"] for row in rows],
+            "data": data,
+            "mixed": mixed,
+        }
+
+    def refresh_paths(self, paths) -> int:
+        """Re-read exact files from disk, and write back only what changed.
+
+        Used right after a tag write. Reading and the compare-before-write
+        skip both live in _read_fresh and _write_changed now, shared with
+        edit_payload, so this is just their sequence for a plain path list.
+        """
+        clean = [str(p) for p in dict.fromkeys(paths) if p]
+        if not clean:
+            return 0
+        return self._write_changed(self._read_fresh(clean))

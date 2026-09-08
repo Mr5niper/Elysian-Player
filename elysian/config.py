@@ -3,7 +3,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Elysian Player"
-APP_VERSION = "2.5.0.0"
+APP_VERSION = "2.5.1.0"
 
 SETTINGS_FILE = Path.home() / ".elysian_player.json"
 LIBRARY_DB_FILE = Path.home() / ".elysian_library.db"

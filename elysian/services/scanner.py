@@ -43,6 +43,26 @@ def _number(value) -> int:
         return 0
 
 
+def _total(value) -> int:
+    """The "of 12" half of a "3/12" style tag. 0 if there isn't one.
+
+    Kept separate from _number rather than folding a second return value
+    into it: almost every caller only wants the number, and a track or disc
+    tag with no total at all is the common case, not an error.
+    """
+    raw = _first(value, "").strip()
+    if "/" not in raw:
+        return 0
+    tail = raw.split("/", 1)[1].strip()
+    digits = "".join(c for c in tail if c.isdigit())
+    if not digits:
+        return 0
+    try:
+        return int(digits)
+    except ValueError:
+        return 0
+
+
 def _raw(meta, frame: str) -> str:
     """Raw ID3 frame, for containers whose easy interface omits them."""
     try:
@@ -61,7 +81,19 @@ EMPTY_METADATA = {
     "title": "", "artist": "", "album": "", "length": 0.0,
     "album_artist": "", "genre": "", "track_number": 0,
     "disc_number": 0, "year": 0, "compilation": 0,
+    "track_total": 0, "disc_total": 0,
 }
+
+#: What the tag editor may change, and what LibraryService considers
+#: "editable" for the payload it builds and the mixed-value aggregation it
+#: does. Defined once here, since both library.py and tag_editor.py were
+#: previously keeping their own identical copy of this same list with
+#: nothing enforcing that they stay identical.
+EDITABLE_TRACK_FIELDS = (
+    "title", "artist", "album", "album_artist", "genre",
+    "track_number", "track_total", "disc_number", "disc_total",
+    "year", "compilation",
+)
 
 
 def read_metadata(path: str) -> dict:
@@ -96,10 +128,15 @@ def read_metadata(path: str) -> dict:
         info["album_artist"] = (_first(meta.get("albumartist"), "")
                                 or _first(meta.get("album artist"), "")
                                 or _raw(meta, "TPE2"))
-        info["track_number"] = _number(meta.get("tracknumber")
-                                       or _raw(meta, "TRCK"))
-        info["disc_number"] = _number(meta.get("discnumber")
-                                      or _raw(meta, "TPOS"))
+        # Captured once so the "3" and the "of 12" come from the exact same
+        # string; asking meta.get(...) twice risks the two halves coming
+        # from a different tag if a file oddly carries both spellings.
+        track_raw = meta.get("tracknumber") or _raw(meta, "TRCK")
+        disc_raw = meta.get("discnumber") or _raw(meta, "TPOS")
+        info["track_number"] = _number(track_raw)
+        info["track_total"] = _total(track_raw)
+        info["disc_number"] = _number(disc_raw)
+        info["disc_total"] = _total(disc_raw)
         info["year"] = _number(meta.get("date") or meta.get("year")
                                or _raw(meta, "TDRC"))
         # The "part of a compilation" flag. Tools write it as TCMP in ID3,
