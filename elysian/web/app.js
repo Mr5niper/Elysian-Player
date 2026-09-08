@@ -1187,6 +1187,7 @@ function restoreInlineAlbumUI() {
   }
   const wasExpanded = $("libgrid").querySelector(".libcard.expanded");
   if (wasExpanded) wasExpanded.classList.remove("expanded");
+  updateExpandedBorderConnectors();
   const spacer = $("libcrumb").querySelector(".spacer");
   if (spacer && $("lib-edit").previousElementSibling !== spacer) {
     spacer.insertAdjacentElement("afterend", $("lib-edit"));
@@ -1310,18 +1311,98 @@ function placeInlineAlbumDetail() {
    few frames after layout changes, since reading it only once - right
    after inserting the panel - can catch it before the row has actually
    settled to its final width. */
+function getOrCreateExpandConnector(id, grid) {
+  let el = document.getElementById(id);
+  if (!el) {
+    el = document.createElement("div");
+    el.id = id;
+    el.className = "lib-expand-connector hidden";
+    grid.appendChild(el);
+  } else if (el.parentElement !== grid) {
+    grid.appendChild(el);
+  }
+  return el;
+}
+
 function updateExpandedBorderConnectors() {
   const grid = $("libgrid");
   const detail = $("libdetail");
-  if (detail.parentElement !== grid) return;
+  const left = getOrCreateExpandConnector("lib-expand-connector-left", grid);
+  const right = getOrCreateExpandConnector("lib-expand-connector-right", grid);
+
+  if (detail.parentElement !== grid) {
+    left.classList.add("hidden");
+    right.classList.add("hidden");
+    return;
+  }
   const card = grid.querySelector(".libcard.expanded");
-  if (!card) return;
+  if (!card) {
+    left.classList.add("hidden");
+    right.classList.add("hidden");
+    return;
+  }
+
+  // Grid-content coordinates, not viewport ones: getBoundingClientRect is
+  // relative to the viewport, but these need to sit in the same
+  // coordinate space the grid's own scrolling content does, which is
+  // what absolute positioning inside a scrolled container actually uses.
+  // gridRect.top is the grid's own fixed position on screen and does not
+  // move as its content scrolls, so the difference between it and any
+  // descendant's rect is exactly how far that descendant currently sits
+  // from the grid's visible top edge - adding scrollTop back converts
+  // that visible offset into the underlying content position.
+  const gridRect = grid.getBoundingClientRect();
   const cardRect = card.getBoundingClientRect();
   const panelRect = detail.getBoundingClientRect();
-  detail.style.setProperty("--connector-left",
-    Math.max(0, cardRect.left - panelRect.left) + "px");
-  detail.style.setProperty("--connector-right",
-    Math.max(0, panelRect.right - cardRect.right) + "px");
+  const toGridX = (x) => x - gridRect.left;
+  const toGridY = (y) => y - gridRect.top + grid.scrollTop;
+
+  const cardBottom = toGridY(cardRect.bottom);
+  const cardLeft = toGridX(cardRect.left);
+  const cardRight = toGridX(cardRect.right);
+  const panelTop = toGridY(panelRect.top);
+  const panelLeft = toGridX(panelRect.left);
+  const panelRight = toGridX(panelRect.right);
+  const vGap = Math.max(0, panelTop - cardBottom);
+
+  // Shown whenever there's a vertical gap to cover, regardless of how
+  // wide the horizontal one is: a card flush with the panel's own edge -
+  // first or last in its row - has zero horizontal gap, but the grid's
+  // row spacing still leaves a real vertical one, which still needs the
+  // straight-down leg connecting the card's corner to the panel's, even
+  // with no sideways jog beforehand.
+  const leftGap = Math.max(0, cardLeft - panelLeft);
+  if (vGap > 0.5) {
+    // The border sits on this element's own left side, the same side
+    // fixed by `left` - any growth needed to fit the border happens on
+    // the unbordered right side instead, so this stays correctly
+    // anchored even when the gap is smaller than the border itself.
+    const leftWidth = Math.max(leftGap, 2);
+    left.classList.remove("hidden");
+    left.style.left = panelLeft + "px";
+    left.style.width = leftWidth + "px";
+    left.style.top = cardBottom + "px";
+    left.style.height = vGap + "px";
+  } else {
+    left.classList.add("hidden");
+  }
+
+  const rightGap = Math.max(0, panelRight - cardRight);
+  if (vGap > 0.5) {
+    // Here the border sits on the right side - the side that would grow
+    // if width came up short of the border's own thickness - so `left`
+    // has to be computed backward from where the right edge needs to
+    // land, guaranteeing enough width up front rather than trusting the
+    // browser to grow it in the right direction.
+    const rightWidth = Math.max(rightGap, 2);
+    right.classList.remove("hidden");
+    right.style.left = (panelRight - rightWidth) + "px";
+    right.style.width = rightWidth + "px";
+    right.style.top = cardBottom + "px";
+    right.style.height = vGap + "px";
+  } else {
+    right.classList.add("hidden");
+  }
 }
 
 function renderLibrary() {
