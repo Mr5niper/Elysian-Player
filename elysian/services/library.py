@@ -34,7 +34,7 @@ from pathlib import Path
 from .. import config
 from .. import paths as pathutil
 from ..logs import get as _get_logger
-from .scanner import read_metadata
+from .scanner import read_metadata, EDITABLE_TRACK_FIELDS
 
 log = _get_logger("library")
 
@@ -751,14 +751,11 @@ class LibraryService:
 
     # ---- the tag editor uses these --------------------------------------
 
-    #: The fields the editor can show or change. One list, so the editor
-    #: payload, the mixed-value aggregation, and the writer's idea of "what
-    #: is editable" cannot quietly drift apart from each other.
-    EDITABLE_FIELDS = (
-        "title", "artist", "album", "album_artist", "genre",
-        "track_number", "track_total", "disc_number", "disc_total",
-        "year", "compilation",
-    )
+    #: The fields the editor can show or change. Defined once in
+    #: scanner.py and shared with tag_editor.py, so the editor payload,
+    #: the mixed-value aggregation, and the writer's idea of "what is
+    #: editable" cannot quietly drift apart from each other.
+    EDITABLE_FIELDS = EDITABLE_TRACK_FIELDS
 
     def tracks_by_paths(self, paths) -> list:
         """Current indexed rows for exact files, in the order asked for.

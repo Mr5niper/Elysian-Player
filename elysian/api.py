@@ -1398,8 +1398,10 @@ class Api:
     def _do_library_open_editor(self, paths) -> None:
         """Load current tags for these files into the editor, off the worker.
 
-        The library DB already has this, so opening the editor costs a
-        query, not a fresh read of every selected file.
+        Reads each file directly rather than the index: the index can be a
+        scan behind on purpose, so this is the one place that has to show
+        what the file actually holds right now. The same read also
+        refreshes the index for these exact paths as a side effect.
         """
         clean = [str(p) for p in (paths or []) if p]
         if not clean:
