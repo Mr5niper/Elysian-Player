@@ -52,6 +52,9 @@ megabytes. Audio runs on miniaudio.
 
 ### Library
 
+<img width="1734" height="1095" alt="image" src="https://github.com/user-attachments/assets/232ef6eb-57ef-4c41-9da1-dd66d5e8e864" />
+
+
 A second way to get at your music, separate from the playlist. Point it at
 one or more folders and it builds a small index of what it finds, so
 browsing works even if the folders themselves are slow, on a NAS, or briefly
