@@ -533,7 +533,25 @@ html, body {
   border: 2px solid var(--accent);
   border-top: none;
   border-radius: 0 0 9px 9px;
+  position: relative;
 }
+/* The card is only ever as wide as one column, so its own top border
+   stops well short of the full-width panel's edges. These bridge that
+   gap: a short bar on each side, from the card's own edge out to the
+   panel's, at the exact height of the seam between them - their widths
+   are set from JS once the card's actual position is known, since which
+   column it sits in varies with every album. Without them the two
+   pieces read as separate boxes instead of one closed outline. */
+#libgrid > #libdetail::before,
+#libgrid > #libdetail::after {
+  content: "";
+  position: absolute;
+  top: -2px;
+  height: 2px;
+  background: var(--accent);
+}
+#libgrid > #libdetail::before { left: 0; width: var(--connector-left, 0px); }
+#libgrid > #libdetail::after { right: 0; width: var(--connector-right, 0px); }
 /* The viewport-relative cover size assumes filling the rest of the window,
    which an inline row does not do: a fixed, more modest size reads as part
    of the grid instead of a full pane bolted under it. */

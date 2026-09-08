@@ -1286,6 +1286,8 @@ function placeInlineAlbumDetail() {
   const anchor = sameRow[sameRow.length - 1];
   anchor.insertAdjacentElement("afterend", detail);
 
+  updateExpandedBorderConnectors();
+
   const actions = $("libcover-actions");
   if ($("lib-edit").parentElement !== actions) {
     actions.appendChild($("lib-edit"));
@@ -1297,6 +1299,29 @@ function placeInlineAlbumDetail() {
   detail.classList.remove("hidden");
   renderLibCover();
   renderLibTracks(libDetail.items);
+}
+
+/* Bridges the border from the expanded card's own edges out to the full-
+   width panel's, since the card is only ever as wide as one column.
+   Viewport-relative rects, not offsetLeft: the card and the panel don't
+   necessarily share the same offsetParent, but their bounding rects are
+   always directly comparable regardless. Kept as its own step, callable
+   from the same settle loops that already re-check other measurements a
+   few frames after layout changes, since reading it only once - right
+   after inserting the panel - can catch it before the row has actually
+   settled to its final width. */
+function updateExpandedBorderConnectors() {
+  const grid = $("libgrid");
+  const detail = $("libdetail");
+  if (detail.parentElement !== grid) return;
+  const card = grid.querySelector(".libcard.expanded");
+  if (!card) return;
+  const cardRect = card.getBoundingClientRect();
+  const panelRect = detail.getBoundingClientRect();
+  detail.style.setProperty("--connector-left",
+    Math.max(0, cardRect.left - panelRect.left) + "px");
+  detail.style.setProperty("--connector-right",
+    Math.max(0, panelRect.right - cardRect.right) + "px");
 }
 
 function renderLibrary() {
@@ -2266,6 +2291,7 @@ function applyLibraryTick(tick) {
         const settle = () => {
           restoreAlbumViewportAnchor(anchor);
           ensureExpandedAlbumVisible();
+          updateExpandedBorderConnectors();
           tries++;
           if (tries < 10) requestAnimationFrame(settle);
         };
@@ -2274,6 +2300,7 @@ function applyLibraryTick(tick) {
         let tries = 0;
         const settle = () => {
           ensureExpandedAlbumVisible();
+          updateExpandedBorderConnectors();
           tries++;
           if (tries < 10) requestAnimationFrame(settle);
         };
@@ -2451,6 +2478,7 @@ function scrollExpandedAlbumIntoView(grew) {
       // than always force-jumping to its exact start regardless of
       // whether anything needed correcting in the first place.
       ensureExpandedAlbumVisible();
+      updateExpandedBorderConnectors();
     } else {
       grid.scrollTop = detail.offsetTop;
     }
