@@ -927,10 +927,6 @@ document.addEventListener("keydown", (e) => {
 let libView = "albums";          // albums | artists | genres | songs
 let libItems = [];               // browser results, unfiltered
 let libDetail = null;            // {kind, key, title, items} when drilled in
-// Set just before requesting an album's detail for a card double-click,
-// which has no track list of its own to play yet. Consumed by whichever
-// detail result arrives next; see the library_detail_revision handler.
-let libPlayAlbumOnDetail = null;
 let libSelected = new Set();     // paths selected in a detail list
 let libAnchor = null;            // where a shift range measures from
 let libOpened = false;
@@ -1193,7 +1189,8 @@ function restoreInlineAlbumUI() {
   if (spacer && $("lib-edit").previousElementSibling !== spacer) {
     spacer.insertAdjacentElement("afterend", $("lib-edit"));
     $("lib-edit").insertAdjacentElement("afterend", $("lib-queue"));
-    $("lib-queue").insertAdjacentElement("afterend", $("lib-play"));
+    $("lib-queue").insertAdjacentElement("afterend", $("lib-queue-all"));
+    $("lib-queue-all").insertAdjacentElement("afterend", $("lib-play"));
   }
 }
 
@@ -1288,6 +1285,7 @@ function placeInlineAlbumDetail() {
   if ($("lib-edit").parentElement !== actions) {
     actions.appendChild($("lib-edit"));
     actions.appendChild($("lib-queue"));
+    actions.appendChild($("lib-queue-all"));
     actions.appendChild($("lib-play"));
   }
 
@@ -1824,18 +1822,6 @@ function orderedSelectedLibraryPaths() {
   return Array.from(chosen);
 }
 
-/* An album card carries only the summary shown on it - no track paths - so
-   double-clicking it has to fetch the album before anything can play. The
-   fetch is the same one a single click already makes; this only adds a
-   flag saying what to do once it lands, rather than opening the album pane
-   the user did not ask to see. */
-function playAlbumCardFromStart(item) {
-  const a = api();
-  if (!a) return;
-  libPlayAlbumOnDetail = { album: item.album || "", artist: item.album_artist || "" };
-  a.library_request_detail("album", item.album, item.album_artist);
-}
-
 // One entry per tab: whatever was drilled into or expanded there, and
 // where the list was scrolled, so switching tabs is a visit, not a reset.
 // Populated lazily; a tab visited for the first time this session simply
@@ -2032,10 +2018,6 @@ $("libfolders").addEventListener("click", (e) => {
 $("libgrid").addEventListener("dblclick", (e) => {
   const row = e.target.closest(".librow.song");
   if (row) { playLibraryContextFrom(row.dataset.path); return; }
-  const card = e.target.closest(".libcard");
-  if (!card) return;
-  const item = libFiltered()[Number(card.dataset.i)];
-  if (item) playAlbumCardFromStart(item);
 });
 
 $("libgrid").addEventListener("click", (e) => {
@@ -2156,6 +2138,14 @@ $("lib-queue").addEventListener("click", () => {
   const a = api();
   if (a) a.library_enqueue(libChosenPaths());
 });
+$("lib-queue-all").addEventListener("click", () => {
+  // Deliberately ignores selection, unlike Add to playlist: this is the
+  // one action that always means every track in what's currently open,
+  // so a partial selection never has to be cleared first just to queue
+  // the whole thing.
+  const a = api();
+  if (a && libDetail) a.library_enqueue(libDetail.items.map((t) => t.path).filter(Boolean));
+});
 $("lib-play").addEventListener("click", () => {
   // A button version of double-clicking the selected row: not "play only
   // the selection", but the same thing double-click does, which plays the
@@ -2253,20 +2243,6 @@ function applyLibraryTick(tick) {
     if (libPending > 0) libPending--;
     a.library_get_detail().then((d) => {
       if (!d || !d.kind) return;
-      // Consumed by whichever detail lands next, matching or not: if
-      // something else changed the selection in between, a stale double
-      // click waiting for its album is less useful than one that already
-      // moved on.
-      const wantPlay = libPlayAlbumOnDetail;
-      libPlayAlbumOnDetail = null;
-      if (wantPlay && d.kind === "album" && d.key === wantPlay.album
-          && (d.key2 || "") === wantPlay.artist) {
-        const paths = (d.items || []).map((t) => t.path).filter(Boolean);
-        if (paths.length) {
-          a.library_play_context(paths, paths[0], "album", d.title || "");
-        }
-        return;
-      }
       libDetail = d;
       libSelected.clear();
       libAnchor = null;
