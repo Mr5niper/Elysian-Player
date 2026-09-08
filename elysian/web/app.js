@@ -1184,6 +1184,37 @@ function restoreInlineAlbumUI() {
   }
 }
 
+// Set right when a different album card is clicked while one is already
+// expanded, before the request for its detail is even sent: the old
+// expansion is still on screen at that moment, so this is the only
+// chance to see where the clicked row actually sits. By the time the
+// detail arrives and the old one collapses to make room for the new
+// one, everything below the old expansion has already reflowed - if the
+// clicked row was below it, collapsing that space shifts the clicked
+// row up before its own detail is inserted back underneath it, which is
+// what pushed it out of view.
+let libPendingAlbumViewportAnchor = null;
+
+function captureAlbumViewportAnchor(card, item) {
+  if (!card || !item) return null;
+  return {
+    album: item.album || "",
+    artist: item.album_artist || "",
+    top: card.getBoundingClientRect().top,
+  };
+}
+
+function restoreAlbumViewportAnchor(anchor) {
+  if (!anchor) return false;
+  const grid = $("libgrid");
+  const card = Array.from(grid.querySelectorAll(".libcard")).find(
+    (c) => c.dataset.album === anchor.album && c.dataset.artist === anchor.artist);
+  if (!card) return false;
+  const delta = card.getBoundingClientRect().top - anchor.top;
+  if (Math.abs(delta) > 0.5) grid.scrollTop += delta;
+  return true;
+}
+
 function placeInlineAlbumDetail() {
   // Finds the card the expanded album belongs to, then inserts the detail
   // panel right after the last card sharing that card's row, so a grid
@@ -1988,6 +2019,9 @@ $("libgrid").addEventListener("click", (e) => {
     return;
   }
   libTabState[libView] = captureCurrentLibTabState();
+  if (libView === "albums" && libDetail && libDetail.kind === "album") {
+    libPendingAlbumViewportAnchor = captureAlbumViewportAnchor(card, item);
+  }
   libSelected.clear();
   libAnchor = null;
   libPending++;
@@ -2171,6 +2205,21 @@ function applyLibraryTick(tick) {
       renderLibrary();
       libTabState[libView] = captureCurrentLibTabState();
       libTabState[libView].stale = false;
+      if (libView === "albums" && d.kind === "album" && libPendingAlbumViewportAnchor) {
+        const anchor = libPendingAlbumViewportAnchor;
+        libPendingAlbumViewportAnchor = null;
+        // A single extra frame was not always enough elsewhere in this
+        // same grid for card sizes to settle from placeholder to real,
+        // so this keeps nudging for a short window rather than trusting
+        // one retry.
+        let tries = 0;
+        const settle = () => {
+          restoreAlbumViewportAnchor(anchor);
+          tries++;
+          if (tries < 10) requestAnimationFrame(settle);
+        };
+        settle();
+      }
     }).catch(() => {});
   }
   if (tick.library_art_revision !== libArtRevision) {
