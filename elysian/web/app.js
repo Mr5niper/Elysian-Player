@@ -2003,6 +2003,18 @@ function restoreLibTabState(saved) {
   restoreScrollExactly(saved.gridScrollTop, saved.detailScrollTop);
   paintLibSelection();
   paintLibPlaying();
+  // The border connectors measure real layout that has not necessarily
+  // settled yet right after a rebuild - confirmed directly elsewhere in
+  // this same feature, not assumed - and unlike opening or switching an
+  // album, or resizing, nothing was retrying that measurement here, which
+  // is exactly what left it wrong after leaving a tab and coming back.
+  let tries = 0;
+  const settle = () => {
+    updateExpandedBorderConnectors();
+    tries++;
+    if (tries < 10) requestAnimationFrame(settle);
+  };
+  settle();
   return true;
 }
 
