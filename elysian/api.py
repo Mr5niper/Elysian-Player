@@ -1465,8 +1465,10 @@ class Api:
 
         # Writing tags needs to open the file for write, and on Windows a
         # file the engine already has open for playback can make that fail
-        # outright rather than partially succeed. Stopping first releases
-        # it; _resume_after_tag_save puts it back once the write, whichever
+        # outright rather than partially succeed. stop() alone does not
+        # release it - the decoder underneath keeps the file open
+        # regardless - so release_file() is what actually does;
+        # _resume_after_tag_save puts it back once the write, whichever
         # way it goes, is actually done.
         self._tag_save_resume = None
         if self._engine.active and self._engine.path:
@@ -1476,7 +1478,7 @@ class Api:
                     "position": self._engine.position,
                     "playing": self._engine.playing,
                 }
-                self._engine.stop()
+                self._engine.release_file()
                 self._bump()
 
         def work():
