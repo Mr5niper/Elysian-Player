@@ -568,22 +568,21 @@ class LibraryService:
     def songs(self, needle="", limit=50000) -> list:
         """Individual tracks, grouped by album the way artists and genres are.
 
-        Ordered in SQL as well as in Python: the cap has to take a
-        meaningful first slice, and without an ORDER BY the rows it keeps
-        are whatever the table happened to yield.
-
-        The limit is a backstop against a pathological collection, not a
-        working limit: ten thousand songs build in about 150ms and cost
-        nothing to scroll, since offscreen rows are kept out of the layout
-        budget. It is reported when reached, so the pane can say the list
-        was cut short rather than quietly lying about what is there.
+        Songs is the only browse surface that can run into many thousands
+        of visible rows. While filtering, returning a sensible slice
+        quickly matters more than proving how many matches exist, since
+        each settled keystroke rebuilds the frontend list from scratch -
+        unfiltered Songs keeps the large backstop, filtered Songs uses a
+        much smaller working cap.
         """
         # Titles only. Matching the album name as well returned every track
         # on an album whose title happened to contain the search, which is
         # what the albums tab is for; here the rows are songs, so the
         # search should be too.
-        clause, args = self._match(needle, ("title",))
+        text = (needle or "").strip()
+        clause, args = self._match(text, ("title",))
         where = f"WHERE {clause}" if clause else ""
+        effective_limit = 1500 if text else int(limit)
         rows = self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
                    duration, track_number, disc_number, year
@@ -593,10 +592,10 @@ class LibraryService:
                      COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE,
                      year, album COLLATE NOCASE, {_TRACK_ORDER}
             LIMIT ?
-        """, tuple(args) + (int(limit) + 1,))
-        truncated = len(rows) > limit
+        """, tuple(args) + (effective_limit + 1,))
+        truncated = len(rows) > effective_limit
         if truncated:
-            rows = rows[:limit]
+            rows = rows[:effective_limit]
         # Re-sorted here so leading punctuation is ignored, which SQL
         # collation cannot do; within an album the SQL order is kept.
         # Tracks with no album tag collect at the very end rather than

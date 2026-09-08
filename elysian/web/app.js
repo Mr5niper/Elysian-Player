@@ -1120,6 +1120,8 @@ let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
 let libBrowserRevision = -1;
 let libDetailRevision = -1;
+let libLoading = false;
+let libDesiredNeedle = "";
 
 const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -1132,6 +1134,8 @@ function libraryOpened() {
     // asking for the state first costs one call on the first open only.
     const ask = (view) => {
       libView = view;
+      libDesiredNeedle = $("libfilter").value.trim();
+      libLoading = true;
       document.querySelectorAll(".libtab").forEach((x) =>
         x.classList.toggle("active", x.dataset.lib === libView));
       libGridSig = "";
@@ -1141,7 +1145,7 @@ function libraryOpened() {
       libAnchor = null;
       renderLibrary();
       libPending++;
-      a.library_request_browser(libView, $("libfilter").value.trim());
+      a.library_request_browser(libView, libDesiredNeedle);
       schedule();
     };
     if (typeof a.library_get_state === "function") {
@@ -1918,7 +1922,12 @@ function setLibView(name) {
     b.classList.toggle("active", b.dataset.lib === name));
 
   const saved = libTabState[name];
-  if (saved && !saved.stale) {
+  const activeNeedle = $("libfilter").value.trim();
+  // A cached tab snapshot may have been captured under a different (or no)
+  // filter, so it can't be trusted while one is currently active - restore
+  // it only when there is nothing typed to filter by.
+  if (!activeNeedle && saved && !saved.stale) {
+    libLoading = false;
     restoreLibTabState(saved);
     return;
   }
@@ -1932,8 +1941,10 @@ function setLibView(name) {
 
   const a = api();
   if (a) {
+    libDesiredNeedle = activeNeedle;
+    libLoading = true;
     libPending++;
-    a.library_request_browser(name, $("libfilter").value.trim());
+    a.library_request_browser(name, activeNeedle);
     schedule();
   }
 }
@@ -1978,19 +1989,28 @@ document.querySelectorAll(".libtab").forEach((b) =>
 
 let libFilterTimer = 0;
 $("libfilter").addEventListener("input", () => {
-  // Asked of the backend, not applied to what is already loaded: a song
-  // title is not in the album list, so matching locally could never find
-  // one. Debounced, since this is a query rather than an array filter.
+  // Filtering is backend-owned, not a local array filter, because Albums,
+  // Artists, Genres and Songs each search against different fields. But
+  // the UI should still react immediately while the query is in flight,
+  // rather than sitting on the previous result until it lands.
+  const needle = $("libfilter").value.trim();
+  libDesiredNeedle = needle;
+  libDetail = null;
+  libAnchor = null;
+  libLoading = true;
+  libItems = [];
+  libGridSig = "";
+  renderLibrary();
+  schedule();
+
   clearTimeout(libFilterTimer);
   libFilterTimer = setTimeout(() => {
     const a = api();
     if (!a) return;
-    libDetail = null;
-    libAnchor = null;
     libPending++;
-    a.library_request_browser(libView, $("libfilter").value.trim());
+    a.library_request_browser(libView, needle);
     schedule();
-  }, 180);
+  }, 120);
 });
 
 $("libfolders").addEventListener("click", (e) => {
@@ -2186,7 +2206,18 @@ function applyLibraryTick(tick) {
     a.library_get_browser().then((b) => {
       if (!b) return;
 
+      const currentNeedle = $("libfilter").value.trim();
+      const resultNeedle = (b.needle || "").trim();
       const incomingView = b.view || libView;
+
+      // Not wrong, just no longer wanted: the user typed further, or
+      // switched tabs, since this particular query was sent.
+      if (incomingView !== libView || resultNeedle !== currentNeedle
+          || resultNeedle !== libDesiredNeedle) {
+        return;
+      }
+
+      libLoading = false;
       libView = incomingView;
       libItems = b.items || [];
 
@@ -2286,6 +2317,20 @@ function applyLibraryTick(tick) {
       if (libRoots.length) bits.push(fmtCount(libRoots.length, "folder", "folders"));
       if (libShowFolders) renderFolders();
       $("libstat").textContent = bits.join("   |   ");
+
+      // Invalidated above; if the currently visible tab was one of them,
+      // reload it now with whatever is currently typed rather than
+      // waiting for a manual tab switch to notice.
+      if (view === "library" && libOpened) {
+        const current = libTabState[libView];
+        if (!current || current.stale) {
+          libDesiredNeedle = $("libfilter").value.trim();
+          libLoading = true;
+          libPending++;
+          a.library_request_browser(libView, libDesiredNeedle);
+          schedule();
+        }
+      }
     }).catch(() => {});
   }
 }
