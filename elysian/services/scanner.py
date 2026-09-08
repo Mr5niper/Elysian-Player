@@ -84,6 +84,17 @@ EMPTY_METADATA = {
     "track_total": 0, "disc_total": 0,
 }
 
+#: What the tag editor may change, and what LibraryService considers
+#: "editable" for the payload it builds and the mixed-value aggregation it
+#: does. Defined once here, since both library.py and tag_editor.py were
+#: previously keeping their own identical copy of this same list with
+#: nothing enforcing that they stay identical.
+EDITABLE_TRACK_FIELDS = (
+    "title", "artist", "album", "album_artist", "genre",
+    "track_number", "track_total", "disc_number", "disc_total",
+    "year", "compilation",
+)
+
 
 def read_metadata(path: str) -> dict:
     """Read tags for one file. Never raises."""

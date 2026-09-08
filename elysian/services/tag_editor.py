@@ -18,7 +18,7 @@ holding the file open to ask it directly.
 import os
 
 from ..logs import get as _get_logger
-from .scanner import _number, _total
+from .scanner import _number, _total, EDITABLE_TRACK_FIELDS
 
 log = _get_logger("tag_editor")
 
@@ -31,13 +31,10 @@ _VORBIS_EXTS = {".flac", ".ogg", ".oga", ".opus"}
 
 _TEXT_FIELDS = ("title", "artist", "album", "album_artist", "genre")
 
-#: What the editor may change. Shared with LibraryService.EDITABLE_FIELDS
-#: so the two cannot silently disagree about what "editable" means.
-FIELDS = (
-    "title", "artist", "album", "album_artist", "genre",
-    "track_number", "track_total", "disc_number", "disc_total",
-    "year", "compilation",
-)
+#: What the editor may change. Defined once in scanner.py and shared with
+#: LibraryService.EDITABLE_FIELDS, so the two cannot silently disagree
+#: about what "editable" means.
+FIELDS = EDITABLE_TRACK_FIELDS
 
 
 def _combine(number, total) -> str:
