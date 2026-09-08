@@ -2408,9 +2408,17 @@ function scrollExpandedAlbumIntoView(grew) {
   // current here instead of trusted once.
   let tries = 0;
   const apply = () => {
-    const target = (grew && detail.previousElementSibling)
-      ? detail.previousElementSibling.offsetTop : detail.offsetTop;
-    grid.scrollTop = target;
+    if (grew && detail.previousElementSibling) {
+      grid.scrollTop = detail.previousElementSibling.offsetTop;
+    } else if (!grew) {
+      // Shrinking follows the same rule as opening or switching albums:
+      // reveal as much of it as fits, but never hide its own top - rather
+      // than always force-jumping to its exact start regardless of
+      // whether anything needed correcting in the first place.
+      ensureExpandedAlbumVisible();
+    } else {
+      grid.scrollTop = detail.offsetTop;
+    }
     tries++;
     if (tries < 20) libExpandScrollTimer = requestAnimationFrame(apply);
   };
