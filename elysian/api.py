@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
+from webview.window import FixPoint
+
 from . import config
 from . import paths as pathutil
 from .models.playlist import Playlist
@@ -1748,6 +1750,50 @@ class Api:
         if self._window:
             self._window.destroy()
 
+    # Which corner/edge pywebview's own resize() keeps fixed while the
+    # opposite one follows the mouse, for each of the eight drag handles.
+    # window.resize() only takes a target width/height - it has no notion
+    # of "drag this edge" - so the fix point is what makes, say, dragging
+    # the left edge grow the window leftward instead of resizing in place
+    # from the top-left corner, which is resize()'s own default.
+    _RESIZE_FIX_POINTS = {
+        "right":       FixPoint.NORTH | FixPoint.WEST,
+        "bottom":      FixPoint.NORTH | FixPoint.WEST,
+        "bottomright": FixPoint.NORTH | FixPoint.WEST,
+        "left":        FixPoint.NORTH | FixPoint.EAST,
+        "bottomleft":  FixPoint.NORTH | FixPoint.EAST,
+        "top":         FixPoint.SOUTH | FixPoint.WEST,
+        "topright":    FixPoint.SOUTH | FixPoint.WEST,
+        "topleft":     FixPoint.SOUTH | FixPoint.EAST,
+    }
+
+    def win_resize_to(self, edge: str, width: float, height: float) -> None:
+        """Resize toward a target size while dragging one edge or corner.
+
+        A frameless window has no native resize border at all, so this is
+        called continuously from JS while the mouse moves rather than
+        started once and left to the OS: window.resize() only understands
+        "be this size", not "the user is dragging". This is the same
+        window.resize()/SetWindowPos call pywebview's own move() already
+        uses for the working title-bar drag, not a raw WM_SYSCOMMAND -
+        that approach looked right but never actually took over the mouse,
+        since the WebView2 content keeps its own capture in a separate
+        process that ReleaseCapture() on the top-level window never
+        touches.
+        """
+        if not self._window:
+            return
+        fix_point = self._RESIZE_FIX_POINTS.get(str(edge or "").lower())
+        if fix_point is None:
+            return
+        try:
+            w = max(1, int(round(width)))
+            h = max(1, int(round(height)))
+            self._window.resize(w, h, fix_point)
+        except Exception:
+            log.warning("could not resize toward %r (%s x %s)",
+                        edge, width, height, exc_info=True)
+
     # ---- session -------------------------------------------------------
 
     def _do_restore_session(self) -> None:
@@ -1885,7 +1931,7 @@ class Api:
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "toggle_mute",
-        "win_minimise", "win_maximise", "win_close",
+        "win_minimise", "win_maximise", "win_close", "win_resize_to",
         "library_add_folder", "library_remove_root", "library_rescan",
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",
