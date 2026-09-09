@@ -600,6 +600,18 @@ html, body {
 .lib-expand-connector.hidden { display: none; }
 #lib-expand-connector-left { border-top-width: 2px; border-left-width: 2px; }
 #lib-expand-connector-right { border-top-width: 2px; border-right-width: 2px; }
+/* While the window is actively being resized, this border's position
+   depends on layout that is still changing multiple times a second -
+   trying to keep it pinned exactly right through that is a losing
+   battle, especially dragging fast, and looks like exactly what it is:
+   broken. Making it transparent for that one moment sidesteps the whole
+   problem instead of chasing it - there is nothing wrong to see, and it
+   reappears already correctly placed the instant resizing settles. */
+body.resizing .libcard.expanded,
+body.resizing #libgrid > #libdetail,
+body.resizing .lib-expand-connector {
+  border-color: transparent;
+}
 /* The viewport-relative cover size assumes filling the rest of the window,
    which an inline row does not do: a fixed, more modest size reads as part
    of the grid instead of a full pane bolted under it. */

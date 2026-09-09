@@ -2691,6 +2691,7 @@ let libResizeBaseline = window.innerWidth * window.innerHeight;
    still falls back to comparing area. */
 let libMaximizeToggleGrew = null;
 window.addEventListener("resize", () => {
+  document.body.classList.add("resizing");
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
   // only scrolling or a data change recomputed it. Growing the window
@@ -2707,6 +2708,7 @@ window.addEventListener("resize", () => {
   // edge and this involves real DOM moves, not just a read.
   clearTimeout(libResizeTimer);
   libResizeTimer = setTimeout(() => {
+    document.body.classList.remove("resizing");
     const area = window.innerWidth * window.innerHeight;
     const grew = libMaximizeToggleGrew !== null
       ? libMaximizeToggleGrew : area >= libResizeBaseline;
