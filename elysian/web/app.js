@@ -59,6 +59,7 @@ function setView(name) {
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
+  else stopVisualizer();
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
@@ -2565,6 +2566,98 @@ function drawWave() {
     x.fillRect(i * bw + bw * 0.22, (h - bh) / 2, Math.max(1, bw * 0.56), bh);
   }
 }
+
+/* Double-click cover/wave visualizer. Its own independent poll loop
+   rather than folding into the main poll(): it only needs to run for the
+   brief periods it is actually open, at a much faster rate (33ms, ~30fps)
+   than the rest of the app ever needs, and nothing else here cares about
+   its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope
+   - double-clicking cycles through all three, so the same gesture that
+   opens it is also how it closes, with no separate control needed. */
+let vizMode = 0;
+let vizTimer = 0;
+let vizW = 0, vizH = 0;
+
+function stopVisualizer() {
+  if (vizMode === 0) return;
+  vizMode = 0;
+  clearTimeout(vizTimer);
+  $("visualizer").classList.add("hidden");
+}
+
+function cycleVisualizer() {
+  vizMode = (vizMode + 1) % 3;
+  if (vizMode === 0) {
+    clearTimeout(vizTimer);
+    $("visualizer").classList.add("hidden");
+    return;
+  }
+  $("visualizer").classList.remove("hidden");
+  vizPoll();
+}
+
+function vizPoll() {
+  if (vizMode === 0 || view !== "now") return;
+  const a = api();
+  if (!a) { vizTimer = setTimeout(vizPoll, 100); return; }
+  a.visualizer_frame().then((frame) => {
+    if (vizMode === 0 || view !== "now") return;
+    drawVisualizerFrame(frame || {});
+    vizTimer = setTimeout(vizPoll, 33);
+  }).catch(() => {
+    if (vizMode === 0 || view !== "now") return;
+    vizTimer = setTimeout(vizPoll, 200);
+  });
+}
+
+function drawVisualizerFrame(frame) {
+  const c = $("visualizer");
+  const r = c.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  // Same "only touch canvas.width on a real change" rule as drawWave:
+  // assigning it clears the canvas even when the size did not change.
+  if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
+  else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
+}
+
+function drawSpectrumBars(ctx, w, h, bars) {
+  if (!bars.length) return;
+  const gap = Math.max(1, w * 0.006);
+  const bw = (w - gap * (bars.length - 1)) / bars.length;
+  for (let i = 0; i < bars.length; i++) {
+    const bh = Math.max(2, bars[i] * h * 0.92);
+    const x = i * (bw + gap);
+    const grad = ctx.createLinearGradient(0, h - bh, 0, h);
+    grad.addColorStop(0, "#e04b3c");
+    grad.addColorStop(1, "#7d2620");
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, h - bh, bw, bh);
+  }
+}
+
+function drawOscilloscope(ctx, w, h, wave) {
+  if (wave.length < 2) return;
+  ctx.strokeStyle = "#e04b3c";
+  ctx.lineWidth = Math.max(1.5, w * 0.003);
+  ctx.beginPath();
+  const stepX = w / (wave.length - 1);
+  for (let i = 0; i < wave.length; i++) {
+    const x = i * stepX;
+    const y = h / 2 - wave[i] * h * 0.45;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+$("art").addEventListener("dblclick", cycleVisualizer);
+$("wave").addEventListener("dblclick", cycleVisualizer);
+$("visualizer").addEventListener("dblclick", cycleVisualizer);
+
 let libResizeTimer = 0;
 /* Whichever card or row sits topmost-and-leftmost, fully in view, right
    now - identified by whatever stable key that kind of item has (album +
