@@ -25,6 +25,8 @@ from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.tag_editor import write_many as _write_tags
 from .services.waveform import peaks_for
+from .services.visualizer import VisualizerProvider, BARS as VIS_BARS, \
+    WAVE_POINTS as VIS_WAVE_POINTS
 
 from .logs import get as _get_logger
 
@@ -65,6 +67,13 @@ class Api:
         self._status_until = 0.0
         self._peaks: list[float] = []
         self._peaks_for: str | None = None
+        # Unlike peaks, decoded lazily on the first visualizer_frame() call
+        # after a track starts rather than eagerly for every track - most
+        # tracks never have the visualizer opened at all, and decoding is
+        # only worth paying for once one actually is.
+        self._visualizer = VisualizerProvider()
+        self._visualizer_ready_for: str | None = None
+        self._visualizer_pending: str | None = None
         self._closing = False
         self._queued: dict[int, int] = {}
         # Running count for the folder-scan status line, owned by the worker.
@@ -516,6 +525,43 @@ class Api:
         if self._peaks_for == path:
             self._peaks = found
 
+    def visualizer_frame(self) -> dict:
+        """Spectrum bars and an oscilloscope slice for whatever is playing
+        right now, for the Now Playing double-click visualizer.
+
+        Decoding is kicked off lazily by this same call rather than eagerly
+        whenever a track starts, unlike peaks_for above: most tracks never
+        have the visualizer opened, so there is no reason to pay the decode
+        cost for all of them just in case. Called on its own, rapidly,
+        only while the visualizer is actually open - not part of the
+        regular tick - so it costs nothing the rest of the time.
+        """
+        empty = {"bars": [0.0] * VIS_BARS, "wave": [0.0] * VIS_WAVE_POINTS}
+        if not self._engine.active or not self._engine.path:
+            return empty
+        path = self._engine.path
+        if self._visualizer_ready_for != path:
+            if self._visualizer_pending != path:
+                self._visualizer_pending = path
+                def work():
+                    ok = self._visualizer.ensure_decoded(path)
+                    self._post("visualizer_decoded", path, ok)
+                threading.Thread(target=work, name="elysian-visualizer",
+                                 daemon=True).start()
+            return empty
+        try:
+            return self._visualizer.frame_at(path, self._engine.position)
+        except Exception:
+            log.warning("visualizer frame failed for %s", path,
+                        exc_info=True)
+            return empty
+
+    def _do_visualizer_decoded(self, path: str, ok: bool) -> None:
+        if self._visualizer_pending == path:
+            self._visualizer_pending = None
+        if ok:
+            self._visualizer_ready_for = path
+
     # ---- adding --------------------------------------------------------
 
     def _walk_folder(self, root: str):
@@ -778,6 +824,8 @@ class Api:
         self._history.clear()
         self._peaks = []
         self._peaks_for = None
+        self._visualizer_ready_for = None
+        self._visualizer_pending = None
         self._resume_id = -1
         self._resume_at = 0.0
         self._art_cache.clear()
@@ -1922,7 +1970,7 @@ class Api:
     #: Everything JavaScript is allowed to call. Anything public and not in
     #: this set or HOST_PUBLIC is a mistake. See _assert_bridge_surface.
     JS_BRIDGE = frozenset({
-        "get_tick", "get_full", "get_meta", "get_peaks",
+        "get_tick", "get_full", "get_meta", "get_peaks", "visualizer_frame",
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",

@@ -158,7 +158,21 @@ html, body {
      until the waveform beside it has almost nothing left. */
   --np-art: clamp(150px, min(calc(100vh - 260px), 40vw), 480px);
   display: flex; gap: 24px; align-items: center;
+  position: relative;
 }
+/* Double-clicking the cover or the waveform swaps this in over the whole
+   row rather than replacing just one half of it - a spectrum display
+   reads as one instrument, not two things bolted together, and it means
+   there is one shape to click back out of regardless of which side
+   opened it. */
+#visualizer {
+  position: absolute; inset: 0;
+  width: 100%; height: 100%;
+  border-radius: 12px;
+  background: var(--panel-2);
+  cursor: pointer;
+}
+#visualizer.hidden { display: none; }
 #artwrap { flex-shrink: 0; text-align: center; width: var(--np-art); }
 #art {
   width: var(--np-art); height: var(--np-art);
