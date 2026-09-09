@@ -793,6 +793,52 @@ const intent = {
 };
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
+
+function wireResizeHandle(id) {
+  const el = $(id);
+  if (!el) return;
+  const edge = el.dataset.edge || "";
+  const growsRight = edge.includes("right");
+  const growsLeft = edge.includes("left");
+  const growsDown = edge.includes("bottom");
+  const growsUp = edge.includes("top");
+
+  const start = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const a = api();
+    if (!a || typeof a.win_resize_to !== "function") return;
+
+    // window.resize() only understands a target size, not "the user is
+    // dragging this edge", so this has to keep calling it as the mouse
+    // moves rather than starting a native drag once, the same way
+    // pywebview's own title-bar drag keeps calling pywebviewMoveWindow on
+    // every mousemove rather than handing the gesture to the OS outright.
+    const startX = e.screenX;
+    const startY = e.screenY;
+    const startW = window.outerWidth;
+    const startH = window.outerHeight;
+
+    const onMove = (ev) => {
+      const dx = ev.screenX - startX;
+      const dy = ev.screenY - startY;
+      let w = startW;
+      let h = startH;
+      if (growsRight) w = startW + dx;
+      if (growsLeft) w = startW - dx;
+      if (growsDown) h = startH + dy;
+      if (growsUp) h = startH - dy;
+      a.win_resize_to(edge, w, h);
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+  el.addEventListener("mousedown", start);
+}
 wire("play", () => intent.togglePlay());
 wire("prev", () => intent.previous());
 wire("next", () => intent.next());
@@ -817,6 +863,15 @@ $("modal").addEventListener("click", (e) => {
 wire("win-min", () => api().win_minimise());
 wire("win-max", () => intent.toggleMaximise());
 wire("win-close", () => api().win_close());
+
+wireResizeHandle("resize-top");
+wireResizeHandle("resize-right");
+wireResizeHandle("resize-bottom");
+wireResizeHandle("resize-left");
+wireResizeHandle("resize-tl");
+wireResizeHandle("resize-tr");
+wireResizeHandle("resize-br");
+wireResizeHandle("resize-bl");
 
 $("titlebar").addEventListener("dblclick", (e) => {
   if (e.target.closest(".winbtn")) return;
@@ -2636,6 +2691,7 @@ let libResizeBaseline = window.innerWidth * window.innerHeight;
    still falls back to comparing area. */
 let libMaximizeToggleGrew = null;
 window.addEventListener("resize", () => {
+  document.body.classList.add("resizing");
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
   // only scrolling or a data change recomputed it. Growing the window
@@ -2652,6 +2708,7 @@ window.addEventListener("resize", () => {
   // edge and this involves real DOM moves, not just a read.
   clearTimeout(libResizeTimer);
   libResizeTimer = setTimeout(() => {
+    document.body.classList.remove("resizing");
     const area = window.innerWidth * window.innerHeight;
     const grew = libMaximizeToggleGrew !== null
       ? libMaximizeToggleGrew : area >= libResizeBaseline;

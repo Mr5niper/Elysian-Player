@@ -24,6 +24,52 @@ html, body {
   cursor: default;
 }
 
+/* ---- frameless resize hit-zones ----
+   Invisible native-resize grips around the window edges/corners. They sit
+   above the app visually but draw nothing, preserving the exact current look
+   while restoring normal edge and corner resizing. The titlebar sits above
+   these (see #titlebar's z-index below) so its buttons and drag region
+   always win the hit-test in the strip where they'd otherwise overlap -
+   the same way every native Windows title bar behaves: the resize border
+   only claims space that isn't already spoken for by the caption area. */
+.resize-handle {
+  position: fixed;
+  z-index: 1000;
+  background: transparent;
+  pointer-events: auto;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+.resize-handle.edge[data-edge="top"],
+.resize-handle.edge[data-edge="bottom"] {
+  left: 8px;
+  right: 8px;
+  height: 6px;
+}
+
+.resize-handle.edge[data-edge="left"],
+.resize-handle.edge[data-edge="right"] {
+  top: 8px;
+  bottom: 8px;
+  width: 6px;
+}
+
+.resize-handle.corner {
+  width: 12px;
+  height: 12px;
+}
+
+#resize-top { top: 0; cursor: ns-resize; }
+#resize-right { top: 8px; right: 0; bottom: 8px; cursor: ew-resize; }
+#resize-bottom { bottom: 0; cursor: ns-resize; }
+#resize-left { top: 8px; left: 0; bottom: 8px; cursor: ew-resize; }
+
+#resize-tl { top: 0; left: 0; cursor: nwse-resize; }
+#resize-tr { top: 0; right: 0; cursor: nesw-resize; }
+#resize-br { right: 0; bottom: 0; cursor: nwse-resize; }
+#resize-bl { left: 0; bottom: 0; cursor: nesw-resize; }
+
 #app {
   height: 100vh;
   display: flex;
@@ -41,14 +87,16 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  padding-right: 4px;
+  padding-right: 8px;
 }
 #titlebar .spacer { flex: 1; height: 100%; }
 .winbtn {
-  width: 40px; height: 32px;
+  width: 40px; height: 26px;
   display: flex; align-items: center; justify-content: center;
   color: var(--muted);
   cursor: default;
+  position: relative;
+  z-index: 1001;
 }
 .winbtn:hover { background: rgba(255,255,255,0.07); color: var(--text); }
 .winbtn.close:hover { background: #c0392f; color: #fff; }
@@ -552,6 +600,18 @@ html, body {
 .lib-expand-connector.hidden { display: none; }
 #lib-expand-connector-left { border-top-width: 2px; border-left-width: 2px; }
 #lib-expand-connector-right { border-top-width: 2px; border-right-width: 2px; }
+/* While the window is actively being resized, this border's position
+   depends on layout that is still changing multiple times a second -
+   trying to keep it pinned exactly right through that is a losing
+   battle, especially dragging fast, and looks like exactly what it is:
+   broken. Making it transparent for that one moment sidesteps the whole
+   problem instead of chasing it - there is nothing wrong to see, and it
+   reappears already correctly placed the instant resizing settles. */
+body.resizing .libcard.expanded,
+body.resizing #libgrid > #libdetail,
+body.resizing .lib-expand-connector {
+  border-color: transparent;
+}
 /* The viewport-relative cover size assumes filling the rest of the window,
    which an inline row does not do: a fixed, more modest size reads as part
    of the grid instead of a full pane bolted under it. */
