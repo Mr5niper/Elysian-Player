@@ -1815,6 +1815,24 @@ class Api:
         "topleft":     FixPoint.SOUTH | FixPoint.EAST,
     }
 
+    def win_geometry(self) -> dict:
+        """Small, pure read: current outer window geometry.
+
+        Read once at the start of a manual resize gesture and cached in
+        JS, so the hot path does not keep crossing into the host just to
+        ask the same question on every pointermove.
+        """
+        if not self._window:
+            return {"width": 0, "height": 0}
+        try:
+            return {
+                "width": int(getattr(self._window, "width", 0) or 0),
+                "height": int(getattr(self._window, "height", 0) or 0),
+            }
+        except Exception:
+            log.warning("could not read window geometry", exc_info=True)
+            return {"width": 0, "height": 0}
+
     def win_resize_to(self, edge: str, width: float, height: float) -> None:
         """Resize toward a target size while dragging one edge or corner.
 
@@ -1979,7 +1997,8 @@ class Api:
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "toggle_mute",
-        "win_minimise", "win_maximise", "win_close", "win_resize_to",
+        "win_minimise", "win_maximise", "win_close",
+        "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",

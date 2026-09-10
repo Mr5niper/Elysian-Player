@@ -795,6 +795,40 @@ const intent = {
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
 
+/* Frameless safe-resize mode.
+   Live resize was calling into the native host continuously during an
+   active WebView2 pointer gesture, which can lose the grab or reattach
+   offset under a fast real drag. In safe mode the drag stays entirely in
+   JS until pointerup, then the real window resize is committed once.
+   700/420 match config.MIN_WIDTH/MIN_HEIGHT on the Python side, not
+   arbitrary - kept as literals since JS has no access to that config
+   directly, but intentionally the same numbers, not a coincidence. */
+const SAFE_RESIZE = true;
+const RESIZE_MIN_W = 700;
+const RESIZE_MIN_H = 420;
+let resizeGhost = null;
+
+function clampResizeSize(w, h) {
+  return {
+    width: Math.max(RESIZE_MIN_W, Math.round(w || 0)),
+    height: Math.max(RESIZE_MIN_H, Math.round(h || 0)),
+  };
+}
+
+function beginResizeGhost(width, height) {
+  resizeGhost = { width, height };
+  document.body.classList.add("resizing");
+}
+
+function updateResizeGhost(width, height) {
+  resizeGhost = { width, height };
+}
+
+function endResizeGhost() {
+  resizeGhost = null;
+  document.body.classList.remove("resizing");
+}
+
 function wireResizeHandle(id) {
   const el = $(id);
   if (!el) return;
@@ -804,41 +838,75 @@ function wireResizeHandle(id) {
   const growsDown = edge.includes("bottom");
   const growsUp = edge.includes("top");
 
-  const start = (e) => {
+  const start = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+
     const a = api();
     if (!a || typeof a.win_resize_to !== "function") return;
 
-    // window.resize() only understands a target size, not "the user is
-    // dragging this edge", so this has to keep calling it as the mouse
-    // moves rather than starting a native drag once, the same way
-    // pywebview's own title-bar drag keeps calling pywebviewMoveWindow on
-    // every mousemove rather than handing the gesture to the OS outright.
+    let geom = { width: window.outerWidth, height: window.outerHeight };
+    if (typeof a.win_geometry === "function") {
+      try {
+        const got = await a.win_geometry();
+        if (got && got.width && got.height) geom = got;
+      } catch (_) {
+        // fall back to outerWidth/outerHeight
+      }
+    }
+
     const startX = e.screenX;
     const startY = e.screenY;
-    const startW = window.outerWidth;
-    const startH = window.outerHeight;
+    const startW = geom.width || window.outerWidth;
+    const startH = geom.height || window.outerHeight;
+
+    let pending = clampResizeSize(startW, startH);
+    let alive = true;
+
+    beginResizeGhost(pending.width, pending.height);
 
     const onMove = (ev) => {
+      if (!alive) return;
       const dx = ev.screenX - startX;
       const dy = ev.screenY - startY;
+
       let w = startW;
       let h = startH;
       if (growsRight) w = startW + dx;
       if (growsLeft) w = startW - dx;
       if (growsDown) h = startH + dy;
       if (growsUp) h = startH - dy;
-      a.win_resize_to(edge, w, h);
+
+      pending = clampResizeSize(w, h);
+      updateResizeGhost(pending.width, pending.height);
     };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+
+    const finish = () => {
+      if (!alive) return;
+      alive = false;
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+
+      const finalSize = pending;
+      endResizeGhost();
+
+      if (SAFE_RESIZE) {
+        a.win_resize_to(edge, finalSize.width, finalSize.height);
+      }
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+
+    const onUp = () => finish();
+    const onCancel = () => finish();
+
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   };
-  el.addEventListener("mousedown", start);
+
+  el.addEventListener("pointerdown", start);
 }
 wire("play", () => intent.togglePlay());
 wire("prev", () => intent.previous());
