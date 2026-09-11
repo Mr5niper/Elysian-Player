@@ -795,6 +795,58 @@ const intent = {
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
 
+/* Frameless live resize.
+   This calls win_resize_to() on every pointermove, throttled to once per
+   animation frame - a genuine, live resize of the real window, the same
+   as any ordinary Windows app. Nothing else is drawn anywhere; the
+   window's own content is what changes shape, in place, as the mouse
+   moves.
+
+   An earlier version of this deferred the real resize to pointerup only,
+   because calling it live used to make the window occasionally detach
+   from the cursor mid-drag and reattach somewhere else - sometimes off
+   screen. That turned out to be a real bug in pywebview's own
+   Window.resize() (confirmed by reading webview/platforms/winforms.py
+   directly): its SetWindowPos() call passes flags=64 (SWP_SHOWWINDOW)
+   and nothing else, so every resize call also nudged this window's
+   activation and z-order, and WebView2 - Chromium underneath - drops its
+   own internal pointer capture the instant its host window's activation
+   changes. See the docstring on Api.win_resize_to in api.py for the
+   fix: it now calls SetWindowPos() directly with SWP_NOACTIVATE and
+   SWP_NOZORDER, so a resize never touches activation or z-order at all.
+   With the real cause fixed, live resizing here is safe again, and there
+   is no need for any separate preview to fake it.
+   700/420 match config.MIN_WIDTH/MIN_HEIGHT on the Python side, not
+   arbitrary - kept as literals since JS has no access to that config
+   directly, but intentionally the same numbers, not a coincidence. */
+const RESIZE_MIN_W = 700;
+const RESIZE_MIN_H = 420;
+let resizeRaf = 0;
+let resizePending = null;
+
+function clampResizeSize(w, h) {
+  return {
+    width: Math.max(RESIZE_MIN_W, Math.round(w || 0)),
+    height: Math.max(RESIZE_MIN_H, Math.round(h || 0)),
+  };
+}
+
+function flushResize(edge) {
+  resizeRaf = 0;
+  const a = api();
+  if (!a || !resizePending) return;
+  a.win_resize_to(edge, resizePending.width, resizePending.height);
+}
+
+/* Coalesced to at most one call per animation frame: a fast real drag
+   fires far more pointermove events than the window can actually redraw
+   in response to, and there is no reason to cross the IPC bridge (let
+   alone touch Win32) more often than that. */
+function scheduleResize(edge, size) {
+  resizePending = size;
+  if (!resizeRaf) resizeRaf = requestAnimationFrame(() => flushResize(edge));
+}
+
 function wireResizeHandle(id) {
   const el = $(id);
   if (!el) return;
@@ -804,41 +856,67 @@ function wireResizeHandle(id) {
   const growsDown = edge.includes("bottom");
   const growsUp = edge.includes("top");
 
-  const start = (e) => {
+  const start = async (e) => {
     e.preventDefault();
     e.stopPropagation();
+
     const a = api();
     if (!a || typeof a.win_resize_to !== "function") return;
 
-    // window.resize() only understands a target size, not "the user is
-    // dragging this edge", so this has to keep calling it as the mouse
-    // moves rather than starting a native drag once, the same way
-    // pywebview's own title-bar drag keeps calling pywebviewMoveWindow on
-    // every mousemove rather than handing the gesture to the OS outright.
+    let geom = { width: window.outerWidth, height: window.outerHeight };
+    if (typeof a.win_geometry === "function") {
+      try {
+        const got = await a.win_geometry();
+        if (got && got.width && got.height) geom = got;
+      } catch (_) {
+        // fall back to outerWidth/outerHeight
+      }
+    }
+
     const startX = e.screenX;
     const startY = e.screenY;
-    const startW = window.outerWidth;
-    const startH = window.outerHeight;
+    const startW = geom.width || window.outerWidth;
+    const startH = geom.height || window.outerHeight;
+    let alive = true;
 
     const onMove = (ev) => {
+      if (!alive) return;
       const dx = ev.screenX - startX;
       const dy = ev.screenY - startY;
+
       let w = startW;
       let h = startH;
       if (growsRight) w = startW + dx;
       if (growsLeft) w = startW - dx;
       if (growsDown) h = startH + dy;
       if (growsUp) h = startH - dy;
-      a.win_resize_to(edge, w, h);
+
+      scheduleResize(edge, clampResizeSize(w, h));
     };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
+
+    const finish = () => {
+      if (!alive) return;
+      alive = false;
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (resizeRaf) { cancelAnimationFrame(resizeRaf); resizeRaf = 0; }
+      resizePending = null;
+      document.body.classList.remove("resizing");
     };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
+
+    const onUp = () => finish();
+    const onCancel = () => finish();
+
+    document.body.classList.add("resizing");
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   };
-  el.addEventListener("mousedown", start);
+
+  el.addEventListener("pointerdown", start);
 }
 wire("play", () => intent.togglePlay());
 wire("prev", () => intent.previous());

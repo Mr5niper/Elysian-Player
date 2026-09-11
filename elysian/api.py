@@ -1815,29 +1815,121 @@ class Api:
         "topleft":     FixPoint.SOUTH | FixPoint.EAST,
     }
 
+    def win_geometry(self) -> dict:
+        """Small, pure read: current outer window geometry.
+
+        Read once at the start of a manual resize gesture and cached in
+        JS, so the hot path does not keep crossing into the host just to
+        ask the same question on every pointermove.
+        """
+        if not self._window:
+            return {"width": 0, "height": 0}
+        try:
+            return {
+                "width": int(getattr(self._window, "width", 0) or 0),
+                "height": int(getattr(self._window, "height", 0) or 0),
+            }
+        except Exception:
+            log.warning("could not read window geometry", exc_info=True)
+            return {"width": 0, "height": 0}
+
+    def _native_hwnd(self):
+        """The real Win32 window handle, if the GUI backend exposes one.
+
+        pywebview sets Window.native to the backend's own object once the
+        window exists - for the winforms backend this app runs on, that
+        object's .Handle is a .NET IntPtr. Returns None rather than
+        raising if that shape is ever different (a non-Windows platform,
+        or a future pywebview that swaps backends), so a resize always
+        still has pywebview's own Window.resize() to fall back to.
+        """
+        native = getattr(self._window, "native", None)
+        handle = getattr(native, "Handle", None)
+        if handle is None:
+            return None
+        try:
+            return int(handle.ToInt32())
+        except Exception:
+            try:
+                return int(handle)
+            except Exception:
+                return None
+
     def win_resize_to(self, edge: str, width: float, height: float) -> None:
         """Resize toward a target size while dragging one edge or corner.
 
         A frameless window has no native resize border at all, so this is
-        called continuously from JS while the mouse moves rather than
-        started once and left to the OS: window.resize() only understands
-        "be this size", not "the user is dragging". This is the same
-        window.resize()/SetWindowPos call pywebview's own move() already
-        uses for the working title-bar drag, not a raw WM_SYSCOMMAND -
-        that approach looked right but never actually took over the mouse,
-        since the WebView2 content keeps its own capture in a separate
-        process that ReleaseCapture() on the top-level window never
-        touches.
+        called continuously from JS while the mouse moves: window.resize()
+        only understands "be this size", not "the user is dragging".
+
+        This is a genuine live resize of the real content window, called
+        on every pointermove - and it deliberately does NOT go through
+        pywebview's own Window.resize(). That method calls
+        Win32's SetWindowPos() with flags=64 (SWP_SHOWWINDOW) and nothing
+        else - no SWP_NOACTIVATE, no SWP_NOZORDER (confirmed by reading
+        webview/platforms/winforms.py directly, not assumed). Every one of
+        those calls therefore also nudges this window's activation and
+        z-order. WebView2 is Chromium underneath, and Chromium releases
+        its own internal pointer capture the moment its host window's
+        activation state changes - which a resize triggered by pointerdown
+        on an inner element is doing dozens of times a second during a
+        fast real drag. That is what caused the window to detach from the
+        cursor mid-drag and reattach somewhere else, sometimes off screen:
+        not "resizing the real window live is unsafe" in general, but
+        specifically this one missing pair of flags.
+
+        This calls SetWindowPos() directly instead, with SWP_NOACTIVATE
+        and SWP_NOZORDER both set, so a resize never touches this window's
+        activation or z-order at all - same fix-point math and per-monitor
+        DPI scaling pywebview's own implementation uses, just with the
+        flags it left out. The window's actual content is what resizes,
+        live, in place; nothing else is drawn anywhere.
         """
         if not self._window:
             return
         fix_point = self._RESIZE_FIX_POINTS.get(str(edge or "").lower())
         if fix_point is None:
             return
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        hwnd = self._native_hwnd()
+        if hwnd is None:
+            # No native handle available - fall back to pywebview's own
+            # resize(). Missing the two flags above, so only safe to lean
+            # on for an occasional call, not a live per-pointermove one,
+            # but still gets the final size right.
+            try:
+                self._window.resize(int(round(w)), int(round(h)), fix_point)
+            except Exception:
+                log.warning("could not resize toward %r (%s x %s)",
+                            edge, width, height, exc_info=True)
+            return
         try:
-            w = max(1, int(round(width)))
-            h = max(1, int(round(height)))
-            self._window.resize(w, h, fix_point)
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            try:
+                scale = user32.GetDpiForWindow(hwnd) / 96
+            except Exception:
+                scale = 1.0
+            phys_w = max(1, int(round(w * scale)))
+            phys_h = max(1, int(round(h * scale)))
+
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            x, y = rect.left, rect.top
+            if fix_point & FixPoint.EAST:
+                x += (rect.right - rect.left) - phys_w
+            if fix_point & FixPoint.SOUTH:
+                y += (rect.bottom - rect.top) - phys_h
+
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+            user32.SetWindowPos(
+                hwnd, None, x, y, phys_w, phys_h,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
         except Exception:
             log.warning("could not resize toward %r (%s x %s)",
                         edge, width, height, exc_info=True)
@@ -1934,7 +2026,6 @@ class Api:
             log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
-
         self._engine.stop()
 
     def _flush_persisted(self) -> None:
@@ -1979,7 +2070,8 @@ class Api:
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "toggle_mute",
-        "win_minimise", "win_maximise", "win_close", "win_resize_to",
+        "win_minimise", "win_maximise", "win_close",
+        "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",
