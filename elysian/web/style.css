@@ -159,6 +159,11 @@ html, body {
   --np-art: clamp(150px, min(calc(100vh - 260px), 40vw), 480px);
   display: flex; gap: 24px; align-items: center;
   position: relative;
+  /* The visualizer canvas is positioned absolute/inset:0 against this
+     element, and hides both artwrap and wave while it's active - without
+     an explicit height here, a flex container with no visible in-flow
+     children left collapses to zero, taking the canvas down with it. */
+  min-height: var(--np-art);
 }
 /* Double-clicking the cover or the waveform swaps this in over the whole
    row rather than replacing just one half of it - a spectrum display
@@ -169,10 +174,12 @@ html, body {
   position: absolute; inset: 0;
   width: 100%; height: 100%;
   border-radius: 12px;
-  background: var(--panel-2);
+  background: transparent;
   cursor: pointer;
 }
 #visualizer.hidden { display: none; }
+#artwrap.hidden { display: none; }
+#wave.hidden { display: none; }
 #artwrap { flex-shrink: 0; text-align: center; width: var(--np-art); }
 #art {
   width: var(--np-art); height: var(--np-art);

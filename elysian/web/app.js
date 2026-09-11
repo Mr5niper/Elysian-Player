@@ -2661,6 +2661,8 @@ function stopVisualizer() {
   vizMode = 0;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
+  $("artwrap").classList.remove("hidden");
+  $("wave").classList.remove("hidden");
 }
 
 function cycleVisualizer() {
@@ -2668,9 +2670,13 @@ function cycleVisualizer() {
   if (vizMode === 0) {
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
+    $("artwrap").classList.remove("hidden");
+    $("wave").classList.remove("hidden");
     return;
   }
   $("visualizer").classList.remove("hidden");
+  $("artwrap").classList.add("hidden");
+  $("wave").classList.add("hidden");
   vizPoll();
 }
 
