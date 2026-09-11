@@ -12,6 +12,8 @@ from concurrent.futures import ThreadPoolExecutor
 import time
 from pathlib import Path
 
+from webview.window import FixPoint
+
 from . import config
 from . import paths as pathutil
 from .models.playlist import Playlist
@@ -23,6 +25,8 @@ from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.tag_editor import write_many as _write_tags
 from .services.waveform import peaks_for
+from .services.visualizer import VisualizerProvider, BARS as VIS_BARS, \
+    WAVE_POINTS as VIS_WAVE_POINTS
 
 from .logs import get as _get_logger
 
@@ -63,6 +67,13 @@ class Api:
         self._status_until = 0.0
         self._peaks: list[float] = []
         self._peaks_for: str | None = None
+        # Unlike peaks, decoded lazily on the first visualizer_frame() call
+        # after a track starts rather than eagerly for every track - most
+        # tracks never have the visualizer opened at all, and decoding is
+        # only worth paying for once one actually is.
+        self._visualizer = VisualizerProvider()
+        self._visualizer_ready_for: str | None = None
+        self._visualizer_pending: str | None = None
         self._closing = False
         self._queued: dict[int, int] = {}
         # Running count for the folder-scan status line, owned by the worker.
@@ -514,6 +525,43 @@ class Api:
         if self._peaks_for == path:
             self._peaks = found
 
+    def visualizer_frame(self) -> dict:
+        """Spectrum bars and an oscilloscope slice for whatever is playing
+        right now, for the Now Playing double-click visualizer.
+
+        Decoding is kicked off lazily by this same call rather than eagerly
+        whenever a track starts, unlike peaks_for above: most tracks never
+        have the visualizer opened, so there is no reason to pay the decode
+        cost for all of them just in case. Called on its own, rapidly,
+        only while the visualizer is actually open - not part of the
+        regular tick - so it costs nothing the rest of the time.
+        """
+        empty = {"bars": [0.0] * VIS_BARS, "wave": [0.0] * VIS_WAVE_POINTS}
+        if not self._engine.active or not self._engine.path:
+            return empty
+        path = self._engine.path
+        if self._visualizer_ready_for != path:
+            if self._visualizer_pending != path:
+                self._visualizer_pending = path
+                def work():
+                    ok = self._visualizer.ensure_decoded(path)
+                    self._post("visualizer_decoded", path, ok)
+                threading.Thread(target=work, name="elysian-visualizer",
+                                 daemon=True).start()
+            return empty
+        try:
+            return self._visualizer.frame_at(path, self._engine.position)
+        except Exception:
+            log.warning("visualizer frame failed for %s", path,
+                        exc_info=True)
+            return empty
+
+    def _do_visualizer_decoded(self, path: str, ok: bool) -> None:
+        if self._visualizer_pending == path:
+            self._visualizer_pending = None
+        if ok:
+            self._visualizer_ready_for = path
+
     # ---- adding --------------------------------------------------------
 
     def _walk_folder(self, root: str):
@@ -776,6 +824,8 @@ class Api:
         self._history.clear()
         self._peaks = []
         self._peaks_for = None
+        self._visualizer_ready_for = None
+        self._visualizer_pending = None
         self._resume_id = -1
         self._resume_at = 0.0
         self._art_cache.clear()
@@ -1748,6 +1798,142 @@ class Api:
         if self._window:
             self._window.destroy()
 
+    # Which corner/edge pywebview's own resize() keeps fixed while the
+    # opposite one follows the mouse, for each of the eight drag handles.
+    # window.resize() only takes a target width/height - it has no notion
+    # of "drag this edge" - so the fix point is what makes, say, dragging
+    # the left edge grow the window leftward instead of resizing in place
+    # from the top-left corner, which is resize()'s own default.
+    _RESIZE_FIX_POINTS = {
+        "right":       FixPoint.NORTH | FixPoint.WEST,
+        "bottom":      FixPoint.NORTH | FixPoint.WEST,
+        "bottomright": FixPoint.NORTH | FixPoint.WEST,
+        "left":        FixPoint.NORTH | FixPoint.EAST,
+        "bottomleft":  FixPoint.NORTH | FixPoint.EAST,
+        "top":         FixPoint.SOUTH | FixPoint.WEST,
+        "topright":    FixPoint.SOUTH | FixPoint.WEST,
+        "topleft":     FixPoint.SOUTH | FixPoint.EAST,
+    }
+
+    def win_geometry(self) -> dict:
+        """Small, pure read: current outer window geometry.
+
+        Read once at the start of a manual resize gesture and cached in
+        JS, so the hot path does not keep crossing into the host just to
+        ask the same question on every pointermove.
+        """
+        if not self._window:
+            return {"width": 0, "height": 0}
+        try:
+            return {
+                "width": int(getattr(self._window, "width", 0) or 0),
+                "height": int(getattr(self._window, "height", 0) or 0),
+            }
+        except Exception:
+            log.warning("could not read window geometry", exc_info=True)
+            return {"width": 0, "height": 0}
+
+    def _native_hwnd(self):
+        """The real Win32 window handle, if the GUI backend exposes one.
+
+        pywebview sets Window.native to the backend's own object once the
+        window exists - for the winforms backend this app runs on, that
+        object's .Handle is a .NET IntPtr. Returns None rather than
+        raising if that shape is ever different (a non-Windows platform,
+        or a future pywebview that swaps backends), so a resize always
+        still has pywebview's own Window.resize() to fall back to.
+        """
+        native = getattr(self._window, "native", None)
+        handle = getattr(native, "Handle", None)
+        if handle is None:
+            return None
+        try:
+            return int(handle.ToInt32())
+        except Exception:
+            try:
+                return int(handle)
+            except Exception:
+                return None
+
+    def win_resize_to(self, edge: str, width: float, height: float) -> None:
+        """Resize toward a target size while dragging one edge or corner.
+
+        A frameless window has no native resize border at all, so this is
+        called continuously from JS while the mouse moves: window.resize()
+        only understands "be this size", not "the user is dragging".
+
+        This is a genuine live resize of the real content window, called
+        on every pointermove - and it deliberately does NOT go through
+        pywebview's own Window.resize(). That method calls
+        Win32's SetWindowPos() with flags=64 (SWP_SHOWWINDOW) and nothing
+        else - no SWP_NOACTIVATE, no SWP_NOZORDER (confirmed by reading
+        webview/platforms/winforms.py directly, not assumed). Every one of
+        those calls therefore also nudges this window's activation and
+        z-order. WebView2 is Chromium underneath, and Chromium releases
+        its own internal pointer capture the moment its host window's
+        activation state changes - which a resize triggered by pointerdown
+        on an inner element is doing dozens of times a second during a
+        fast real drag. That is what caused the window to detach from the
+        cursor mid-drag and reattach somewhere else, sometimes off screen:
+        not "resizing the real window live is unsafe" in general, but
+        specifically this one missing pair of flags.
+
+        This calls SetWindowPos() directly instead, with SWP_NOACTIVATE
+        and SWP_NOZORDER both set, so a resize never touches this window's
+        activation or z-order at all - same fix-point math and per-monitor
+        DPI scaling pywebview's own implementation uses, just with the
+        flags it left out. The window's actual content is what resizes,
+        live, in place; nothing else is drawn anywhere.
+        """
+        if not self._window:
+            return
+        fix_point = self._RESIZE_FIX_POINTS.get(str(edge or "").lower())
+        if fix_point is None:
+            return
+        w = max(1.0, float(width))
+        h = max(1.0, float(height))
+        hwnd = self._native_hwnd()
+        if hwnd is None:
+            # No native handle available - fall back to pywebview's own
+            # resize(). Missing the two flags above, so only safe to lean
+            # on for an occasional call, not a live per-pointermove one,
+            # but still gets the final size right.
+            try:
+                self._window.resize(int(round(w)), int(round(h)), fix_point)
+            except Exception:
+                log.warning("could not resize toward %r (%s x %s)",
+                            edge, width, height, exc_info=True)
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            try:
+                scale = user32.GetDpiForWindow(hwnd) / 96
+            except Exception:
+                scale = 1.0
+            phys_w = max(1, int(round(w * scale)))
+            phys_h = max(1, int(round(h * scale)))
+
+            rect = wintypes.RECT()
+            user32.GetWindowRect(hwnd, ctypes.byref(rect))
+            x, y = rect.left, rect.top
+            if fix_point & FixPoint.EAST:
+                x += (rect.right - rect.left) - phys_w
+            if fix_point & FixPoint.SOUTH:
+                y += (rect.bottom - rect.top) - phys_h
+
+            SWP_NOZORDER = 0x0004
+            SWP_NOACTIVATE = 0x0010
+            SWP_SHOWWINDOW = 0x0040
+            user32.SetWindowPos(
+                hwnd, None, x, y, phys_w, phys_h,
+                SWP_NOZORDER | SWP_NOACTIVATE | SWP_SHOWWINDOW)
+        except Exception:
+            log.warning("could not resize toward %r (%s x %s)",
+                        edge, width, height, exc_info=True)
+
     # ---- session -------------------------------------------------------
 
     def _do_restore_session(self) -> None:
@@ -1840,7 +2026,6 @@ class Api:
             log.exception("could not apply the last tag results")
         self._save_session()
         self._scanner.shutdown()
-
         self._engine.stop()
 
     def _flush_persisted(self) -> None:
@@ -1876,7 +2061,7 @@ class Api:
     #: Everything JavaScript is allowed to call. Anything public and not in
     #: this set or HOST_PUBLIC is a mistake. See _assert_bridge_surface.
     JS_BRIDGE = frozenset({
-        "get_tick", "get_full", "get_meta", "get_peaks",
+        "get_tick", "get_full", "get_meta", "get_peaks", "visualizer_frame",
         "request_scan", "request_ahead", "request_prefetch",
         "drop_prefetch", "reset_scan_queue",
         "add_files", "add_folder", "load_m3u", "save_m3u",
@@ -1886,6 +2071,7 @@ class Api:
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
         "toggle_mute",
         "win_minimise", "win_maximise", "win_close",
+        "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",

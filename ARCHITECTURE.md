@@ -108,6 +108,36 @@ list is rarely more than a few thousand rows; if that ever needs to hold tens
 of thousands of visible rows at once the way the playlist does, it will need
 the same treatment.
 
+The window is frameless (`frameless=True`), so it has no OS-drawn resize
+border; `#resize-top`/`#resize-right`/etc. in `index.html` are invisible
+strips along the edges and corners that `wireResizeHandle()` in `app.js`
+wires up by hand, calling `Api.win_resize_to()` on every `pointermove`
+(throttled to once per `requestAnimationFrame`) with the target width and
+height for whichever edge or corner is being dragged.
+
+`win_resize_to()` calls Win32's `SetWindowPos()` directly on the window's
+native handle, with `SWP_NOACTIVATE` and `SWP_NOZORDER` both set, using
+the same fix-point math and per-monitor DPI scaling as pywebview's own
+`Window.resize()`. Those two flags matter: without them, a resize call
+also touches the window's activation and z-order, and WebView2 drops its
+own pointer capture the instant its host window's activation state
+changes, which a live per-pointermove resize does dozens of times a
+second. Falls back to pywebview's own `Window.resize()` (which does not
+set those flags) only when no native window handle is available, since
+that path gets the final size right but is not safe to call on every
+pointermove.
+
+The Now Playing visualizer (`#visualizer` in `index.html`,
+`drawSpectrumBars`/`drawOscilloscope` in `app.js`) is a canvas positioned
+absolute/`inset:0` over `#nowplaying`, with a transparent background so
+only the bars or wave it actually draws are visible. `#artwrap` and
+`#wave` are hidden, not just covered, while it's active, since their own
+opaque backgrounds would otherwise show through the canvas's undrawn
+regions. `#nowplaying` carries an explicit `min-height` for the same
+reason: hiding both of its only in-flow children would otherwise collapse
+the flex container to zero height, taking the absolutely-positioned
+canvas down with it.
+
 Note on paths: whether two strings name the same file is decided in one
 place, `paths.key()`. It is `normcase` plus `abspath`, because `pathlib` has
 no equivalent of `normcase`, and `Path.resolve()` touches the filesystem,

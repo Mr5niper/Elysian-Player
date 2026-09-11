@@ -59,6 +59,7 @@ function setView(name) {
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
+  else stopVisualizer();
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
@@ -793,6 +794,130 @@ const intent = {
 };
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
+
+/* Frameless live resize.
+   This calls win_resize_to() on every pointermove, throttled to once per
+   animation frame - a genuine, live resize of the real window, the same
+   as any ordinary Windows app. Nothing else is drawn anywhere; the
+   window's own content is what changes shape, in place, as the mouse
+   moves.
+
+   An earlier version of this deferred the real resize to pointerup only,
+   because calling it live used to make the window occasionally detach
+   from the cursor mid-drag and reattach somewhere else - sometimes off
+   screen. That turned out to be a real bug in pywebview's own
+   Window.resize() (confirmed by reading webview/platforms/winforms.py
+   directly): its SetWindowPos() call passes flags=64 (SWP_SHOWWINDOW)
+   and nothing else, so every resize call also nudged this window's
+   activation and z-order, and WebView2 - Chromium underneath - drops its
+   own internal pointer capture the instant its host window's activation
+   changes. See the docstring on Api.win_resize_to in api.py for the
+   fix: it now calls SetWindowPos() directly with SWP_NOACTIVATE and
+   SWP_NOZORDER, so a resize never touches activation or z-order at all.
+   With the real cause fixed, live resizing here is safe again, and there
+   is no need for any separate preview to fake it.
+   700/420 match config.MIN_WIDTH/MIN_HEIGHT on the Python side, not
+   arbitrary - kept as literals since JS has no access to that config
+   directly, but intentionally the same numbers, not a coincidence. */
+const RESIZE_MIN_W = 700;
+const RESIZE_MIN_H = 420;
+let resizeRaf = 0;
+let resizePending = null;
+
+function clampResizeSize(w, h) {
+  return {
+    width: Math.max(RESIZE_MIN_W, Math.round(w || 0)),
+    height: Math.max(RESIZE_MIN_H, Math.round(h || 0)),
+  };
+}
+
+function flushResize(edge) {
+  resizeRaf = 0;
+  const a = api();
+  if (!a || !resizePending) return;
+  a.win_resize_to(edge, resizePending.width, resizePending.height);
+}
+
+/* Coalesced to at most one call per animation frame: a fast real drag
+   fires far more pointermove events than the window can actually redraw
+   in response to, and there is no reason to cross the IPC bridge (let
+   alone touch Win32) more often than that. */
+function scheduleResize(edge, size) {
+  resizePending = size;
+  if (!resizeRaf) resizeRaf = requestAnimationFrame(() => flushResize(edge));
+}
+
+function wireResizeHandle(id) {
+  const el = $(id);
+  if (!el) return;
+  const edge = el.dataset.edge || "";
+  const growsRight = edge.includes("right");
+  const growsLeft = edge.includes("left");
+  const growsDown = edge.includes("bottom");
+  const growsUp = edge.includes("top");
+
+  const start = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const a = api();
+    if (!a || typeof a.win_resize_to !== "function") return;
+
+    let geom = { width: window.outerWidth, height: window.outerHeight };
+    if (typeof a.win_geometry === "function") {
+      try {
+        const got = await a.win_geometry();
+        if (got && got.width && got.height) geom = got;
+      } catch (_) {
+        // fall back to outerWidth/outerHeight
+      }
+    }
+
+    const startX = e.screenX;
+    const startY = e.screenY;
+    const startW = geom.width || window.outerWidth;
+    const startH = geom.height || window.outerHeight;
+    let alive = true;
+
+    const onMove = (ev) => {
+      if (!alive) return;
+      const dx = ev.screenX - startX;
+      const dy = ev.screenY - startY;
+
+      let w = startW;
+      let h = startH;
+      if (growsRight) w = startW + dx;
+      if (growsLeft) w = startW - dx;
+      if (growsDown) h = startH + dy;
+      if (growsUp) h = startH - dy;
+
+      scheduleResize(edge, clampResizeSize(w, h));
+    };
+
+    const finish = () => {
+      if (!alive) return;
+      alive = false;
+      try { el.releasePointerCapture(e.pointerId); } catch (_) {}
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+      if (resizeRaf) { cancelAnimationFrame(resizeRaf); resizeRaf = 0; }
+      resizePending = null;
+      document.body.classList.remove("resizing");
+    };
+
+    const onUp = () => finish();
+    const onCancel = () => finish();
+
+    document.body.classList.add("resizing");
+    try { el.setPointerCapture(e.pointerId); } catch (_) {}
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+  };
+
+  el.addEventListener("pointerdown", start);
+}
 wire("play", () => intent.togglePlay());
 wire("prev", () => intent.previous());
 wire("next", () => intent.next());
@@ -817,6 +942,15 @@ $("modal").addEventListener("click", (e) => {
 wire("win-min", () => api().win_minimise());
 wire("win-max", () => intent.toggleMaximise());
 wire("win-close", () => api().win_close());
+
+wireResizeHandle("resize-top");
+wireResizeHandle("resize-right");
+wireResizeHandle("resize-bottom");
+wireResizeHandle("resize-left");
+wireResizeHandle("resize-tl");
+wireResizeHandle("resize-tr");
+wireResizeHandle("resize-br");
+wireResizeHandle("resize-bl");
 
 $("titlebar").addEventListener("dblclick", (e) => {
   if (e.target.closest(".winbtn")) return;
@@ -2510,6 +2644,104 @@ function drawWave() {
     x.fillRect(i * bw + bw * 0.22, (h - bh) / 2, Math.max(1, bw * 0.56), bh);
   }
 }
+
+/* Double-click cover/wave visualizer. Its own independent poll loop
+   rather than folding into the main poll(): it only needs to run for the
+   brief periods it is actually open, at a much faster rate (33ms, ~30fps)
+   than the rest of the app ever needs, and nothing else here cares about
+   its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope
+   - double-clicking cycles through all three, so the same gesture that
+   opens it is also how it closes, with no separate control needed. */
+let vizMode = 0;
+let vizTimer = 0;
+let vizW = 0, vizH = 0;
+
+function stopVisualizer() {
+  if (vizMode === 0) return;
+  vizMode = 0;
+  clearTimeout(vizTimer);
+  $("visualizer").classList.add("hidden");
+  $("artwrap").classList.remove("hidden");
+  $("wave").classList.remove("hidden");
+}
+
+function cycleVisualizer() {
+  vizMode = (vizMode + 1) % 3;
+  if (vizMode === 0) {
+    clearTimeout(vizTimer);
+    $("visualizer").classList.add("hidden");
+    $("artwrap").classList.remove("hidden");
+    $("wave").classList.remove("hidden");
+    return;
+  }
+  $("visualizer").classList.remove("hidden");
+  $("artwrap").classList.add("hidden");
+  $("wave").classList.add("hidden");
+  vizPoll();
+}
+
+function vizPoll() {
+  if (vizMode === 0 || view !== "now") return;
+  const a = api();
+  if (!a) { vizTimer = setTimeout(vizPoll, 100); return; }
+  a.visualizer_frame().then((frame) => {
+    if (vizMode === 0 || view !== "now") return;
+    drawVisualizerFrame(frame || {});
+    vizTimer = setTimeout(vizPoll, 33);
+  }).catch(() => {
+    if (vizMode === 0 || view !== "now") return;
+    vizTimer = setTimeout(vizPoll, 200);
+  });
+}
+
+function drawVisualizerFrame(frame) {
+  const c = $("visualizer");
+  const r = c.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  // Same "only touch canvas.width on a real change" rule as drawWave:
+  // assigning it clears the canvas even when the size did not change.
+  if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
+  else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
+}
+
+function drawSpectrumBars(ctx, w, h, bars) {
+  if (!bars.length) return;
+  const gap = Math.max(1, w * 0.006);
+  const bw = (w - gap * (bars.length - 1)) / bars.length;
+  for (let i = 0; i < bars.length; i++) {
+    const bh = Math.max(2, bars[i] * h * 0.92);
+    const x = i * (bw + gap);
+    const grad = ctx.createLinearGradient(0, h - bh, 0, h);
+    grad.addColorStop(0, "#e04b3c");
+    grad.addColorStop(1, "#7d2620");
+    ctx.fillStyle = grad;
+    ctx.fillRect(x, h - bh, bw, bh);
+  }
+}
+
+function drawOscilloscope(ctx, w, h, wave) {
+  if (wave.length < 2) return;
+  ctx.strokeStyle = "#e04b3c";
+  ctx.lineWidth = Math.max(1.5, w * 0.003);
+  ctx.beginPath();
+  const stepX = w / (wave.length - 1);
+  for (let i = 0; i < wave.length; i++) {
+    const x = i * stepX;
+    const y = h / 2 - wave[i] * h * 0.45;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+}
+
+$("art").addEventListener("dblclick", cycleVisualizer);
+$("wave").addEventListener("dblclick", cycleVisualizer);
+$("visualizer").addEventListener("dblclick", cycleVisualizer);
+
 let libResizeTimer = 0;
 /* Whichever card or row sits topmost-and-leftmost, fully in view, right
    now - identified by whatever stable key that kind of item has (album +
@@ -2636,6 +2868,7 @@ let libResizeBaseline = window.innerWidth * window.innerHeight;
    still falls back to comparing area. */
 let libMaximizeToggleGrew = null;
 window.addEventListener("resize", () => {
+  document.body.classList.add("resizing");
   prev.waveW = 0; prev.waveSig = null; drawWave();
   // The visible row window is sized from the container at render time, and
   // only scrolling or a data change recomputed it. Growing the window
@@ -2652,6 +2885,7 @@ window.addEventListener("resize", () => {
   // edge and this involves real DOM moves, not just a read.
   clearTimeout(libResizeTimer);
   libResizeTimer = setTimeout(() => {
+    document.body.classList.remove("resizing");
     const area = window.innerWidth * window.innerHeight;
     const grew = libMaximizeToggleGrew !== null
       ? libMaximizeToggleGrew : area >= libResizeBaseline;
