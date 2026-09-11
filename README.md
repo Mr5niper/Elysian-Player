@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.5.1.0
+- **Version**: 2.5.2.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -22,6 +22,9 @@ megabytes. Audio runs on miniaudio.
   checked for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png`
   or `folder.png`.
 * Draws a waveform of the current track.
+* Double-click the cover or the waveform to swap in a live visualizer over
+  the whole row instead: spectrum bars, then an oscilloscope trace, then
+  back to the normal view. Double-click again to cycle through them.
 * Save and load M3U playlists. Paths are written relative to the playlist file
   where possible, so a playlist survives moving the folder it sits in.
 * Drag audio files or folders onto the window to add them.
@@ -149,7 +152,8 @@ unreachable.
 | Drag a row       | Reorder the playlist    |
 
 Double-clicking the title bar maximises and restores, as it would on a normal
-window. The maximise button changes to a restore glyph while maximised.
+window. The maximise button changes to a restore glyph while maximised. Drag
+any edge or corner of the window to resize it, the same as a normal window.
 
 Selection in the library track lists follows the same rules as the playlist.
 Double-clicking a row plays it and continues through the rest of whatever list
