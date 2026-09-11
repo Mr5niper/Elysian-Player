@@ -795,18 +795,34 @@ const intent = {
 
 const wire = (id, fn) => $(id).addEventListener("click", (e) => { e.preventDefault(); fn(); });
 
-/* Frameless safe-resize mode.
-   Live resize was calling into the native host continuously during an
-   active WebView2 pointer gesture, which can lose the grab or reattach
-   offset under a fast real drag. In safe mode the drag stays entirely in
-   JS until pointerup, then the real window resize is committed once.
+/* Frameless live resize.
+   This calls win_resize_to() on every pointermove, throttled to once per
+   animation frame - a genuine, live resize of the real window, the same
+   as any ordinary Windows app. Nothing else is drawn anywhere; the
+   window's own content is what changes shape, in place, as the mouse
+   moves.
+
+   An earlier version of this deferred the real resize to pointerup only,
+   because calling it live used to make the window occasionally detach
+   from the cursor mid-drag and reattach somewhere else - sometimes off
+   screen. That turned out to be a real bug in pywebview's own
+   Window.resize() (confirmed by reading webview/platforms/winforms.py
+   directly): its SetWindowPos() call passes flags=64 (SWP_SHOWWINDOW)
+   and nothing else, so every resize call also nudged this window's
+   activation and z-order, and WebView2 - Chromium underneath - drops its
+   own internal pointer capture the instant its host window's activation
+   changes. See the docstring on Api.win_resize_to in api.py for the
+   fix: it now calls SetWindowPos() directly with SWP_NOACTIVATE and
+   SWP_NOZORDER, so a resize never touches activation or z-order at all.
+   With the real cause fixed, live resizing here is safe again, and there
+   is no need for any separate preview to fake it.
    700/420 match config.MIN_WIDTH/MIN_HEIGHT on the Python side, not
    arbitrary - kept as literals since JS has no access to that config
    directly, but intentionally the same numbers, not a coincidence. */
-const SAFE_RESIZE = true;
 const RESIZE_MIN_W = 700;
 const RESIZE_MIN_H = 420;
-let resizeGhost = null;
+let resizeRaf = 0;
+let resizePending = null;
 
 function clampResizeSize(w, h) {
   return {
@@ -815,18 +831,20 @@ function clampResizeSize(w, h) {
   };
 }
 
-function beginResizeGhost(width, height) {
-  resizeGhost = { width, height };
-  document.body.classList.add("resizing");
+function flushResize(edge) {
+  resizeRaf = 0;
+  const a = api();
+  if (!a || !resizePending) return;
+  a.win_resize_to(edge, resizePending.width, resizePending.height);
 }
 
-function updateResizeGhost(width, height) {
-  resizeGhost = { width, height };
-}
-
-function endResizeGhost() {
-  resizeGhost = null;
-  document.body.classList.remove("resizing");
+/* Coalesced to at most one call per animation frame: a fast real drag
+   fires far more pointermove events than the window can actually redraw
+   in response to, and there is no reason to cross the IPC bridge (let
+   alone touch Win32) more often than that. */
+function scheduleResize(edge, size) {
+  resizePending = size;
+  if (!resizeRaf) resizeRaf = requestAnimationFrame(() => flushResize(edge));
 }
 
 function wireResizeHandle(id) {
@@ -859,11 +877,7 @@ function wireResizeHandle(id) {
     const startY = e.screenY;
     const startW = geom.width || window.outerWidth;
     const startH = geom.height || window.outerHeight;
-
-    let pending = clampResizeSize(startW, startH);
     let alive = true;
-
-    beginResizeGhost(pending.width, pending.height);
 
     const onMove = (ev) => {
       if (!alive) return;
@@ -877,8 +891,7 @@ function wireResizeHandle(id) {
       if (growsDown) h = startH + dy;
       if (growsUp) h = startH - dy;
 
-      pending = clampResizeSize(w, h);
-      updateResizeGhost(pending.width, pending.height);
+      scheduleResize(edge, clampResizeSize(w, h));
     };
 
     const finish = () => {
@@ -888,18 +901,15 @@ function wireResizeHandle(id) {
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       window.removeEventListener("pointercancel", onCancel);
-
-      const finalSize = pending;
-      endResizeGhost();
-
-      if (SAFE_RESIZE) {
-        a.win_resize_to(edge, finalSize.width, finalSize.height);
-      }
+      if (resizeRaf) { cancelAnimationFrame(resizeRaf); resizeRaf = 0; }
+      resizePending = null;
+      document.body.classList.remove("resizing");
     };
 
     const onUp = () => finish();
     const onCancel = () => finish();
 
+    document.body.classList.add("resizing");
     try { el.setPointerCapture(e.pointerId); } catch (_) {}
     window.addEventListener("pointermove", onMove);
     window.addEventListener("pointerup", onUp);
