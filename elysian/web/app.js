@@ -2650,20 +2650,26 @@ function drawWave() {
    brief periods it is actually open, at a much faster rate (33ms, ~30fps)
    than the rest of the app ever needs, and nothing else here cares about
    its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope,
-   3 = procedural tunnel - double-clicking cycles through all four, so the
-   same gesture that opens it is also how it closes, with no separate
-   control needed. */
+   3 = procedural tunnel, 4 = belt/starfield - double-clicking cycles
+   through all five, so the same gesture that opens it is also how it
+   closes, with no separate control needed. */
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
 let tunnelPhase = 0;
 let tunnelBlobs = null;
+let beltYaw = 0;
+let beltStars = null;
+let beltParticles = null;
 
 function stopVisualizer() {
   if (vizMode === 0) return;
   vizMode = 0;
   tunnelPhase = 0;
   tunnelBlobs = null;
+  beltYaw = 0;
+  beltStars = null;
+  beltParticles = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2671,10 +2677,13 @@ function stopVisualizer() {
 }
 
 function cycleVisualizer() {
-  vizMode = (vizMode + 1) % 4;
+  vizMode = (vizMode + 1) % 5;
   if (vizMode === 0) {
     tunnelPhase = 0;
     tunnelBlobs = null;
+    beltYaw = 0;
+    beltStars = null;
+    beltParticles = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -2684,7 +2693,7 @@ function cycleVisualizer() {
   $("visualizer").classList.remove("hidden");
   $("artwrap").classList.add("hidden");
   $("wave").classList.add("hidden");
-  if (vizMode === 3) {
+  if (vizMode === 3 || vizMode === 4) {
     const c = $("visualizer");
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
@@ -2716,14 +2725,14 @@ function drawVisualizerFrame(frame) {
   // assigning it clears the canvas even when the size did not change.
   if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
   const ctx = c.getContext("2d");
-  // The tunnel mode deliberately does not get a clear: it paints its own
-  // translucent fill each frame instead, so the previous frame's rings
-  // and blobs fade rather than vanish outright, building up the trail
-  // that gives it a glowing look rather than a flat wireframe redraw.
-  if (vizMode !== 3) ctx.clearRect(0, 0, w, h);
+  // Tunnel and belt/starfield both paint their own translucent fill each
+  // frame instead of a hard clear, so the previous frame fades into a
+  // trail rather than vanishing outright.
+  if (vizMode !== 3 && vizMode !== 4) ctx.clearRect(0, 0, w, h);
   if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
   else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
   else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || []);
+  else if (vizMode === 4) drawBelt(ctx, w, h, frame.bars || [], frame.wave || []);
 }
 
 function drawSpectrumBars(ctx, w, h, bars) {
@@ -2839,6 +2848,126 @@ function drawTunnel(ctx, w, h, bars) {
     ctx.arc(x, y, size * 2, 0, Math.PI * 2);
     ctx.fill();
   }
+}
+
+/* A minimal pseudo-3D camera: rotate a point around the vertical (yaw,
+   the orbit) then a fixed tilt (pitch, so the ring reads as a ring and
+   not a flat line viewed edge-on), then project with a simple
+   perspective divide. Reused for both the belt ring and the particles
+   flowing through it, so they stay consistent with each other in the
+   same imagined 3D space rather than each doing their own unrelated
+   math. */
+function _project3D(x, y, z, yaw, pitch, cx, cy, focal, scale) {
+  const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+  const x1 = x * cosY + z * sinY;
+  const z1 = -x * sinY + z * cosY;
+  const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
+  const y2 = y * cosX - z1 * sinX;
+  const z2 = y * sinX + z1 * cosX;
+  const depth = focal + z2;
+  const p = focal / Math.max(depth, 1);
+  return { x: cx + x1 * p * scale, y: cy + y2 * p * scale, depth: z2, p };
+}
+
+const BELT_PITCH = 0.55;
+
+/* Cosmic Belt-style: a colored ring "belt" reacting to the music, with a
+   camera continuously orbiting around it (the yaw advances every frame,
+   independent of audio - the orbit itself is constant, ambient motion,
+   not something the music starts or stops), particles flowing through
+   the tunnel formed by the ring, and a starfield rotating slowly in the
+   background at its own, slower, independent rate - three layers of
+   motion at different speeds rather than one thing spinning. */
+function drawBelt(ctx, w, h, bars, wave) {
+  const cx = w / 2, cy = h / 2;
+  const focal = Math.max(w, h) * 0.9;
+  const scale = 1;
+  const bass = _bandAvg(bars, 0, 6);
+  const mid = _bandAvg(bars, 6, 20);
+  const overall = _bandAvg(bars, 0, bars.length);
+
+  beltYaw += 0.006 + bass * 0.01;
+
+  ctx.fillStyle = "rgba(6,3,4,0.4)";
+  ctx.fillRect(0, 0, w, h);
+
+  // Starfield: fixed angle/radius per star, rotating independently and
+  // much more slowly than the belt's own orbit - a distant background,
+  // not something reacting frame-to-frame the way the belt itself does.
+  if (!beltStars) {
+    beltStars = Array.from({ length: 130 }, () => ({
+      angle: Math.random() * Math.PI * 2,
+      radius: 60 + Math.random() * 60,
+      depth: Math.random(),
+      twinkle: Math.random() * Math.PI * 2,
+    }));
+  }
+  const starYaw = beltYaw * 0.18;
+  for (const star of beltStars) {
+    const a = star.angle + starYaw;
+    const r = 40 + star.radius * 6 * (0.3 + star.depth);
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r * 0.6;
+    const tw = 0.5 + 0.5 * Math.sin(star.twinkle + beltYaw * 8);
+    const size = 0.6 + star.depth * 1.8;
+    ctx.fillStyle = `rgba(255,235,225,${(0.15 + tw * 0.5 * star.depth).toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(x, y, size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // Particles flowing through the tunnel the belt forms: cycling depth
+  // like the procedural tunnel mode, but scattered inside the ring's
+  // radius rather than following it, so they read as passing through
+  // the belt rather than being part of it.
+  if (!beltParticles) {
+    beltParticles = Array.from({ length: 46 }, (_, i) => ({
+      angle: Math.random() * Math.PI * 2,
+      radiusFrac: 0.15 + Math.random() * 0.75,
+      z: (i / 46) * 400 - 200,
+      bar: Math.floor(Math.random() * bars.length),
+    }));
+  }
+  const beltRadius = Math.min(w, h) * 0.58;
+  for (const particle of beltParticles) {
+    particle.z += 1.4 + bass * 6;
+    if (particle.z > 200) particle.z -= 400;
+    const r = beltRadius * particle.radiusFrac;
+    const lx = Math.cos(particle.angle) * r;
+    const ly = Math.sin(particle.angle) * r * 0.5;
+    const proj = _project3D(lx, ly, particle.z, beltYaw, BELT_PITCH, cx, cy, focal, scale);
+    if (proj.p <= 0) continue;
+    const energy = bars[particle.bar] || 0;
+    const size = Math.max(0.8, proj.p * (1.5 + energy * 5));
+    const alpha = Math.min(1, proj.p * 0.9);
+    ctx.fillStyle = `rgba(255,205,180,${alpha.toFixed(3)})`;
+    ctx.beginPath();
+    ctx.arc(proj.x, proj.y, size, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // The belt itself: a ring whose radius at each point answers to the
+  // waveform, so it reads as a line reacting to the music rather than a
+  // static hoop the camera merely orbits around.
+  const segments = 72;
+  const points = [];
+  for (let s = 0; s <= segments; s++) {
+    const a = (s / segments) * Math.PI * 2;
+    const waveIdx = Math.floor((s / segments) * wave.length) % Math.max(1, wave.length);
+    const sample = wave.length ? wave[waveIdx] : 0;
+    const r = beltRadius * (1 + sample * 0.22 + mid * 0.08);
+    const lx = Math.cos(a) * r;
+    const ly = Math.sin(a) * r * 0.5;
+    points.push(_project3D(lx, ly, 0, beltYaw, BELT_PITCH, cx, cy, focal, scale));
+  }
+  ctx.beginPath();
+  points.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
+  ctx.lineWidth = Math.max(1.5, 2 + overall * 4);
+  ctx.strokeStyle = `rgba(224,75,60,${(0.55 + overall * 0.45).toFixed(3)})`;
+  ctx.shadowColor = "rgba(224,75,60,0.8)";
+  ctx.shadowBlur = 8 + overall * 14;
+  ctx.stroke();
+  ctx.shadowBlur = 0;
 }
 
 $("art").addEventListener("dblclick", cycleVisualizer);
