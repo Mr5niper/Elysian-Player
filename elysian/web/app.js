@@ -2851,14 +2851,10 @@ function drawTunnel(ctx, w, h, bars) {
       if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.closePath();
-    // A hotter, whiter-orange highlight than the flat accent color,
-    // scaling in with brightness/closeness rather than staying one flat
-    // hue regardless of how loud or how near a ring is.
-    const heat = Math.min(1, alpha * 1.15);
-    const r255 = Math.round(224 + heat * 31);
-    const g255 = Math.round(75 + heat * 100);
-    const b255 = Math.round(60 + heat * 70);
-    ctx.strokeStyle = `rgba(${r255},${g255},${b255},${alpha.toFixed(3)})`;
+    // Same red as the waveform display (#e04b3c), brightness carried
+    // entirely by alpha - no hue shift toward orange/white as it gets
+    // brighter or closer, just this one red at varying intensity.
+    ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
     ctx.lineWidth = Math.max(1, 1 + z * 3);
     ctx.stroke();
   }
