@@ -3082,18 +3082,16 @@ function drawBelt(ctx, w, h, bars, wave) {
   }
   const particleHalfW = (w / 2) * 1.05, particleHalfH = (h / 2) * 1.05;
   for (const particle of beltParticles) {
-    const prevLx = particle.lx, prevLy = particle.ly;
     // A gentle, bass-nudged drift - not a spin of any kind. Wraps back in
     // from the opposite edge rather than accelerating away, so this
     // stays a continuous field instead of eventually draining off one
     // side.
     particle.lx += particle.vx * (1 + bass * 2);
     particle.ly += particle.vy * (1 + bass * 2);
-    let wrapped = false;
-    if (particle.lx > 1.1) { particle.lx = -1.1; wrapped = true; }
-    if (particle.lx < -1.1) { particle.lx = 1.1; wrapped = true; }
-    if (particle.ly > 1.1) { particle.ly = -1.1; wrapped = true; }
-    if (particle.ly < -1.1) { particle.ly = 1.1; wrapped = true; }
+    if (particle.lx > 1.1) particle.lx = -1.1;
+    if (particle.lx < -1.1) particle.lx = 1.1;
+    if (particle.ly > 1.1) particle.ly = -1.1;
+    if (particle.ly < -1.1) particle.ly = 1.1;
 
     const x = cx + particle.lx * particleHalfW;
     const y = cy + particle.ly * particleHalfH;
@@ -3101,24 +3099,31 @@ function drawBelt(ctx, w, h, bars, wave) {
     const size = Math.max(1, 1.3 + energy * 4.5) * starSizeScale;
     const alpha = Math.min(1, 0.35 + energy * 0.65);
 
-    // Tracer: a short fading streak along the particle's own last step,
-    // brightest at its current position and fading to nothing at its
-    // previous one. Skipped on the one frame a particle wraps to the
-    // opposite edge, since a straight line from the old side of the
-    // screen to the new one would otherwise draw a stray line clear
-    // across the canvas.
-    if (!wrapped) {
-      const px = cx + prevLx * particleHalfW, py = cy + prevLy * particleHalfH;
-      const grad = ctx.createLinearGradient(px, py, x, y);
-      grad.addColorStop(0, "rgba(255,205,180,0)");
-      grad.addColorStop(1, `rgba(255,205,180,${(alpha * 0.85).toFixed(3)})`);
-      ctx.strokeStyle = grad;
-      ctx.lineWidth = Math.max(1, size * 0.6);
-      ctx.beginPath();
-      ctx.moveTo(px, py);
-      ctx.lineTo(x, y);
-      ctx.stroke();
-    }
+    // Tracer: a stylized streak of a fixed, visible length pointing back
+    // along the particle's actual direction of travel - not literally
+    // this frame's positional delta, which was the first version's real
+    // mistake: the drift is intentionally slow (a fraction of a pixel to
+    // a couple pixels per frame), so a line drawn to the exact previous
+    // position was shorter than the dot itself and effectively
+    // invisible. vx/vy are normalized (lx/ly-space) values, and
+    // particleHalfW/H differ for a non-square canvas, so the direction
+    // is computed in true pixel space (scaling each axis by its own half-
+    // extent first) rather than assuming the normalized direction already
+    // matches the screen's.
+    const pvx = particle.vx * particleHalfW, pvy = particle.vy * particleHalfH;
+    const pvLen = Math.hypot(pvx, pvy) || 1e-6;
+    const dirX = pvx / pvLen, dirY = pvy / pvLen;
+    const streakLen = Math.max(8, size * 6);
+    const tx = x - dirX * streakLen, ty = y - dirY * streakLen;
+    const grad = ctx.createLinearGradient(tx, ty, x, y);
+    grad.addColorStop(0, "rgba(255,205,180,0)");
+    grad.addColorStop(1, `rgba(255,205,180,${(alpha * 0.85).toFixed(3)})`);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = Math.max(1, size * 0.6);
+    ctx.beginPath();
+    ctx.moveTo(tx, ty);
+    ctx.lineTo(x, y);
+    ctx.stroke();
 
     ctx.fillStyle = `rgba(255,205,180,${alpha.toFixed(3)})`;
     ctx.beginPath();
