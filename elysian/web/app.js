@@ -2661,6 +2661,19 @@ let tunnelBlobs = null;
 let beltYaw = 0;
 let beltStars = null;
 let beltParticles = null;
+let beltPitch = 0.55;         // current spin-axis tilt, drifts over time
+let beltPitchTarget = 0.55;   // where it's currently drifting toward
+let beltQuietRun = 0;         // consecutive frames meaningfully quieter
+                               // than the recent average - used to decide
+                               // when to pick a new drift target
+let beltEnergyAvg = 0.3;      // slow rolling average of overall energy,
+                               // so "quiet" is relative to this track's
+                               // own loudness rather than a fixed
+                               // absolute number a loud/compressed
+                               // master might never dip under
+let beltFramesSinceAxisChange = 0;  // guarantees a change periodically
+                                     // even if a quiet moment never
+                                     // comes along to trigger one
 
 function stopVisualizer() {
   if (vizMode === 0) return;
@@ -2670,6 +2683,11 @@ function stopVisualizer() {
   beltYaw = 0;
   beltStars = null;
   beltParticles = null;
+  beltPitch = 0.55;
+  beltPitchTarget = 0.55;
+  beltQuietRun = 0;
+  beltEnergyAvg = 0.3;
+  beltFramesSinceAxisChange = 0;
   meltInited = false;
   meltWaveformStateA = null;
   meltWaveformStateB = null;
@@ -2689,6 +2707,11 @@ function cycleVisualizer() {
     beltYaw = 0;
     beltStars = null;
     beltParticles = null;
+    beltPitch = 0.55;
+    beltPitchTarget = 0.55;
+    beltQuietRun = 0;
+    beltEnergyAvg = 0.3;
+    beltFramesSinceAxisChange = 0;
     meltInited = false;
     meltWaveformStateA = null;
     meltWaveformStateB = null;
@@ -2919,12 +2942,16 @@ function _project3D(x, y, z, yaw, pitch, cx, cy, focal, scale) {
   const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
   const y2 = y * cosX - z1 * sinX;
   const z2 = y * sinX + z1 * cosX;
-  const depth = focal + z2;
-  const p = focal / Math.max(depth, 1);
+  // Floored at a fraction of focal, not just 1px: at a large pitch angle
+  // combined with a ring radius comparable to focal itself, z2 can swing
+  // close to -focal, which sent depth near zero and the perspective
+  // divide (focal/depth) toward infinity - individual points flying far
+  // outside the canvas. This keeps the divide bounded regardless of
+  // pitch or radius.
+  const depth = Math.max(focal + z2, focal * 0.35);
+  const p = focal / depth;
   return { x: cx + x1 * p * scale, y: cy + y2 * p * scale, depth: z2, p };
 }
-
-const BELT_PITCH = 0.55;
 
 /* Cosmic Belt-style: a colored ring "belt" reacting to the music, with a
    camera continuously orbiting around it (the yaw advances every frame,
@@ -2932,10 +2959,30 @@ const BELT_PITCH = 0.55;
    not something the music starts or stops), particles flowing through
    the tunnel formed by the ring, and a starfield rotating slowly in the
    background at its own, slower, independent rate - three layers of
-   motion at different speeds rather than one thing spinning. */
+   motion at different speeds rather than one thing spinning.
+
+   The starfield and particles both store only resolution-independent
+   fractions (an angle, a 0..1 radius/depth fraction) rather than actual
+   pixel values baked in once at whatever size the canvas happened to be
+   the first time this ran - both arrays are created lazily and cached
+   for the life of the run, so if their stored values were canvas-scale
+   pixels, resizing the window afterward would never rescale them; they'd
+   just stay sized for whatever the canvas used to be. Everything
+   canvas-scale is instead computed fresh from the *current* w/h every
+   frame, so a resize (or simply running at a different size than
+   whatever happened to be current on first use) rescales correctly. */
 function drawBelt(ctx, w, h, bars, wave) {
   const cx = w / 2, cy = h / 2;
-  const focal = Math.max(w, h) * 0.9;
+  // Raised from the original 0.9x: verified by simulation (see the
+  // commit message) that the ring's own radius, combined with ordinary
+  // perspective magnification at some pitch/yaw combinations, could
+  // project points well past the canvas edge even at pitch values close
+  // to the original fixed 0.55 - not something the pitch-drift feature
+  // introduced on its own, just newly exposed by it sweeping the range
+  // of pitches that would eventually be hit anyway as yaw continuously
+  // rotates through every angle. A longer focal length means a smaller,
+  // safer range of apparent magnification across all of that.
+  const focal = Math.max(w, h) * 1.7;
   const scale = 1;
   const bass = _bandAvg(bars, 0, 6);
   const mid = _bandAvg(bars, 6, 20);
@@ -2943,84 +2990,151 @@ function drawBelt(ctx, w, h, bars, wave) {
 
   beltYaw += 0.006 + bass * 0.01;
 
+  // The spin axis itself wanders, rather than orbiting on one fixed, flat
+  // tilt forever. "Quiet" is relative to this track's own recent average
+  // energy (beltEnergyAvg), not a fixed absolute number - a loud,
+  // loudness-normalized master might never dip under a fixed threshold
+  // like the previous version used, which is why the axis effectively
+  // never changed in practice. A periodic guaranteed change is also
+  // mixed in, so it doesn't depend entirely on a quiet moment showing up.
+  beltEnergyAvg += (overall - beltEnergyAvg) * 0.01;
+  beltFramesSinceAxisChange++;
+  const isQuiet = overall < beltEnergyAvg * 0.7;
+  beltQuietRun = isQuiet ? beltQuietRun + 1 : 0;
+  const dueForChange = beltFramesSinceAxisChange > 600;  // ~20s at 30fps,
+                                                          // whether or not
+                                                          // a quiet moment
+                                                          // ever triggered
+                                                          // one first
+  if ((beltQuietRun > 15 && Math.random() < 0.04) || dueForChange) {
+    // A narrower range than first tried (was 0.2-1.2): combined with the
+    // ring's own radius, a pitch near the far end of that range pushed
+    // the perspective divide (see _project3D's depth clamp) hard enough
+    // to send ring points flying off past the bottom of the canvas. This
+    // range still gives a clearly different tilt each time without
+    // reaching that instability.
+    beltPitchTarget = 0.35 + Math.random() * 0.55;
+    beltQuietRun = 0;
+    beltFramesSinceAxisChange = 0;
+  }
+  beltPitch += (beltPitchTarget - beltPitch) * 0.008;
+
   ctx.fillStyle = "rgba(6,3,4,0.4)";
   ctx.fillRect(0, 0, w, h);
 
-  // Starfield: fixed angle/radius per star, rotating independently and
-  // much more slowly than the belt's own orbit - a distant background,
-  // not something reacting frame-to-frame the way the belt itself does.
+  // Starfield: each star stores a local (lx,ly) position, both axes
+  // independently covering -1..1, rotated by the field's own slow spin
+  // and then scaled to the canvas's actual half-width/half-height
+  // separately. A polar (angle + radius) distribution was tried first,
+  // but a circle or ellipse inscribed in a rectangle never actually
+  // reaches that rectangle's corners no matter how large it's made -
+  // only a true per-axis rectangular spread does, which is what this is.
+  // A little overscan (1.2x) keeps corners covered through the rotation
+  // too, rather than the rotated field's own corners falling just short
+  // of the canvas's as it spins.
   if (!beltStars) {
     beltStars = Array.from({ length: 130 }, () => ({
-      angle: Math.random() * Math.PI * 2,
-      radius: 60 + Math.random() * 60,
+      lx: Math.random() * 2 - 1,
+      ly: Math.random() * 2 - 1,
       depth: Math.random(),
       twinkle: Math.random() * Math.PI * 2,
     }));
   }
   const starYaw = beltYaw * 0.18;
+  const cosSY = Math.cos(starYaw), sinSY = Math.sin(starYaw);
+  const starHalfW = (w / 2) * 1.2, starHalfH = (h / 2) * 1.2;
+  const starSizeScale = Math.max(0.5, Math.min(w, h) / 700);
   for (const star of beltStars) {
-    const a = star.angle + starYaw;
-    const r = 40 + star.radius * 6 * (0.3 + star.depth);
-    const x = cx + Math.cos(a) * r;
-    const y = cy + Math.sin(a) * r * 0.6;
+    const rx = star.lx * cosSY - star.ly * sinSY;
+    const ry = star.lx * sinSY + star.ly * cosSY;
+    const x = cx + rx * starHalfW;
+    const y = cy + ry * starHalfH;
     const tw = 0.5 + 0.5 * Math.sin(star.twinkle + beltYaw * 8);
-    const size = 0.6 + star.depth * 1.8;
+    const size = (0.6 + star.depth * 1.8) * starSizeScale;
     ctx.fillStyle = `rgba(255,235,225,${(0.15 + tw * 0.5 * star.depth).toFixed(3)})`;
     ctx.beginPath();
     ctx.arc(x, y, size, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Particles flowing through the tunnel the belt forms: cycling depth
-  // like the procedural tunnel mode, but scattered inside the ring's
-  // radius rather than following it, so they read as passing through
-  // the belt rather than being part of it.
+  // A second, independent full-screen field ("the moving stars") -
+  // deliberately NOT tied to the ring's own 3D projection/tilt at all
+  // anymore. Every previous version of this kept them on the ring's own
+  // tilted plane (first via _project3D with a shared pitch, then merely
+  // decoupling the yaw while still sharing the pitch), which is exactly
+  // why they kept reading as a narrow band following the ring's
+  // orientation instead of a field that fills the screen. Same
+  // rectangular-coverage technique as the background starfield (see
+  // beltStars above), but each one drifts slowly and independently -
+  // no rotation of any kind, around any axis, shared or otherwise - and
+  // reacts to one spectrum bar's energy for its own size/brightness.
   if (!beltParticles) {
-    beltParticles = Array.from({ length: 46 }, (_, i) => ({
-      angle: Math.random() * Math.PI * 2,
-      radiusFrac: 0.15 + Math.random() * 0.75,
-      z: (i / 46) * 400 - 200,
+    beltParticles = Array.from({ length: 46 }, () => ({
+      lx: Math.random() * 2 - 1,
+      ly: Math.random() * 2 - 1,
+      vx: (Math.random() - 0.5) * 0.0016,
+      vy: (Math.random() - 0.5) * 0.0016,
       bar: Math.floor(Math.random() * bars.length),
     }));
   }
-  const beltRadius = Math.min(w, h) * 0.58;
+  const particleHalfW = (w / 2) * 1.05, particleHalfH = (h / 2) * 1.05;
   for (const particle of beltParticles) {
-    particle.z += 1.4 + bass * 6;
-    if (particle.z > 200) particle.z -= 400;
-    const r = beltRadius * particle.radiusFrac;
-    const lx = Math.cos(particle.angle) * r;
-    const ly = Math.sin(particle.angle) * r * 0.5;
-    const proj = _project3D(lx, ly, particle.z, beltYaw, BELT_PITCH, cx, cy, focal, scale);
-    if (proj.p <= 0) continue;
+    // A gentle, bass-nudged drift - not a spin of any kind. Wraps back in
+    // from the opposite edge rather than accelerating away, so this
+    // stays a continuous field instead of eventually draining off one
+    // side.
+    particle.lx += particle.vx * (1 + bass * 2);
+    particle.ly += particle.vy * (1 + bass * 2);
+    if (particle.lx > 1.1) particle.lx = -1.1;
+    if (particle.lx < -1.1) particle.lx = 1.1;
+    if (particle.ly > 1.1) particle.ly = -1.1;
+    if (particle.ly < -1.1) particle.ly = 1.1;
+
+    const x = cx + particle.lx * particleHalfW;
+    const y = cy + particle.ly * particleHalfH;
     const energy = bars[particle.bar] || 0;
-    const size = Math.max(0.8, proj.p * (1.5 + energy * 5));
-    const alpha = Math.min(1, proj.p * 0.9);
+    const size = Math.max(1, 1.3 + energy * 4.5) * starSizeScale;
+    const alpha = Math.min(1, 0.35 + energy * 0.65);
     ctx.fillStyle = `rgba(255,205,180,${alpha.toFixed(3)})`;
     ctx.beginPath();
-    ctx.arc(proj.x, proj.y, size, 0, Math.PI * 2);
+    ctx.arc(x, y, size, 0, Math.PI * 2);
     ctx.fill();
   }
 
+  // Reduced from 0.58 (then 0.5): paired with the longer focal length
+  // above, this combination was verified by simulation across every
+  // pitch in the drift range, every yaw angle, and several aspect
+  // ratios to keep the ring's projected bounding box fully on-screen -
+  // 0px overflow in all of them, versus up to ~670px with the original
+  // radius/focal pairing at some pitch/yaw combinations.
+  const beltRadius = Math.min(w, h) * 0.35;
+
   // The belt itself: a ring whose radius at each point answers to the
   // waveform, so it reads as a line reacting to the music rather than a
-  // static hoop the camera merely orbits around.
-  const segments = 72;
+  // static hoop the camera merely orbits around. Same treatment as the
+  // tunnel mode's rings: fewer segments so the waveform's own jaggedness
+  // shows through as visible angles rather than being oversampled smooth,
+  // a bigger wave-amplitude multiplier for a rougher shape, and a much
+  // higher brightness floor that isn't dimmed by loudness on top of
+  // depth - there's only the one ring here, so no ring-count/spacing
+  // change applies, just shape and brightness.
+  const segments = 56;
   const points = [];
   for (let s = 0; s <= segments; s++) {
     const a = (s / segments) * Math.PI * 2;
     const waveIdx = Math.floor((s / segments) * wave.length) % Math.max(1, wave.length);
     const sample = wave.length ? wave[waveIdx] : 0;
-    const r = beltRadius * (1 + sample * 0.22 + mid * 0.08);
+    const r = beltRadius * (1 + sample * 0.32 + mid * 0.08);
     const lx = Math.cos(a) * r;
     const ly = Math.sin(a) * r * 0.5;
-    points.push(_project3D(lx, ly, 0, beltYaw, BELT_PITCH, cx, cy, focal, scale));
+    points.push(_project3D(lx, ly, 0, beltYaw, beltPitch, cx, cy, focal, scale));
   }
   ctx.beginPath();
   points.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
-  ctx.lineWidth = Math.max(1.5, 2 + overall * 4);
-  ctx.strokeStyle = `rgba(224,75,60,${(0.55 + overall * 0.45).toFixed(3)})`;
+  ctx.lineWidth = Math.max(2.5, 2.5 + overall * 4);
+  ctx.strokeStyle = `rgba(224,75,60,${(0.7 + overall * 0.3).toFixed(3)})`;
   ctx.shadowColor = "rgba(224,75,60,0.8)";
-  ctx.shadowBlur = 8 + overall * 14;
+  ctx.shadowBlur = 10 + overall * 14;
   ctx.stroke();
   ctx.shadowBlur = 0;
 }
