@@ -2663,6 +2663,12 @@ let beltStars = null;
 let beltParticles = null;
 let beltPitch = 0.55;         // current spin-axis tilt, drifts over time
 let beltPitchTarget = 0.55;   // where it's currently drifting toward
+let beltRoll = 0;             // current tilt-AXIS orientation, drifts
+                               // over time alongside pitch - pitch alone
+                               // only changes how far the ring tilts
+                               // around a fixed axis; roll changes which
+                               // direction that axis actually points
+let beltRollTarget = 0;
 let beltQuietRun = 0;         // consecutive frames meaningfully quieter
                                // than the recent average - used to decide
                                // when to pick a new drift target
@@ -2674,6 +2680,9 @@ let beltEnergyAvg = 0.3;      // slow rolling average of overall energy,
 let beltFramesSinceAxisChange = 0;  // guarantees a change periodically
                                      // even if a quiet moment never
                                      // comes along to trigger one
+let beltPrevBass = 0;         // last frame's bass level, used to detect a
+                               // rising edge ("a beat just hit") for the
+                               // particles' own random direction changes
 
 function stopVisualizer() {
   if (vizMode === 0) return;
@@ -2685,9 +2694,12 @@ function stopVisualizer() {
   beltParticles = null;
   beltPitch = 0.55;
   beltPitchTarget = 0.55;
+  beltRoll = 0;
+  beltRollTarget = 0;
   beltQuietRun = 0;
   beltEnergyAvg = 0.3;
   beltFramesSinceAxisChange = 0;
+  beltPrevBass = 0;
   meltInited = false;
   meltWaveformStateA = null;
   meltWaveformStateB = null;
@@ -2709,9 +2721,12 @@ function cycleVisualizer() {
     beltParticles = null;
     beltPitch = 0.55;
     beltPitchTarget = 0.55;
+    beltRoll = 0;
+    beltRollTarget = 0;
     beltQuietRun = 0;
     beltEnergyAvg = 0.3;
     beltFramesSinceAxisChange = 0;
+    beltPrevBass = 0;
     meltInited = false;
     meltWaveformStateA = null;
     meltWaveformStateB = null;
@@ -2935,13 +2950,37 @@ function drawTunnel(ctx, w, h, bars, wave) {
    flowing through it, so they stay consistent with each other in the
    same imagined 3D space rather than each doing their own unrelated
    math. */
-function _project3D(x, y, z, yaw, pitch, cx, cy, focal, scale) {
+function _project3D(x, y, z, yaw, pitch, roll, cx, cy, focal, scale) {
+  // Roll rotates the local (x,y) coordinates first - this is what
+  // reorients which direction gets treated as the tilt axis.
+  const cosR = Math.cos(roll), sinR = Math.sin(roll);
+  const rx = x * cosR - y * sinR;
+  const ry = x * sinR + y * cosR;
+
+  // Pitch applied BEFORE yaw, not after. Yaw is the continuous orbit
+  // (constantly incrementing) and only ever mixes x/z - if pitch is
+  // applied after yaw, screen-X only ever depends on yaw and roll, and
+  // at yaw=90/270 degrees (which the orbit sweeps through every single
+  // cycle, unavoidably) screen-X collapses to exactly zero for *every*
+  // point on the ring regardless of what pitch or roll are - the ring
+  // was flattening to a dead vertical line once per orbit no matter the
+  // tilt, not because the tilt wasn't changing, but because this order
+  // structurally couldn't let pitch prevent that collapse in the first
+  // place. Applying pitch first gives the ring genuine z-depth (via pz)
+  // before yaw ever runs, so yaw's own x/z mixing carries that depth
+  // into screen-X instead of screen-X depending on yaw alone. Verified
+  // by direct comparison: at yaw=90 degrees with pitch=0.6, the old
+  // order's widest point was 0.0000 (collapsed) versus this order's
+  // 31.6 (still clearly open).
+  const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+  const py = ry * cosP - z * sinP;
+  const pz = ry * sinP + z * cosP;
+
   const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
-  const x1 = x * cosY + z * sinY;
-  const z1 = -x * sinY + z * cosY;
-  const cosX = Math.cos(pitch), sinX = Math.sin(pitch);
-  const y2 = y * cosX - z1 * sinX;
-  const z2 = y * sinX + z1 * cosX;
+  const x1 = rx * cosY + pz * sinY;
+  const z1 = -rx * sinY + pz * cosY;
+  const y2 = py;
+  const z2 = z1;
   // Floored at a fraction of focal, not just 1px: at a large pitch angle
   // combined with a ring radius comparable to focal itself, z2 can swing
   // close to -focal, which sent depth near zero and the perspective
@@ -3014,10 +3053,23 @@ function drawBelt(ctx, w, h, bars, wave) {
     // range still gives a clearly different tilt each time without
     // reaching that instability.
     beltPitchTarget = 0.35 + Math.random() * 0.55;
+    // Roll can be any orientation at all (a full turn) - this is what
+    // actually reorients the tilt axis itself, not just how far it
+    // tilts around a fixed one.
+    beltRollTarget = Math.random() * Math.PI * 2;
     beltQuietRun = 0;
     beltFramesSinceAxisChange = 0;
   }
   beltPitch += (beltPitchTarget - beltPitch) * 0.008;
+  // Eased via the shortest angular distance, not a plain subtraction -
+  // roll wraps at 2*PI, so a plain (target - current) could ease the
+  // long way around (e.g. from 0.1 to 6.2 the long way through 3.15,
+  // instead of the short way backward through 0) depending on where the
+  // two values happen to land relative to the wrap point.
+  let rollDiff = (beltRollTarget - beltRoll) % (Math.PI * 2);
+  if (rollDiff > Math.PI) rollDiff -= Math.PI * 2;
+  if (rollDiff < -Math.PI) rollDiff += Math.PI * 2;
+  beltRoll += rollDiff * 0.008;
 
   ctx.fillStyle = "rgba(6,3,4,0.4)";
   ctx.fillRect(0, 0, w, h);
@@ -3068,30 +3120,91 @@ function drawBelt(ctx, w, h, bars, wave) {
   // beltStars above), but each one drifts slowly and independently -
   // no rotation of any kind, around any axis, shared or otherwise - and
   // reacts to one spectrum bar's energy for its own size/brightness.
-  // Unlike the plain white starfield, each of these also trails a
-  // short fading tracer behind its own recent motion - the one visual
-  // difference between the two star layers, not just a color swap.
+  // Unlike the plain white starfield, each of these also trails a long,
+  // tapered tracer behind it - the one visual difference between the
+  // two star layers, not just a color swap.
   if (!beltParticles) {
-    beltParticles = Array.from({ length: 46 }, () => ({
-      lx: Math.random() * 2 - 1,
-      ly: Math.random() * 2 - 1,
-      vx: (Math.random() - 0.5) * 0.0016,
-      vy: (Math.random() - 0.5) * 0.0016,
-      bar: Math.floor(Math.random() * bars.length),
-    }));
+    beltParticles = Array.from({ length: 46 }, () => {
+      const heading = Math.random() * Math.PI * 2;
+      return {
+        lx: Math.random() * 2 - 1,
+        ly: Math.random() * 2 - 1,
+        // Speed is a fixed pixel-space magnitude, tracked completely
+        // separately from heading and never touched after creation -
+        // see the note below on why that separation matters.
+        speed: 0.2 + Math.random() * 0.6,
+        heading,           // current direction of travel, a true
+                           // pixel-space angle (not a vector)
+        targetHeading: heading,
+        bar: Math.floor(Math.random() * bars.length),
+        trail: [],   // this particle's own past positions (normalized
+                     // lx/ly), oldest first
+      };
+    });
   }
   const particleHalfW = (w / 2) * 1.05, particleHalfH = (h / 2) * 1.05;
+  const TRAIL_LEN = 350;   // one point pushed per frame, capped here -
+                           // safe to make this fairly long, since the
+                           // whole trail is stroked as a single path in
+                           // one stroke() call per particle below, not
+                           // one call per point/segment - a path with
+                           // many vertices costs about the same as one
+                           // with few, unlike the earlier per-segment
+                           // version that called stroke() separately for
+                           // every point (that was the real performance
+                           // problem, not the point count itself)
+
+  // A simple rising-edge bass detector, shared across every particle
+  // (bass is the same value for all of them this frame) - approximates
+  // "a beat just hit": a meaningful jump in bass energy from one frame
+  // to the next. Loosened from the first version (0.4/+0.08) so turns
+  // trigger more often, not just on the biggest transients.
+  const beltBassHit = bass > 0.3 && bass > beltPrevBass + 0.05;
+  beltPrevBass = bass;
+
   for (const particle of beltParticles) {
-    // A gentle, bass-nudged drift - not a spin of any kind. Wraps back in
-    // from the opposite edge rather than accelerating away, so this
+    // Direction change: up to +/-33 degrees, triggered (with its own
+    // per-particle chance, so they don't all turn together) on a bass
+    // hit - this is what makes the trail curve, since it's drawn through
+    // this particle's own actual past positions below, not a straight
+    // extrapolation of its current heading.
+    //
+    // Heading and speed are tracked completely separately, and eased as
+    // an ANGLE (shortest angular distance, same technique used for the
+    // ring's own roll), not as a vector. The first version eased the
+    // velocity VECTOR directly toward a rotated target - which sounds
+    // equivalent, but linearly interpolating between two vectors of
+    // equal length actually cuts a shorter path between them (a chord,
+    // not an arc), so the vector's own magnitude dips during every
+    // transition. With turns triggering often (as asked for), a new
+    // turn frequently fired before the previous one finished easing, and
+    // each new target got computed from that already-shrunken vector -
+    // so every turn ratcheted the speed down a little further, which
+    // compounded into the particles visibly slowing/shrinking over a
+    // whole song. Easing an angle instead has no such shrinkage: speed
+    // stays exactly what it was set to, permanently.
+    const wantsTurn = (beltBassHit && Math.random() < 0.75) || Math.random() < 0.01;
+    if (wantsTurn) {
+      particle.targetHeading = particle.heading + (Math.random() * 2 - 1) * (33 * Math.PI / 180);
+    }
+    let headingDiff = (particle.targetHeading - particle.heading) % (Math.PI * 2);
+    if (headingDiff > Math.PI) headingDiff -= Math.PI * 2;
+    if (headingDiff < -Math.PI) headingDiff += Math.PI * 2;
+    particle.heading += headingDiff * 0.06;
+
+    // A gentle, bass-nudged drift - not a spin of any kind. Wraps back
+    // in from the opposite edge rather than accelerating away, so this
     // stays a continuous field instead of eventually draining off one
     // side.
-    particle.lx += particle.vx * (1 + bass * 2);
-    particle.ly += particle.vy * (1 + bass * 2);
-    if (particle.lx > 1.1) particle.lx = -1.1;
-    if (particle.lx < -1.1) particle.lx = 1.1;
-    if (particle.ly > 1.1) particle.ly = -1.1;
-    if (particle.ly < -1.1) particle.ly = 1.1;
+    const pvx = Math.cos(particle.heading) * particle.speed;
+    const pvy = Math.sin(particle.heading) * particle.speed;
+    particle.lx += (pvx / particleHalfW) * (1 + bass * 2);
+    particle.ly += (pvy / particleHalfH) * (1 + bass * 2);
+    let wrapped = false;
+    if (particle.lx > 1.1) { particle.lx = -1.1; wrapped = true; }
+    if (particle.lx < -1.1) { particle.lx = 1.1; wrapped = true; }
+    if (particle.ly > 1.1) { particle.ly = -1.1; wrapped = true; }
+    if (particle.ly < -1.1) { particle.ly = 1.1; wrapped = true; }
 
     const x = cx + particle.lx * particleHalfW;
     const y = cy + particle.ly * particleHalfH;
@@ -3099,31 +3212,42 @@ function drawBelt(ctx, w, h, bars, wave) {
     const size = Math.max(1, 1.3 + energy * 4.5) * starSizeScale;
     const alpha = Math.min(1, 0.35 + energy * 0.65);
 
-    // Tracer: a stylized streak of a fixed, visible length pointing back
-    // along the particle's actual direction of travel - not literally
-    // this frame's positional delta, which was the first version's real
-    // mistake: the drift is intentionally slow (a fraction of a pixel to
-    // a couple pixels per frame), so a line drawn to the exact previous
-    // position was shorter than the dot itself and effectively
-    // invisible. vx/vy are normalized (lx/ly-space) values, and
-    // particleHalfW/H differ for a non-square canvas, so the direction
-    // is computed in true pixel space (scaling each axis by its own half-
-    // extent first) rather than assuming the normalized direction already
-    // matches the screen's.
-    const pvx = particle.vx * particleHalfW, pvy = particle.vy * particleHalfH;
-    const pvLen = Math.hypot(pvx, pvy) || 1e-6;
-    const dirX = pvx / pvLen, dirY = pvy / pvLen;
-    const streakLen = Math.max(8, size * 6);
-    const tx = x - dirX * streakLen, ty = y - dirY * streakLen;
-    const grad = ctx.createLinearGradient(tx, ty, x, y);
-    grad.addColorStop(0, "rgba(255,205,180,0)");
-    grad.addColorStop(1, `rgba(255,205,180,${(alpha * 0.85).toFixed(3)})`);
-    ctx.strokeStyle = grad;
-    ctx.lineWidth = Math.max(1, size * 0.6);
-    ctx.beginPath();
-    ctx.moveTo(tx, ty);
-    ctx.lineTo(x, y);
-    ctx.stroke();
+    // Wrapping clears the trail outright rather than carrying it over -
+    // a straight line from the old side of the screen to the new one
+    // would otherwise connect them across the whole canvas. Stored as
+    // normalized lx/ly, not absolute pixel x/y, so a window resize
+    // rescales the whole trail correctly instead of connecting stale
+    // pre-resize points to new post-resize ones.
+    if (wrapped) {
+      particle.trail.length = 0;
+    } else {
+      particle.trail.push({ lx: particle.lx, ly: particle.ly });
+      if (particle.trail.length > TRAIL_LEN) particle.trail.shift();
+    }
+
+    // Just a line: one path through this particle's own recent
+    // positions, stroked once with a gradient fading from fully
+    // transparent at the tail (oldest end) to this particle's own
+    // brightness at the head (current position). One stroke() call per
+    // particle - no per-segment loop, no per-segment shadow.
+    const trail = particle.trail;
+    if (trail.length > 1) {
+      const tail = trail[0];
+      const tailX = cx + tail.lx * particleHalfW, tailY = cy + tail.ly * particleHalfH;
+      const grad = ctx.createLinearGradient(tailX, tailY, x, y);
+      grad.addColorStop(0, "rgba(255,205,180,0)");
+      grad.addColorStop(1, `rgba(255,205,180,${alpha.toFixed(3)})`);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = Math.max(1, size);
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+      ctx.moveTo(tailX, tailY);
+      for (let i = 1; i < trail.length; i++) {
+        ctx.lineTo(cx + trail[i].lx * particleHalfW, cy + trail[i].ly * particleHalfH);
+      }
+      ctx.stroke();
+    }
 
     ctx.fillStyle = `rgba(255,205,180,${alpha.toFixed(3)})`;
     ctx.beginPath();
@@ -3155,15 +3279,15 @@ function drawBelt(ctx, w, h, bars, wave) {
     const a = (s / segments) * Math.PI * 2;
     const waveIdx = Math.floor((s / segments) * wave.length) % Math.max(1, wave.length);
     const sample = wave.length ? wave[waveIdx] : 0;
-    const r = beltRadius * (1 + sample * 0.65 + mid * 0.2 + bass * 0.18);
+    const r = beltRadius * (1 + sample * 1.3 + mid * 0.2 + bass * 0.18);
     const lx = Math.cos(a) * r;
     const ly = Math.sin(a) * r * 0.5;
-    points.push(_project3D(lx, ly, 0, beltYaw, beltPitch, cx, cy, focal, scale));
+    points.push(_project3D(lx, ly, 0, beltYaw, beltPitch, beltRoll, cx, cy, focal, scale));
   }
   ctx.beginPath();
   points.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
   ctx.lineWidth = Math.max(2.5, 2.5 + overall * 4 + bass * 3);
-  ctx.strokeStyle = `rgba(224,75,60,${(0.7 + overall * 0.3).toFixed(3)})`;
+  ctx.strokeStyle = "rgba(224,75,60,1)";
   ctx.shadowColor = "rgba(224,75,60,0.8)";
   ctx.shadowBlur = 10 + overall * 14 + bass * 10;
   ctx.stroke();
