@@ -2796,10 +2796,14 @@ function _bandAvg(bars, lo, hi) {
    vanishing point at the centre, continuously advancing toward the
    viewer, with a handful of glowing blobs flowing along the same path.
    Bass (low bars) drives how fast the tunnel rushes past and how hard it
-   pulses; mid bars drive a per-ring wobble so the tunnel morphs rather
-   than staying a perfect circle; each blob tracks one specific bar the
-   whole time it's alive, so a particular blob's brightness answers to a
-   particular part of the spectrum rather than the mix as a whole. */
+   pulses; each ring's own shape is sampled directly from the live 32-band
+   spectrum around its circumference (not a generic sine ripple - that's
+   what previously made every ring a smooth, near-perfect circle
+   regardless of what was actually playing), so a bass-heavy passage
+   visibly bulges the near side of the ring while a treble-heavy one
+   ripples it finely; each blob tracks one specific bar the whole time
+   it's alive, so a particular blob's brightness answers to a particular
+   part of the spectrum rather than the mix as a whole. */
 function drawTunnel(ctx, w, h, bars) {
   const cx = w / 2, cy = h / 2;
   const maxR = Math.hypot(cx, cy) * 1.05;
@@ -2810,32 +2814,51 @@ function drawTunnel(ctx, w, h, bars) {
 
   tunnelPhase = (tunnelPhase + 0.006 + bass * 0.05) % 1;
 
-  // A translucent fill instead of a full clear leaves a faint trail
-  // behind each ring and blob rather than a hard-edged redraw every
-  // frame, closer to the soft, glowing look the source material
-  // describes than a crisp vector wireframe would be.
-  ctx.fillStyle = "rgba(12,5,5,0.35)";
-  ctx.fillRect(0, 0, w, h);
+  // A genuine clear, not a translucent dark wash: the previous version's
+  // near-black fillRect compounded frame over frame into a solid backdrop
+  // that hid #nowplaying's own warm gradient behind it entirely. The
+  // rings themselves (24 of them, continuously advancing) already read
+  // as a continuous flowing tunnel without needing frame-to-frame smear
+  // to sell the motion.
+  ctx.clearRect(0, 0, w, h);
 
   const rings = 24;
-  const segments = 28;
+  const segments = 72;   // up from 28 - enough resolution around the ring
+                          // for the spectrum's actual shape to read, not
+                          // just a coarse, smoothed-out approximation of it
   for (let i = 0; i < rings; i++) {
     const z = ((i / rings) + tunnelPhase) % 1;
     const depth = z * z;
     const radius = depth * maxR;
     if (radius < 2) continue;
-    const alpha = Math.min(1, z * 1.3) * (0.12 + overall * 0.55);
+    // Brighter overall, and with a much higher floor: the old
+    // 0.12-baseline meant a quiet passage left the whole tunnel almost
+    // invisible rather than just calmer.
+    const alpha = Math.min(1, z * 1.3) * (0.4 + overall * 0.55);
     ctx.beginPath();
     for (let s = 0; s <= segments; s++) {
       const a = (s / segments) * Math.PI * 2 + tunnelPhase * 2 + i * 0.15;
-      const wobble = 1 + Math.sin(a * 3 + tunnelPhase * 6) * (0.05 + mid * 0.2);
+      // Sampled straight from the live spectrum around the ring's own
+      // circumference, so the ring's shape is the music, not a cosmetic
+      // stand-in for it. A little residual sine ripple stays underneath
+      // purely for continuity between frames of otherwise-quiet audio.
+      const energy = _sampleArray(bars, s / segments);
+      const wobble = 1 + energy * (0.3 + mid * 0.3)
+                       + Math.sin(a * 4 + tunnelPhase * 6) * 0.035;
       const r = radius * wobble;
       const x = cx + Math.cos(a) * r;
       const y = cy + Math.sin(a) * r;
       if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.closePath();
-    ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
+    // A hotter, whiter-orange highlight than the flat accent color,
+    // scaling in with brightness/closeness rather than staying one flat
+    // hue regardless of how loud or how near a ring is.
+    const heat = Math.min(1, alpha * 1.15);
+    const r255 = Math.round(224 + heat * 31);
+    const g255 = Math.round(75 + heat * 100);
+    const b255 = Math.round(60 + heat * 70);
+    ctx.strokeStyle = `rgba(${r255},${g255},${b255},${alpha.toFixed(3)})`;
     ctx.lineWidth = Math.max(1, 1 + z * 3);
     ctx.stroke();
   }
