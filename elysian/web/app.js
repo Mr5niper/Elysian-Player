@@ -2671,6 +2671,7 @@ function stopVisualizer() {
   beltStars = null;
   beltParticles = null;
   meltInited = false;
+  meltWaveformState = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2686,6 +2687,7 @@ function cycleVisualizer() {
     beltStars = null;
     beltParticles = null;
     meltInited = false;
+    meltWaveformState = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -3212,38 +3214,124 @@ function meltWarpFrame() {
   const tmp = meltPixels; meltPixels = meltScratch; meltScratch = tmp;
 }
 
-/* PART 1 placeholder content: the oscilloscope trace, drawn straight into
-   the low-res buffer. As of part 2 its color comes from the active
-   Colormap-style palette rather than a fixed value - brighter where the
-   waveform amplitude is higher, via meltPaletteFade(). This is exactly the
-   piece Part 3 (Waveform scripts) replaces with multiple palette-colored,
-   audio-shaped paths; kept deliberately simple here so each part is a
-   complete, visibly-working checkpoint on its own. */
-function meltDrawPlaceholderContent(wave) {
-  if (!wave.length) return;
+/* ---------- Waveform-script-style paths (part 3) ----------
+   Mirrors the Stutter Waveform script convention: init() builds whatever
+   per-instance state the script needs (random per-selection parameters,
+   the way a real Movemap's init picks its own random radii/speeds once
+   and keeps them for its whole run), newline() updates that state once
+   per frame, and step() is called once per point along the path (t in
+   0..1) returning one {x,y,fade} per simultaneous path the script draws.
+   x/y are in the same -1..1 space the movemaps use; fade follows the same
+   0=brightest/1=background convention meltPaletteFade() already expects.
+
+   Implemented directly as plain JS functions/closures rather than a
+   second interpreted scripting language layered on top of the one this
+   app is already written in - Stutter's own scripting layer existed
+   because Sonique plugins were compiled, sandboxed native code with no
+   other way to be end-user-editable; that constraint does not apply
+   here, so a JS object literal per script is the equivalent expressive
+   surface without the extra machinery. */
+function _sampleArray(arr, t) {
+  if (!arr.length) return 0;
+  const idx = Math.min(arr.length - 1, Math.max(0, Math.round(t * (arr.length - 1))));
+  return arr[idx];
+}
+
+let meltWaveformIndex = 0;
+let meltWaveformState = null;
+
+const MELT_WAVEFORMS = [
+  // A single scope trace across the middle - the direct descendant of
+  // the part 1/2 placeholder, now expressed as a proper waveform script.
+  {
+    numPaths: 1,
+    steps: 64,
+    init() { return {}; },
+    newline() {},
+    step(state, t, wave) {
+      const w = _sampleArray(wave, t);
+      return [{ x: t * 2 - 1, y: w * 0.6, fade: 1 - Math.min(1, Math.abs(w)) }];
+    },
+  },
+  // Three concentric rings, each centre slowly orbiting, radius pulsing
+  // with amplitude - a callback to the "historical rings" waveform script
+  // the original plugin shipped as a nod to its own predecessor.
+  {
+    numPaths: 3,
+    steps: 64,
+    init() { return { angle: 0 }; },
+    newline(state) { state.angle += 0.01; },
+    step(state, t, wave) {
+      const theta = t * Math.PI * 2;
+      const w = _sampleArray(wave, t);
+      const out = [];
+      for (let p = 0; p < 3; p++) {
+        const centerAngle = state.angle + (p * Math.PI * 2) / 3;
+        const cx = Math.cos(centerAngle) * 0.25;
+        const cy = Math.sin(centerAngle) * 0.25;
+        const r = 0.15 + Math.abs(w) * 0.35;
+        out.push({
+          x: cx + Math.cos(theta) * r, y: cy + Math.sin(theta) * r,
+          fade: 1 - Math.abs(w),
+        });
+      }
+      return out;
+    },
+  },
+  // A bass-driven radial burst built from the spectrum bars instead of
+  // the raw waveform: walking t around a circle while radius follows
+  // each bar's energy traces the whole spectrum as one closed shape.
+  {
+    numPaths: 1,
+    steps: 32,
+    init() { return {}; },
+    newline() {},
+    step(state, t, wave, bars) {
+      const e = _sampleArray(bars, t);
+      const theta = t * Math.PI * 2;
+      const r = 0.1 + e * 0.7;
+      return [{ x: Math.cos(theta) * r, y: Math.sin(theta) * r, fade: 1 - e }];
+    },
+  },
+];
+
+function meltDrawWaveforms(wave, bars) {
+  if (!wave.length && !bars.length) return;
   if (MELT_COLORMAPS[meltColormapIndex].useTime) {
     meltTime += 1 / 30;
     meltBuildPalette();
   }
+
+  const script = MELT_WAVEFORMS[meltWaveformIndex];
+  if (!meltWaveformState) meltWaveformState = script.init();
+  script.newline(meltWaveformState);
+
+  // One point array per simultaneous path this script draws.
+  const pathPoints = Array.from({ length: script.numPaths }, () => []);
+  const n = script.steps;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    const pts = script.step(meltWaveformState, t, wave, bars);
+    for (let p = 0; p < pts.length; p++) pathPoints[p].push(pts[p]);
+  }
+
+  const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
+  const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
+
   meltCtx.lineWidth = 1.5;
-  const stepX = MELT_W / (wave.length - 1);
-  let prevX = 0, prevY = MELT_H / 2;
-  for (let i = 0; i < wave.length; i++) {
-    const x = i * stepX;
-    const y = MELT_H / 2 - wave[i] * MELT_H * 0.4;
-    if (i > 0) {
-      // One segment per sample rather than a single multi-color path:
-      // canvas strokes are single-color, so a palette that varies along
-      // the line needs a stroke per segment. At 64 wave points this is
-      // negligible next to the warp pass's own per-pixel loop.
-      const fade = 1 - Math.min(1, Math.abs(wave[i]));
-      meltCtx.strokeStyle = meltPaletteFade(fade);
+  for (const pts of pathPoints) {
+    for (let i = 1; i < pts.length; i++) {
+      // One stroke per segment, not one path with a single strokeStyle:
+      // canvas strokes are a single flat color, so a fade that varies
+      // along the path (louder = brighter) needs a stroke per segment.
+      // At 64 points per path this is negligible next to the warp pass's
+      // own per-pixel loop.
+      meltCtx.strokeStyle = meltPaletteFade(pts[i].fade);
       meltCtx.beginPath();
-      meltCtx.moveTo(prevX, prevY);
-      meltCtx.lineTo(x, y);
+      meltCtx.moveTo(toX(pts[i - 1].x), toY(pts[i - 1].y));
+      meltCtx.lineTo(toX(pts[i].x), toY(pts[i].y));
       meltCtx.stroke();
     }
-    prevX = x; prevY = y;
   }
 }
 
@@ -3255,13 +3343,13 @@ function drawMelt(ctx, w, h, bars, wave) {
   meltWarpFrame();
 
   // 2. Get that warped buffer onto the actual canvas element so normal
-  //    canvas draw calls (the placeholder trace, and later the palette-
-  //    colored waveform/particle layers) can be layered on top of it with
-  //    real strokes/fills rather than more manual pixel writes.
+  //    canvas draw calls (the waveform paths, and later the particle
+  //    layer) can be layered on top of it with real strokes/fills rather
+  //    than more manual pixel writes.
   meltCtx.putImageData(meltPixels, 0, 0);
 
   // 3. New content for this frame, drawn with ordinary canvas calls.
-  meltDrawPlaceholderContent(wave);
+  meltDrawWaveforms(wave, bars);
 
   // 4. Re-capture the buffer, now including what was just drawn, so next
   //    frame's warp pass carries it forward too - this is what makes a
