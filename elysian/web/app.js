@@ -2749,7 +2749,7 @@ function drawVisualizerFrame(frame) {
   if (vizMode !== 3 && vizMode !== 4 && vizMode !== 5) ctx.clearRect(0, 0, w, h);
   if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
   else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
-  else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || []);
+  else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || [], frame.wave || []);
   else if (vizMode === 4) drawBelt(ctx, w, h, frame.bars || [], frame.wave || []);
   else if (vizMode === 5) drawMelt(ctx, w, h, frame.bars || [], frame.wave || []);
 }
@@ -2796,11 +2796,17 @@ function _bandAvg(bars, lo, hi) {
    vanishing point at the centre, continuously advancing toward the
    viewer, with a handful of glowing blobs flowing along the same path.
    Bass (low bars) drives how fast the tunnel rushes past and how hard it
-   pulses; mid bars drive a per-ring wobble so the tunnel morphs rather
-   than staying a perfect circle; each blob tracks one specific bar the
-   whole time it's alive, so a particular blob's brightness answers to a
-   particular part of the spectrum rather than the mix as a whole. */
-function drawTunnel(ctx, w, h, bars) {
+   pulses; ring count/spacing itself now answers to loudness (fewer,
+   further-spaced rings when quiet, more, tighter ones when loud) rather
+   than staying a fixed count regardless of the music; each ring's own
+   shape is sampled directly from the raw waveform around its
+   circumference, not the (already frequency-smoothed) spectrum bars -
+   the waveform is inherently rougher and can push a ring both outward
+   and inward, rather than only ever bulging outward; each blob tracks
+   one specific bar the whole time it's alive, so a particular blob's
+   brightness answers to a particular part of the spectrum rather than
+   the mix as a whole. */
+function drawTunnel(ctx, w, h, bars, wave) {
   const cx = w / 2, cy = h / 2;
   const maxR = Math.hypot(cx, cy) * 1.05;
 
@@ -2810,33 +2816,63 @@ function drawTunnel(ctx, w, h, bars) {
 
   tunnelPhase = (tunnelPhase + 0.006 + bass * 0.05) % 1;
 
-  // A translucent fill instead of a full clear leaves a faint trail
-  // behind each ring and blob rather than a hard-edged redraw every
-  // frame, closer to the soft, glowing look the source material
-  // describes than a crisp vector wireframe would be.
-  ctx.fillStyle = "rgba(12,5,5,0.35)";
-  ctx.fillRect(0, 0, w, h);
+  // A genuine clear, not a translucent dark wash: the previous version's
+  // near-black fillRect compounded frame over frame into a solid backdrop
+  // that hid #nowplaying's own warm gradient behind it entirely. The
+  // rings themselves (many of them, continuously advancing) already read
+  // as a continuous flowing tunnel without needing frame-to-frame smear
+  // to sell the motion.
+  ctx.clearRect(0, 0, w, h);
 
-  const rings = 24;
-  const segments = 28;
+  // Ring count answers to loudness directly: the same depth range (0..1)
+  // divided among fewer rings during a quiet passage spaces them further
+  // apart, and among more during a loud one packs them tighter - the
+  // tunnel's density is audio-reactive, not just its shape.
+  const rings = Math.max(10, Math.round(10 + overall * 26));
+  const segments = 48;   // coarser than the smooth-shape version (was 72):
+                          // fewer points per ring means the waveform's own
+                          // jaggedness reads as visible angles rather than
+                          // being oversampled into a soft ripple.
   for (let i = 0; i < rings; i++) {
     const z = ((i / rings) + tunnelPhase) % 1;
     const depth = z * z;
     const radius = depth * maxR;
     if (radius < 2) continue;
-    const alpha = Math.min(1, z * 1.3) * (0.12 + overall * 0.55);
+    // The oscilloscope draws one line at flat alpha=1, no fading at all.
+    // Depth-based fading is a real 3D cue worth keeping (rings recede
+    // into black), but with a high floor (0.6) instead of starting from
+    // zero, and loudness no longer dims it further on top of that.
+    const alpha = 0.6 + z * 0.4;
     ctx.beginPath();
     for (let s = 0; s <= segments; s++) {
       const a = (s / segments) * Math.PI * 2 + tunnelPhase * 2 + i * 0.15;
-      const wobble = 1 + Math.sin(a * 3 + tunnelPhase * 6) * (0.05 + mid * 0.2);
+      // Sampled from the raw waveform rather than the spectrum bars -
+      // the waveform is inherently rougher/spikier, and each ring reads
+      // from a slightly different offset into it (i*0.13) so successive
+      // rings don't all repeat the identical shape. Signed (-1..1), so a
+      // ring bulges outward on a peak and pulls inward on a trough,
+      // rather than only ever bulging outward the way a magnitude-only
+      // value would.
+      const t = ((s / segments) + i * 0.13) % 1;
+      const sample = _sampleArray(wave, t);
+      const wobble = 1 + sample * (0.5 + mid * 0.4)
+                       + Math.sin(a * 4 + tunnelPhase * 6) * 0.03;
       const r = radius * wobble;
       const x = cx + Math.cos(a) * r;
       const y = cy + Math.sin(a) * r;
       if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
     }
     ctx.closePath();
+    // Same red as the waveform display (#e04b3c), brightness carried
+    // entirely by alpha - no hue shift toward orange/white as it gets
+    // brighter or closer, just this one red at varying intensity.
     ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
-    ctx.lineWidth = Math.max(1, 1 + z * 3);
+    // Thicker across the board: a thin anti-aliased stroke only covers a
+    // sliver of each pixel it crosses, so it reads as lighter than a
+    // solid-filled shape (the waveform's bars) even at the same color and
+    // alpha. Floor raised well past 1px, and the near/far scaling kept
+    // but off a higher base.
+    ctx.lineWidth = Math.max(2.5, 2 + z * 4);
     ctx.stroke();
   }
 
