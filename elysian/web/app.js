@@ -2758,6 +2758,20 @@ function cycleVisualizer() {
 
 function vizPoll() {
   if (vizMode === 0 || view !== "now") return;
+  // Bars/scope naturally go flat on silent frame data, so pausing never
+  // looked wrong for them - but tunnel/belt/melt all carry their own
+  // persistent motion (camera orbit, ring rotation, particle drift,
+  // scheduler clocks) that was deliberately built to run independent of
+  // the audio itself. "Independent of the audio" was never meant to
+  // include "even when there's no audio playing at all" - without this
+  // check, that motion (and the Python round-trip needed to drive it)
+  // kept running indefinitely while paused or stopped, for no reason.
+  // Frozen here instead: every visualizer just stops exactly where it
+  // is, and resumes the moment playback actually starts again.
+  if (!state.playing) {
+    vizTimer = setTimeout(vizPoll, 200);
+    return;
+  }
   const a = api();
   if (!a) { vizTimer = setTimeout(vizPoll, 100); return; }
   a.visualizer_frame().then((frame) => {
