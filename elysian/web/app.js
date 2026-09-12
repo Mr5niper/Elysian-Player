@@ -2650,9 +2650,9 @@ function drawWave() {
    brief periods it is actually open, at a much faster rate (33ms, ~30fps)
    than the rest of the app ever needs, and nothing else here cares about
    its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope,
-   3 = procedural tunnel, 4 = belt/starfield - double-clicking cycles
-   through all five, so the same gesture that opens it is also how it
-   closes, with no separate control needed. */
+   3 = procedural tunnel, 4 = belt/starfield, 5 = melt-style warp -
+   double-clicking cycles through all six, so the same gesture that opens
+   it is also how it closes, with no separate control needed. */
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
@@ -2670,6 +2670,7 @@ function stopVisualizer() {
   beltYaw = 0;
   beltStars = null;
   beltParticles = null;
+  meltInited = false;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2677,13 +2678,14 @@ function stopVisualizer() {
 }
 
 function cycleVisualizer() {
-  vizMode = (vizMode + 1) % 5;
+  vizMode = (vizMode + 1) % 6;
   if (vizMode === 0) {
     tunnelPhase = 0;
     tunnelBlobs = null;
     beltYaw = 0;
     beltStars = null;
     beltParticles = null;
+    meltInited = false;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -2693,7 +2695,7 @@ function cycleVisualizer() {
   $("visualizer").classList.remove("hidden");
   $("artwrap").classList.add("hidden");
   $("wave").classList.add("hidden");
-  if (vizMode === 3 || vizMode === 4) {
+  if (vizMode === 3 || vizMode === 4 || vizMode === 5) {
     const c = $("visualizer");
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
@@ -2725,14 +2727,16 @@ function drawVisualizerFrame(frame) {
   // assigning it clears the canvas even when the size did not change.
   if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
   const ctx = c.getContext("2d");
-  // Tunnel and belt/starfield both paint their own translucent fill each
-  // frame instead of a hard clear, so the previous frame fades into a
-  // trail rather than vanishing outright.
-  if (vizMode !== 3 && vizMode !== 4) ctx.clearRect(0, 0, w, h);
+  // Tunnel, belt/starfield and melt all paint their own translucent fill
+  // (or, for melt, a full buffer blit) each frame instead of a hard
+  // clear, so the previous frame fades into or feeds the next one rather
+  // than vanishing outright.
+  if (vizMode !== 3 && vizMode !== 4 && vizMode !== 5) ctx.clearRect(0, 0, w, h);
   if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
   else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
   else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || []);
   else if (vizMode === 4) drawBelt(ctx, w, h, frame.bars || [], frame.wave || []);
+  else if (vizMode === 5) drawMelt(ctx, w, h, frame.bars || [], frame.wave || []);
 }
 
 function drawSpectrumBars(ctx, w, h, bars) {
@@ -2968,6 +2972,181 @@ function drawBelt(ctx, w, h, bars, wave) {
   ctx.shadowBlur = 8 + overall * 14;
   ctx.stroke();
   ctx.shadowBlur = 0;
+}
+
+/* ==========================================================================
+   Melt-style warp visualizer (vizMode 5)
+   ==========================================================================
+   Inspired by the real "Smear" Sonique plugin (mykel & xplo, 2000), which
+   works by continuously resampling its own previous frame through a
+   per-pixel coordinate remap ("Movemap"), so anything drawn into it keeps
+   getting dragged, spiraled or rippled by whatever transform is active -
+   that resample-of-self is what produces the melt look, not any one single
+   effect drawn fresh each frame. This is an original implementation of that
+   technique, not a port of that plugin's code.
+
+   PART 1 of this mode implements just that core warp engine, plus enough
+   of a placeholder draw (the oscilloscope trace, in a single fixed color)
+   to prove the buffer is actually warping frame to frame. Parts 2-4 (a
+   proper 256-entry Colormap-style palette, Waveform-script-style paths,
+   and Particle-script-style shapes) replace that placeholder without
+   touching the warp engine itself. Part 5 adds the independent hold/fade
+   rotation between presets.
+
+   Deliberately run at a low internal resolution (MELT_W x MELT_H) rather
+   than the full visible canvas:
+     - A true per-pixel remap needs a JS loop over every buffer pixel, every
+       frame; at full canvas resolution (which can be many hundreds of
+       thousands of pixels once devicePixelRatio is factored in) that loop
+       alone could cost more per frame than the rest of this app's entire
+       30fps budget.
+     - At a coarse resolution the same loop is a few thousand iterations,
+       comfortably inside a 33ms frame even with trig-heavy movemaps.
+     - The blocky, softly-interpolated look this produces when the small
+       buffer is scaled up onto the visible canvas is not a compromise to
+       hide - it is genuinely close to how a real-time software-rendered
+       feedback effect actually looked at the resolutions common in 2000. */
+const MELT_W = 192, MELT_H = 108;
+
+let meltCanvas = null;      // offscreen canvas holding the low-res buffer
+let meltCtx = null;
+let meltPixels = null;      // ImageData: current frame, about to be read from
+let meltScratch = null;     // ImageData: next frame, being built
+let meltMovemap = null;     // active movemap function, see MELT_MOVEMAPS
+let meltInited = false;
+
+/* Each movemap takes (x, y) in aspect-corrected -1..1 space - "the pixel
+   currently being written" - and returns [srcX, srcY] in that same space -
+   "read last frame's color from here instead". The radius/theta and
+   srcRadius/srcTheta naming follows the polar move-function convention
+   documented for Smear's own scripting language, which this reimplements
+   in plain JS rather than a separate scripting layer. */
+const MELT_MOVEMAPS = [
+  // Spiral zoom inward with a slow counter-rotation - the classic
+  // "melt into the centre" look.
+  function spiralIn(x, y) {
+    const radius = Math.hypot(x, y);
+    const theta = Math.atan2(y, x);
+    const srcRadius = radius * 0.87;
+    const srcTheta = theta - 0.075;
+    return [Math.cos(srcTheta) * srcRadius, Math.sin(srcTheta) * srcRadius];
+  },
+  // Slow spiral outward with a gentle ripple layered on the radius.
+  function rippleOut(x, y) {
+    const radius = Math.hypot(x, y);
+    const theta = Math.atan2(y, x);
+    const srcRadius = radius + 0.04 * Math.sin(6.2831853 * radius);
+    const srcTheta = theta + 0.015;
+    return [Math.cos(srcTheta) * srcRadius, Math.sin(srcTheta) * srcRadius];
+  },
+  // A gentle two-lobed pinch: radius pulled in harder along two opposing
+  // axes than the other two, so a plain circle warps into a soft square-ish
+  // pulse instead of staying uniform.
+  function pinch(x, y) {
+    const radius = Math.hypot(x, y);
+    const theta = Math.atan2(y, x);
+    const srcRadius = radius * (0.92 + 0.03 * (1 + Math.sin(6 * theta)));
+    return [Math.cos(theta) * srcRadius, Math.sin(theta) * srcRadius];
+  },
+];
+
+function meltInit() {
+  meltCanvas = document.createElement("canvas");
+  meltCanvas.width = MELT_W;
+  meltCanvas.height = MELT_H;
+  meltCtx = meltCanvas.getContext("2d", { willReadFrequently: true });
+  meltCtx.fillStyle = "#000";
+  meltCtx.fillRect(0, 0, MELT_W, MELT_H);
+  meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
+  meltScratch = meltCtx.createImageData(MELT_W, MELT_H);
+  // Part 5 will replace this fixed pick with the hold/fade rotation; for
+  // now, one movemap for the life of this mode is enough to prove the warp.
+  meltMovemap = MELT_MOVEMAPS[0];
+  meltInited = true;
+}
+
+/* The warp pass: for every low-res pixel, ask the active movemap where in
+   last frame's buffer to read this frame's color from, then copy it.
+   Nearest-neighbour sampling, not bilinear - at this resolution, scaled up
+   with the browser's own image smoothing on the final drawImage, the
+   difference is not visible, and nearest-neighbour is one array read
+   instead of four. */
+function meltWarpFrame() {
+  const w = MELT_W, h = MELT_H;
+  const src = meltPixels.data;
+  const dst = meltScratch.data;
+  const aspect = w / h;
+  for (let py = 0; py < h; py++) {
+    const ny = (py / (h - 1)) * 2 - 1;
+    for (let px = 0; px < w; px++) {
+      const nx = ((px / (w - 1)) * 2 - 1) * aspect;
+      const out = meltMovemap(nx, ny);
+      const sx = out[0], sy = out[1];
+      const ix = Math.round(((sx / aspect) * 0.5 + 0.5) * (w - 1));
+      const iy = Math.round((sy * 0.5 + 0.5) * (h - 1));
+      const di = (py * w + px) * 4;
+      if (ix < 0 || ix >= w || iy < 0 || iy >= h) {
+        dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 255;
+        continue;
+      }
+      const si = (iy * w + ix) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+    }
+  }
+  // Ping-pong the two buffers rather than copying: the scratch just built
+  // becomes "current" for the draw step below, and next frame's warp will
+  // read from it and write into what used to be current.
+  const tmp = meltPixels; meltPixels = meltScratch; meltScratch = tmp;
+}
+
+/* PART 1 placeholder content: the oscilloscope trace, drawn straight into
+   the low-res buffer in a single fixed color. This is exactly the piece
+   Part 3 (Waveform scripts) replaces with multiple palette-colored,
+   audio-shaped paths - kept deliberately simple here so Part 1 is a
+   complete, visibly-working checkpoint on its own: turn this mode on and
+   the trace should already be melting into itself frame to frame. */
+function meltDrawPlaceholderContent(wave) {
+  if (!wave.length) return;
+  meltCtx.strokeStyle = "#e04b3c";
+  meltCtx.lineWidth = 1.5;
+  meltCtx.beginPath();
+  const stepX = MELT_W / (wave.length - 1);
+  for (let i = 0; i < wave.length; i++) {
+    const x = i * stepX;
+    const y = MELT_H / 2 - wave[i] * MELT_H * 0.4;
+    if (i === 0) meltCtx.moveTo(x, y); else meltCtx.lineTo(x, y);
+  }
+  meltCtx.stroke();
+}
+
+function drawMelt(ctx, w, h, bars, wave) {
+  if (!meltInited) meltInit();
+
+  // 1. Warp: resample the buffer we ended last frame with through the
+  //    active movemap, producing this frame's starting point.
+  meltWarpFrame();
+
+  // 2. Get that warped buffer onto the actual canvas element so normal
+  //    canvas draw calls (the placeholder trace, and later the palette-
+  //    colored waveform/particle layers) can be layered on top of it with
+  //    real strokes/fills rather than more manual pixel writes.
+  meltCtx.putImageData(meltPixels, 0, 0);
+
+  // 3. New content for this frame, drawn with ordinary canvas calls.
+  meltDrawPlaceholderContent(wave);
+
+  // 4. Re-capture the buffer, now including what was just drawn, so next
+  //    frame's warp pass carries it forward too - this is what makes a
+  //    stroke drawn once keep spiraling/rippling on every subsequent
+  //    frame instead of only appearing for one.
+  meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
+
+  // 5. Blit the low-res buffer up to the full visible canvas. The browser's
+  //    own image smoothing does the upscale interpolation for free.
+  ctx.imageSmoothingEnabled = true;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(meltCanvas, 0, 0, MELT_W, MELT_H, 0, 0, w, h);
 }
 
 $("art").addEventListener("dblclick", cycleVisualizer);
