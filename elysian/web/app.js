@@ -2650,9 +2650,9 @@ function drawWave() {
    brief periods it is actually open, at a much faster rate (33ms, ~30fps)
    than the rest of the app ever needs, and nothing else here cares about
    its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope,
-   3 = procedural tunnel, 4 = belt/starfield - double-clicking cycles
-   through all five, so the same gesture that opens it is also how it
-   closes, with no separate control needed. */
+   3 = procedural tunnel, 4 = belt/starfield, 5 = melt-style warp -
+   double-clicking cycles through all six, so the same gesture that opens
+   it is also how it closes, with no separate control needed. */
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
@@ -2670,6 +2670,11 @@ function stopVisualizer() {
   beltYaw = 0;
   beltStars = null;
   beltParticles = null;
+  meltInited = false;
+  meltWaveformStateA = null;
+  meltWaveformStateB = null;
+  meltParticleStateA = null;
+  meltParticleStateB = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2677,13 +2682,18 @@ function stopVisualizer() {
 }
 
 function cycleVisualizer() {
-  vizMode = (vizMode + 1) % 5;
+  vizMode = (vizMode + 1) % 6;
   if (vizMode === 0) {
     tunnelPhase = 0;
     tunnelBlobs = null;
     beltYaw = 0;
     beltStars = null;
     beltParticles = null;
+    meltInited = false;
+    meltWaveformStateA = null;
+    meltWaveformStateB = null;
+    meltParticleStateA = null;
+    meltParticleStateB = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -2693,7 +2703,14 @@ function cycleVisualizer() {
   $("visualizer").classList.remove("hidden");
   $("artwrap").classList.add("hidden");
   $("wave").classList.add("hidden");
-  if (vizMode === 3 || vizMode === 4) {
+  // Cleared here, synchronously, regardless of which mode is being
+  // entered - not just 3/4/5. Making the canvas visible happens
+  // immediately, but the first real draw for the new mode only arrives
+  // asynchronously (after the next visualizer_frame() round trip), and
+  // in between, whatever this canvas last held (most visibly, a melt
+  // frame - going back to mode 0 only hides the canvas, it never clears
+  // the pixels underneath) would otherwise flash on screen for that gap.
+  {
     const c = $("visualizer");
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
@@ -2725,14 +2742,16 @@ function drawVisualizerFrame(frame) {
   // assigning it clears the canvas even when the size did not change.
   if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
   const ctx = c.getContext("2d");
-  // Tunnel and belt/starfield both paint their own translucent fill each
-  // frame instead of a hard clear, so the previous frame fades into a
-  // trail rather than vanishing outright.
-  if (vizMode !== 3 && vizMode !== 4) ctx.clearRect(0, 0, w, h);
+  // Tunnel, belt/starfield and melt all paint their own translucent fill
+  // (or, for melt, a full buffer blit) each frame instead of a hard
+  // clear, so the previous frame fades into or feeds the next one rather
+  // than vanishing outright.
+  if (vizMode !== 3 && vizMode !== 4 && vizMode !== 5) ctx.clearRect(0, 0, w, h);
   if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
   else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
   else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || []);
   else if (vizMode === 4) drawBelt(ctx, w, h, frame.bars || [], frame.wave || []);
+  else if (vizMode === 5) drawMelt(ctx, w, h, frame.bars || [], frame.wave || []);
 }
 
 function drawSpectrumBars(ctx, w, h, bars) {
@@ -2968,6 +2987,815 @@ function drawBelt(ctx, w, h, bars, wave) {
   ctx.shadowBlur = 8 + overall * 14;
   ctx.stroke();
   ctx.shadowBlur = 0;
+}
+
+/* ==========================================================================
+   Melt-style warp visualizer (vizMode 5)
+   ==========================================================================
+   Inspired by the real "Smear" Sonique plugin (mykel & xplo, 2000), which
+   works by continuously resampling its own previous frame through a
+   per-pixel coordinate remap ("Movemap"), so anything drawn into it keeps
+   getting dragged, spiraled or rippled by whatever transform is active -
+   that resample-of-self is what produces the melt look, not any one single
+   effect drawn fresh each frame. This is an original implementation of that
+   technique, not a port of that plugin's code.
+
+   PART 1 of this mode implements just that core warp engine, plus enough
+   of a placeholder draw (the oscilloscope trace, in a single fixed color)
+   to prove the buffer is actually warping frame to frame. Parts 2-4 (a
+   proper 256-entry Colormap-style palette, Waveform-script-style paths,
+   and Particle-script-style shapes) replace that placeholder without
+   touching the warp engine itself. Part 5 adds the independent hold/fade
+   rotation between presets.
+
+   Run at a low-ish internal resolution (MELT_W x MELT_H) rather than the
+   full visible canvas:
+     - A true per-pixel remap needs a JS loop over every buffer pixel, every
+       frame; at full canvas resolution (which can be many hundreds of
+       thousands of pixels once devicePixelRatio is factored in) that loop
+       alone could cost more per frame than the rest of this app's entire
+       30fps budget.
+     - Went 192x108 -> 384x216 -> 576x324 while chasing a reported
+       slowdown, on the assumption that content-drawing optimizations
+       (several were tried, on the waveform/particle side, in the git
+       history around this point - all reverted) would keep pace with it.
+       They didn't, and were themselves a mistake: several were built and
+       benchmarked in isolation under Node, which has no real GPU/canvas
+       pipeline and so cannot show whether hand-written pixel-blending
+       loops are actually faster than native Canvas2D fill/stroke/arc
+       calls in a real browser - in practice they were reported as worse,
+       not better, and were reverted back to plain canvas calls
+       (meltDrawWaveformScript/meltDrawParticleScript). Separately, the
+       warp pass itself measured ~19ms/frame at 576x324 during a movemap
+       crossfade, in isolation, before any content is drawn or the buffer
+       is even shown - already the majority of a 33ms frame on its own, so
+       no content-drawing change was ever going to fix that regardless.
+       Reverted to 384x216 (2x the original 192x108, not 3x). The warp
+       loop's own optimizations (see meltWarpFrame's comments -
+       zero-allocation movemaps, shared radius/theta, precomputed
+       coordinate tables) are kept, since those target a cost proven
+       dominant by measurement rather than assumption, and are unaffected
+       by which approach the content-drawing side uses. If this ever
+       needs to come back down further, or go back up once there's
+       headroom to spare, this is the one number to change - everything
+       above scales with it automatically.
+     - The softly-interpolated look this produces when the buffer is
+       scaled up onto the visible canvas is not a compromise to hide - it
+       is genuinely close to how a real-time software-rendered feedback
+       effect actually looked at the resolutions common in 2000. */
+const MELT_W = 384, MELT_H = 216;
+
+/* Everything below depends only on MELT_W/MELT_H, which never change at
+   runtime, so it's computed exactly once here rather than being redone
+   for every pixel of every frame inside meltWarpFrame's hot loop:
+     - MELT_NX/MELT_NY: the aspect-corrected -1..1 coordinate each column/
+       row maps to (previously a division done per pixel, per frame).
+     - MELT_WARP_SX_SCALE/X_OFFSET/Y_SCALE: the reverse conversion, source
+       coordinate back to a buffer pixel index, reduced to one multiply-
+       add instead of the divisions the original per-pixel version did. */
+const MELT_ASPECT = MELT_W / MELT_H;
+const MELT_NX = new Float32Array(MELT_W);
+const MELT_NY = new Float32Array(MELT_H);
+for (let px = 0; px < MELT_W; px++) {
+  MELT_NX[px] = ((px / (MELT_W - 1)) * 2 - 1) * MELT_ASPECT;
+}
+for (let py = 0; py < MELT_H; py++) {
+  MELT_NY[py] = (py / (MELT_H - 1)) * 2 - 1;
+}
+const MELT_WARP_SX_SCALE = (0.5 * (MELT_W - 1)) / MELT_ASPECT;
+const MELT_WARP_X_OFFSET = 0.5 * (MELT_W - 1);
+const MELT_WARP_Y_SCALE = 0.5 * (MELT_H - 1);
+
+let meltCanvas = null;      // offscreen canvas holding the low-res buffer
+let meltCtx = null;
+let meltPixels = null;      // ImageData: current frame, about to be read from
+let meltScratch = null;     // ImageData: next frame, being built
+let meltInited = false;
+let meltClock = 0;          // seconds, advances once per drawMelt() call -
+                             // frame-driven rather than wall-clock, so it
+                             // naturally stops advancing whenever this mode
+                             // isn't actually being polled/drawn
+
+/* ---------- Independent hold/fade scheduler (part 5) ----------
+   Each of the four preset categories (movemap, colormap, waveform,
+   particle) rotates and cross-fades entirely on its own clock, exactly
+   the way the original plugin's vis.ini drove its own four categories:
+   a "hold" duration for how long a preset stays active, a "fade" duration
+   for the crossfade into the next one, and both randomized within +/-50%
+   of their base value each time, so no two runs land on the same rhythm.
+
+   A scheduler only tracks *which* index is active/incoming and *how far*
+   the current fade has gotten (0..1, "blend"); it has no opinion on what a
+   "preset" actually is. Each category's own draw code decides what to do
+   with .a (current index), .b (incoming index, or -1 when not fading) and
+   .blend. */
+const MELT_HOLD_FADE = {
+  movemap:  { hold: 14, fade: 3.0 },
+  colormap: { hold: 11, fade: 2.5 },
+  waveform: { hold: 13, fade: 2.5 },
+  particle: { hold: 10, fade: 2.0 },
+};
+
+// +/-50% of base, matching the original's own "the actual value will be
+// +/- 50% each time it is used" note for every one of its hold/fade knobs.
+function meltJitter(base) {
+  return base * (0.5 + Math.random());
+}
+
+function meltMakeScheduler(count, holdBase, fadeBase) {
+  return {
+    count, holdBase, fadeBase,
+    a: Math.floor(Math.random() * count),
+    b: -1,
+    blend: 0,               // 0 = fully on `a`, 1 = fully on `b`
+    holdUntil: meltClock + meltJitter(holdBase),
+    fadeUntil: -1,
+    fadeDuration: fadeBase,
+  };
+}
+
+/* Advances one scheduler by one frame's worth of meltClock. Does not know
+   or care what `a`/`b` mean to the caller - swapping in a newly-picked
+   preset's own per-instance state (if it has any) is the caller's job,
+   done by comparing `b` before and after this call (see
+   meltTickAllSchedulers below). */
+function meltTickScheduler(sched) {
+  if (sched.count <= 1) return; // nothing else to rotate to
+  if (sched.b === -1) {
+    if (meltClock < sched.holdUntil) return;
+    let next = sched.a;
+    while (next === sched.a) next = Math.floor(Math.random() * sched.count);
+    sched.b = next;
+    sched.fadeDuration = meltJitter(sched.fadeBase);
+    sched.fadeUntil = meltClock + sched.fadeDuration;
+    sched.blend = 0;
+    return;
+  }
+  const remaining = sched.fadeUntil - meltClock;
+  sched.blend = Math.max(0, Math.min(1, 1 - remaining / sched.fadeDuration));
+  if (meltClock >= sched.fadeUntil) {
+    sched.a = sched.b;
+    sched.b = -1;
+    sched.blend = 0;
+    sched.holdUntil = meltClock + meltJitter(sched.holdBase);
+  }
+}
+
+let meltMovemapSched = null;
+let meltColormapSched = null;
+let meltWaveformSched = null;
+let meltParticleSched = null;
+// Waveform and particle scripts carry their own per-instance state (random
+// parameters picked once when a script becomes active, then reused every
+// frame it runs) - two slots each, since during a crossfade the outgoing
+// and incoming script are both running and drawing at once. Movemaps and
+// colormaps are pure functions of their input with no such state, so they
+// need nothing equivalent.
+let meltWaveformStateA = null;
+let meltWaveformStateB = null;
+let meltParticleStateA = null;
+let meltParticleStateB = null;
+
+/* Runs every category's scheduler for one frame, and handles the state
+   handoff a plain meltTickScheduler() call can't: when a category's `b`
+   is newly assigned (a fade just started), build fresh per-instance state
+   for the incoming script; when `b` drops back to -1 (a fade just
+   finished), what was building in slot B becomes slot A, so the preset
+   that's now current keeps the same per-instance state it had been
+   running with all through the fade rather than restarting fresh. */
+function meltTickAllSchedulers() {
+  meltTickScheduler(meltMovemapSched);
+  meltTickScheduler(meltColormapSched);
+
+  const wasWaveB = meltWaveformSched.b;
+  meltTickScheduler(meltWaveformSched);
+  if (meltWaveformSched.b !== -1 && meltWaveformSched.b !== wasWaveB) {
+    meltWaveformStateB = MELT_WAVEFORMS[meltWaveformSched.b].init();
+  } else if (wasWaveB !== -1 && meltWaveformSched.b === -1) {
+    meltWaveformStateA = meltWaveformStateB;
+    meltWaveformStateB = null;
+  }
+
+  const wasPartB = meltParticleSched.b;
+  meltTickScheduler(meltParticleSched);
+  if (meltParticleSched.b !== -1 && meltParticleSched.b !== wasPartB) {
+    meltParticleStateB = MELT_PARTICLES[meltParticleSched.b].init();
+  } else if (wasPartB !== -1 && meltParticleSched.b === -1) {
+    meltParticleStateA = meltParticleStateB;
+    meltParticleStateB = null;
+  }
+}
+
+/* Each movemap takes (x, y) in aspect-corrected -1..1 space plus that same
+   point's radius/theta - precomputed once per pixel by the caller, since
+   every movemap here is polar-based and would otherwise recompute the
+   identical Math.hypot/Math.atan2 redundantly (and, during a crossfade,
+   twice over - once per active movemap on the exact same input) - and
+   writes [srcX, srcY] ("read last frame's color from here instead") into
+   the `out` object the caller passes in, rather than returning a freshly
+   allocated array. At hundreds of thousands of buffer pixels a frame, an
+   allocation per call per movemap is enough garbage-collector pressure to
+   matter; a reused output object is not. The radius/theta and srcRadius/
+   srcTheta naming follows the polar move-function convention documented
+   for Smear's own scripting language, which this reimplements in plain JS
+   rather than a separate scripting layer. */
+const MELT_MOVEMAPS = [
+  // Spiral zoom inward with a slow counter-rotation - the classic
+  // "melt into the centre" look.
+  function spiralIn(x, y, radius, theta, out) {
+    const srcRadius = radius * 0.87;
+    const srcTheta = theta - 0.075;
+    out.x = Math.cos(srcTheta) * srcRadius;
+    out.y = Math.sin(srcTheta) * srcRadius;
+  },
+  // Slow spiral outward with a gentle ripple layered on the radius.
+  function rippleOut(x, y, radius, theta, out) {
+    const srcRadius = radius + 0.04 * Math.sin(6.2831853 * radius);
+    const srcTheta = theta + 0.015;
+    out.x = Math.cos(srcTheta) * srcRadius;
+    out.y = Math.sin(srcTheta) * srcRadius;
+  },
+  // A gentle two-lobed pinch: radius pulled in harder along two opposing
+  // axes than the other two, so a plain circle warps into a soft square-ish
+  // pulse instead of staying uniform.
+  function pinch(x, y, radius, theta, out) {
+    const srcRadius = radius * (0.92 + 0.03 * (1 + Math.sin(6 * theta)));
+    out.x = Math.cos(theta) * srcRadius;
+    out.y = Math.sin(theta) * srcRadius;
+  },
+];
+
+/* ---------- Colormap-style palette engine (part 2) ----------
+   A 256-entry palette, generated by a small preset function rather than
+   authored as a fixed gradient. Two conventions carried over deliberately:
+     - a palette preset is handed `value` in 0..1 (0 = darkest/background,
+       1 = brightest) and returns an RGB triple - this is the palette's own
+       indexing convention.
+     - anything actually *drawn* with the palette (a line, a particle) is
+       instead handed a `fade` in 0..1 with the opposite sense (0 =
+       brightest, 1 = background), matching how a 0..1 "how much to fade
+       toward the background" value reads more naturally at the call site
+       than an inverted brightness would. meltPaletteFade() below is the
+       one place that conversion happens, so nothing else needs to
+       remember it. */
+const MELT_PALETTE_SIZE = 256;
+
+let meltPalette = null;          // Uint8ClampedArray, MELT_PALETTE_SIZE*3 (rgb triples)
+                                  // meltColormapSched (declared above) now
+                                  // drives which preset(s) are active and
+                                  // any in-progress crossfade; meltClock
+                                  // (also declared above) stands in for
+                                  // each preset's own $Time.
+let meltPaletteStrings = null;   // 256 precomputed "rgb(...)" CSS strings,
+                                  // one per meltPalette entry - rebuilt
+                                  // alongside meltPalette itself, once a
+                                  // frame, rather than formatting a fresh
+                                  // string on every single stroke/fill call
+                                  // (previously up to several hundred a
+                                  // frame between the waveform and particle
+                                  // layers, doubled during a crossfade).
+
+function _hsvToRgb(h, s, v) {
+  h = ((h % 1) + 1) % 1;
+  s = Math.max(0, Math.min(1, s));
+  v = Math.max(0, Math.min(1, v));
+  const i = Math.floor(h * 6);
+  const f = h * 6 - i;
+  const p = v * (1 - s);
+  const q = v * (1 - f * s);
+  const t = v * (1 - (1 - f) * s);
+  let r, g, b;
+  switch (i % 6) {
+    case 0: r = v; g = t; b = p; break;
+    case 1: r = q; g = v; b = p; break;
+    case 2: r = p; g = v; b = t; break;
+    case 3: r = p; g = q; b = v; break;
+    case 4: r = t; g = p; b = v; break;
+    default: r = v; g = p; b = q; break;
+  }
+  return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+}
+
+/* Each preset: useTime false means the palette is generated once and left
+   alone; true means meltBuildPalette() re-runs every frame with an
+   advancing `time`, for a palette that itself animates (a slowly cycling
+   hue, for instance) independent of anything audio-driven. */
+const MELT_COLORMAPS = [
+  // A static 3-stop ramp - dark teal-green through cyan to near-white at
+  // the top of the range. No time dependency, so this is built once.
+  {
+    useTime: false,
+    fn(value) {
+      if (value > 0.8) {
+        const t = (value - 0.8) / 0.2;
+        return [Math.round(t * 255), 255, Math.round(t * 255)];
+      }
+      if (value > 0.5) {
+        const t = (value - 0.5) / 0.6;
+        return [0, Math.round((0.5 + t) * 255), Math.round((0.5 - t) * 255)];
+      }
+      return [0, Math.round(value * 255), Math.round(value * 255)];
+    },
+  },
+  // A slowly hue-cycling ramp: bright and saturated at low value, fading
+  // toward black at high value, with the hue itself drifting over time.
+  {
+    useTime: true,
+    fn(value, time) {
+      const h = 0.02 * time;
+      const s = 1;
+      const v = 1 - Math.pow(value, 1.4);
+      return _hsvToRgb(h, s, v);
+    },
+  },
+  // A warmer variant closer to this app's own red accent color: hue
+  // drifts through a narrow red-orange band rather than the full wheel.
+  {
+    useTime: true,
+    fn(value, time) {
+      const h = 0.02 + 0.03 * (0.5 + 0.5 * Math.sin(time * 0.15));
+      const s = 1 - 0.5 * Math.pow(value, 2.5);
+      const v = Math.pow(value, 0.8);
+      return _hsvToRgb(h, s, v);
+    },
+  },
+];
+
+function meltBuildPalette() {
+  if (!meltPalette) meltPalette = new Uint8ClampedArray(MELT_PALETTE_SIZE * 3);
+  if (!meltPaletteStrings) meltPaletteStrings = new Array(MELT_PALETTE_SIZE);
+  const sched = meltColormapSched;
+  const cmA = MELT_COLORMAPS[sched.a];
+  const cmB = sched.b !== -1 ? MELT_COLORMAPS[sched.b] : null;
+  for (let i = 0; i < MELT_PALETTE_SIZE; i++) {
+    const value = i / (MELT_PALETTE_SIZE - 1);
+    const [ra, ga, ba] = cmA.fn(value, meltClock);
+    let r = ra, g = ga, b = ba;
+    if (cmB) {
+      const [rb, gb, bb] = cmB.fn(value, meltClock);
+      r = ra + (rb - ra) * sched.blend;
+      g = ga + (gb - ga) * sched.blend;
+      b = ba + (bb - ba) * sched.blend;
+    }
+    const o = i * 3;
+    meltPalette[o] = r; meltPalette[o + 1] = g; meltPalette[o + 2] = b;
+    meltPaletteStrings[i] = `rgb(${meltPalette[o]},${meltPalette[o + 1]},${meltPalette[o + 2]})`;
+  }
+}
+
+/* The one place fade (0=brightest, 1=background) gets turned into an
+   actual color, so nothing drawing with the palette has to remember the
+   inversion between a palette's own `value` and a draw call's `fade`. A
+   plain array lookup now, not a template-literal string build - see
+   meltPaletteStrings above. */
+function meltPaletteFade(fade) {
+  const value = Math.max(0, Math.min(1, 1 - fade));
+  const idx = Math.round(value * (MELT_PALETTE_SIZE - 1));
+  return meltPaletteStrings[idx];
+}
+
+function meltInit() {
+  meltCanvas = document.createElement("canvas");
+  meltCanvas.width = MELT_W;
+  meltCanvas.height = MELT_H;
+  meltCtx = meltCanvas.getContext("2d", { willReadFrequently: true });
+  meltCtx.fillStyle = "#000";
+  meltCtx.fillRect(0, 0, MELT_W, MELT_H);
+  meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
+  meltScratch = meltCtx.createImageData(MELT_W, MELT_H);
+  meltClock = 0;
+
+  meltMovemapSched = meltMakeScheduler(
+    MELT_MOVEMAPS.length, MELT_HOLD_FADE.movemap.hold, MELT_HOLD_FADE.movemap.fade);
+  meltColormapSched = meltMakeScheduler(
+    MELT_COLORMAPS.length, MELT_HOLD_FADE.colormap.hold, MELT_HOLD_FADE.colormap.fade);
+  meltWaveformSched = meltMakeScheduler(
+    MELT_WAVEFORMS.length, MELT_HOLD_FADE.waveform.hold, MELT_HOLD_FADE.waveform.fade);
+  meltParticleSched = meltMakeScheduler(
+    MELT_PARTICLES.length, MELT_HOLD_FADE.particle.hold, MELT_HOLD_FADE.particle.fade);
+
+  meltWaveformStateA = MELT_WAVEFORMS[meltWaveformSched.a].init();
+  meltWaveformStateB = null;
+  meltParticleStateA = MELT_PARTICLES[meltParticleSched.a].init();
+  meltParticleStateB = null;
+
+  meltBuildPalette();
+  meltInited = true;
+}
+
+/* The warp pass: for every low-res pixel, ask the active movemap where in
+   last frame's buffer to read this frame's color from, then copy it.
+   Nearest-neighbour sampling, not bilinear - at this resolution, scaled up
+   with the browser's own image smoothing on the final drawImage, the
+   difference is not visible, and nearest-neighbour is one array read
+   instead of four. */
+// Reused every pixel, every frame, rather than movemaps allocating a
+// fresh [x,y] each call - see the comment above MELT_MOVEMAPS.
+const _meltOutA = { x: 0, y: 0 };
+const _meltOutB = { x: 0, y: 0 };
+
+function meltWarpFrame() {
+  const w = MELT_W, h = MELT_H;
+  const src = meltPixels.data;
+  const dst = meltScratch.data;
+  const sched = meltMovemapSched;
+  const fnA = MELT_MOVEMAPS[sched.a];
+  const fnB = sched.b !== -1 ? MELT_MOVEMAPS[sched.b] : null;
+  const blend = sched.blend;
+  const outA = _meltOutA, outB = _meltOutB;
+  for (let py = 0; py < h; py++) {
+    const ny = MELT_NY[py];
+    const rowOffset = py * w;
+    for (let px = 0; px < w; px++) {
+      const nx = MELT_NX[px];
+      // Shared by both movemaps when blending: computed once here rather
+      // than once inside each movemap on the same (nx,ny), which is what
+      // the per-movemap version used to do redundantly during a fade.
+      const radius = Math.sqrt(nx * nx + ny * ny);
+      const theta = Math.atan2(ny, nx);
+      fnA(nx, ny, radius, theta, outA);
+      let sx = outA.x, sy = outA.y;
+      // Blending two movemaps means evaluating both for every pixel during
+      // a crossfade - noticeably pricier than either alone, same as the
+      // original plugin's own documented warning that movemap crossfades
+      // are the single biggest performance cost in the whole effect.
+      if (fnB) {
+        fnB(nx, ny, radius, theta, outB);
+        sx += (outB.x - sx) * blend;
+        sy += (outB.y - sy) * blend;
+      }
+      const ix = Math.round(sx * MELT_WARP_SX_SCALE + MELT_WARP_X_OFFSET);
+      const iy = Math.round(sy * MELT_WARP_Y_SCALE + MELT_WARP_Y_SCALE);
+      const di = (rowOffset + px) * 4;
+      if (ix < 0 || ix >= w || iy < 0 || iy >= h) {
+        dst[di] = 0; dst[di + 1] = 0; dst[di + 2] = 0; dst[di + 3] = 255;
+        continue;
+      }
+      const si = (iy * w + ix) * 4;
+      dst[di] = src[si]; dst[di + 1] = src[si + 1];
+      dst[di + 2] = src[si + 2]; dst[di + 3] = 255;
+    }
+  }
+  // Ping-pong the two buffers rather than copying: the scratch just built
+  // becomes "current" for the draw step below, and next frame's warp will
+  // read from it and write into what used to be current.
+  const tmp = meltPixels; meltPixels = meltScratch; meltScratch = tmp;
+}
+
+/* ---------- Waveform-script-style paths (part 3) ----------
+   Mirrors the Stutter Waveform script convention: init() builds whatever
+   per-instance state the script needs (random per-selection parameters,
+   the way a real Movemap's init picks its own random radii/speeds once
+   and keeps them for its whole run), newline() updates that state once
+   per frame, and step() is called once per point along the path (t in
+   0..1) returning one {x,y,fade} per simultaneous path the script draws.
+   x/y are in the same -1..1 space the movemaps use; fade follows the same
+   0=brightest/1=background convention meltPaletteFade() already expects.
+
+   Implemented directly as plain JS functions/closures rather than a
+   second interpreted scripting language layered on top of the one this
+   app is already written in - Stutter's own scripting layer existed
+   because Sonique plugins were compiled, sandboxed native code with no
+   other way to be end-user-editable; that constraint does not apply
+   here, so a JS object literal per script is the equivalent expressive
+   surface without the extra machinery. */
+function _sampleArray(arr, t) {
+  if (!arr.length) return 0;
+  const idx = Math.min(arr.length - 1, Math.max(0, Math.round(t * (arr.length - 1))));
+  return arr[idx];
+}
+
+/* Each script preallocates its own points once, in init() - one object per
+   (path, step) pair, reused for the life of that script's run - and step()
+   below mutates those objects in place rather than returning a fresh
+   array-of-objects on every one of steps*numPaths calls, every frame
+   (doubled during a crossfade). Building 64 or more small objects a call,
+   many times a frame, was real, previously-unaddressed GC pressure -
+   exactly the class of thing the movemap functions were fixed to avoid
+   earlier, just never carried over to this layer. Distinct objects per
+   step are still required (not one shared/reused scratch object): the
+   caller needs all of a path's points at once to draw it, unlike a
+   movemap's output, which is consumed immediately after each call. */
+const MELT_WAVEFORMS = [
+  // A single scope trace across the middle - the direct descendant of
+  // the part 1/2 placeholder, now expressed as a proper waveform script.
+  {
+    numPaths: 1,
+    steps: 64,
+    init() {
+      return { points: [Array.from({ length: 64 }, () => ({ x: 0, y: 0, fade: 0 }))] };
+    },
+    newline() {},
+    step(state, t, i, wave) {
+      const w = _sampleArray(wave, t);
+      const p = state.points[0][i];
+      p.x = t * 2 - 1; p.y = w * 0.6; p.fade = 1 - Math.min(1, Math.abs(w));
+    },
+  },
+  // Three concentric rings, each centre slowly orbiting, radius pulsing
+  // with amplitude - a callback to the "historical rings" waveform script
+  // the original plugin shipped as a nod to its own predecessor.
+  {
+    numPaths: 3,
+    steps: 64,
+    init() {
+      return {
+        angle: 0,
+        points: [
+          Array.from({ length: 64 }, () => ({ x: 0, y: 0, fade: 0 })),
+          Array.from({ length: 64 }, () => ({ x: 0, y: 0, fade: 0 })),
+          Array.from({ length: 64 }, () => ({ x: 0, y: 0, fade: 0 })),
+        ],
+      };
+    },
+    newline(state) { state.angle += 0.01; },
+    step(state, t, i, wave) {
+      const theta = t * Math.PI * 2;
+      const w = _sampleArray(wave, t);
+      for (let p = 0; p < 3; p++) {
+        const centerAngle = state.angle + (p * Math.PI * 2) / 3;
+        const cx = Math.cos(centerAngle) * 0.25;
+        const cy = Math.sin(centerAngle) * 0.25;
+        const r = 0.15 + Math.abs(w) * 0.35;
+        const pt = state.points[p][i];
+        pt.x = cx + Math.cos(theta) * r;
+        pt.y = cy + Math.sin(theta) * r;
+        pt.fade = 1 - Math.abs(w);
+      }
+    },
+  },
+  // A bass-driven radial burst built from the spectrum bars instead of
+  // the raw waveform: walking t around a circle while radius follows
+  // each bar's energy traces the whole spectrum as one closed shape.
+  {
+    numPaths: 1,
+    steps: 32,
+    init() {
+      return { points: [Array.from({ length: 32 }, () => ({ x: 0, y: 0, fade: 0 }))] };
+    },
+    newline() {},
+    step(state, t, i, wave, bars) {
+      const e = _sampleArray(bars, t);
+      const theta = t * Math.PI * 2;
+      const r = 0.1 + e * 0.7;
+      const p = state.points[0][i];
+      p.x = Math.cos(theta) * r; p.y = Math.sin(theta) * r; p.fade = 1 - e;
+    },
+  },
+];
+
+function meltDrawWaveformScript(script, state, wave, bars, alpha) {
+  if (alpha <= 0) return;
+  script.newline(state, wave, bars);
+
+  const n = script.steps;
+  for (let i = 0; i < n; i++) {
+    const t = i / (n - 1);
+    script.step(state, t, i, wave, bars);
+  }
+
+  const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
+  const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
+
+  meltCtx.globalAlpha = alpha;
+  meltCtx.lineWidth = 1.5;
+  for (let p = 0; p < script.numPaths; p++) {
+    const pts = state.points[p];
+    for (let i = 1; i < pts.length; i++) {
+      // One stroke per segment, not one path with a single strokeStyle:
+      // canvas strokes are a single flat color, so a fade that varies
+      // along the path (louder = brighter) needs a stroke per segment.
+      meltCtx.strokeStyle = meltPaletteFade(pts[i].fade);
+      meltCtx.beginPath();
+      meltCtx.moveTo(toX(pts[i - 1].x), toY(pts[i - 1].y));
+      meltCtx.lineTo(toX(pts[i].x), toY(pts[i].y));
+      meltCtx.stroke();
+    }
+  }
+  meltCtx.globalAlpha = 1;
+}
+
+/* Runs whichever waveform script(s) are currently active - during a
+   crossfade that's the outgoing script drawn at (1-blend) opacity and the
+   incoming one at (blend) opacity, both onto the same buffer, rather than
+   trying to blend their geometry directly: two differently-shaped scripts
+   (a scope trace fading into three orbiting rings, say) have no natural
+   shared geometry to interpolate between, but a plain opacity crossfade
+   reads correctly regardless of how different the two look. */
+function meltDrawWaveforms(wave, bars) {
+  if (!wave.length && !bars.length) return;
+  const sched = meltWaveformSched;
+  meltDrawWaveformScript(
+    MELT_WAVEFORMS[sched.a], meltWaveformStateA, wave, bars, 1 - sched.blend);
+  if (sched.b !== -1) {
+    meltDrawWaveformScript(
+      MELT_WAVEFORMS[sched.b], meltWaveformStateB, wave, bars, sched.blend);
+  }
+}
+
+/* ---------- Particle-script-style shapes (part 4) ----------
+   Mirrors the Stutter Particle script convention: init() builds
+   per-instance state including how many particles this script draws
+   (state.count), newframe() updates whatever per-frame animation state
+   the script needs, and particle() is called once per particle (i in
+   0..state.count-1) returning a position, size and style (1 = filled
+   circle using size; 2 = a line from (x,y) to (xEnd,yEnd), size ignored -
+   the same two styles Stutter's own Particle scripts supported) plus a
+   fade in the same 0=brightest/1=background convention everything else
+   here already uses. */
+function _melt3DProject(x, y, z, yaw, pitch) {
+  const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+  const x1 = x * cosY + z * sinY;
+  const z1 = -x * sinY + z * cosY;
+  const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+  const y2 = y * cosP - z1 * sinP;
+  const z2 = y * sinP + z1 * cosP;
+  const focal = 2.2;
+  const depth = focal + z2;
+  const p = focal / Math.max(depth, 0.3);
+  return { x: x1 * p, y: y2 * p, p };
+}
+
+/* Each script preallocates one reusable output object in init(), and
+   particle() mutates it in place and returns it, rather than allocating a
+   fresh object literal on every one of state.count calls, every frame
+   (doubled during a crossfade). Safe to share a single object here, unlike
+   the waveform scripts above: each particle is drawn immediately after
+   being computed (see meltDrawParticleScript's loop) and never needs to
+   be remembered alongside any other particle's data afterward. */
+const MELT_PARTICLES = [
+  // One particle per position around a ring, each tracking one point of
+  // the spectrum: the ring's radius at that point pulses with that bar's
+  // own energy, so the whole ring reads as the spectrum bent into a loop.
+  {
+    init() {
+      return { count: 24, out: { x: 0, y: 0, xEnd: 0, yEnd: 0, size: 0, style: 1, fade: 0 } };
+    },
+    newframe() {},
+    particle(state, i, wave, bars) {
+      const t = i / state.count;
+      const theta = t * Math.PI * 2;
+      const e = _sampleArray(bars, t);
+      const r = 0.35 + e * 0.5;
+      const o = state.out;
+      o.x = Math.cos(theta) * r; o.y = Math.sin(theta) * r;
+      o.size = 0.015 + e * 0.05; o.style = 1; o.fade = 1 - e;
+      return o;
+    },
+  },
+  // A rotating wireframe cube, its edges drawn as line-style particles -
+  // directly modeled on the "rotating cube that pulses with the music"
+  // particle script decoded from the plugin that inspired this mode.
+  // Rotation speed is randomized once per selection (init runs once when
+  // this script becomes active), same as that original's own per-instance
+  // random $xrchange/$yrchange; scale pulses with the mid-band average.
+  {
+    init() {
+      const dots = 4;   // subdivisions per edge, between corners
+      const corners = [
+        [1, 1, 1], [-1, 1, 1], [1, -1, 1], [-1, -1, 1],
+        [1, 1, -1], [-1, 1, -1], [1, -1, -1], [-1, -1, -1],
+      ];
+      const edges = [
+        [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
+        [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7],
+      ];
+      const points = [];
+      for (const [a, b] of edges) {
+        for (let d = 0; d < dots; d++) {
+          const t = d / dots;
+          points.push(corners[a].map((v, k) => v + (corners[b][k] - v) * t));
+        }
+      }
+      return {
+        count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
+        yawSpeed: 0.006 + Math.random() * 0.01,
+        pitchSpeed: 0.004 + Math.random() * 0.008,
+        out: { x: 0, y: 0, xEnd: 0, yEnd: 0, size: 0.012, style: 1, fade: 0 },
+      };
+    },
+    newframe(state, wave, bars) {
+      const mid = _bandAvg(bars, 6, 20);
+      state.yaw += state.yawSpeed;
+      state.pitch += state.pitchSpeed;
+      state.scale = 0.28 + mid * 0.15;
+    },
+    particle(state, i) {
+      const [x, y, z] = state.points[i];
+      const proj = _melt3DProject(x, y, z, state.yaw, state.pitch);
+      const o = state.out;
+      o.x = proj.x * state.scale; o.y = proj.y * state.scale;
+      o.fade = Math.max(0, 1 - proj.p * 0.7);
+      return o;
+    },
+  },
+  // Spokes radiating from the centre, one per bar, each a line-style
+  // particle whose length is that bar's energy - the whole spectrum drawn
+  // as a burst rather than a bar chart or a ring.
+  {
+    init() {
+      return { count: 32, out: { x: 0, y: 0, xEnd: 0, yEnd: 0, size: 0.01, style: 2, fade: 0 } };
+    },
+    newframe() {},
+    particle(state, i, wave, bars) {
+      const t = i / state.count;
+      const theta = t * Math.PI * 2;
+      const e = _sampleArray(bars, t);
+      const rInner = 0.08, rOuter = 0.08 + e * 0.55;
+      const o = state.out;
+      o.x = Math.cos(theta) * rInner; o.y = Math.sin(theta) * rInner;
+      o.xEnd = Math.cos(theta) * rOuter; o.yEnd = Math.sin(theta) * rOuter;
+      o.fade = 1 - e;
+      return o;
+    },
+  },
+];
+
+function meltDrawParticleScript(script, state, wave, bars, alpha) {
+  if (alpha <= 0) return;
+  script.newframe(state, wave, bars);
+
+  const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
+  const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
+
+  meltCtx.globalAlpha = alpha;
+  for (let i = 0; i < state.count; i++) {
+    const p = script.particle(state, i, wave, bars);
+    const color = meltPaletteFade(p.fade);
+    if (p.style === 2) {
+      meltCtx.strokeStyle = color;
+      meltCtx.lineWidth = Math.max(1, (p.size || 0.01) * MELT_W);
+      meltCtx.beginPath();
+      meltCtx.moveTo(toX(p.x), toY(p.y));
+      meltCtx.lineTo(toX(p.xEnd), toY(p.yEnd));
+      meltCtx.stroke();
+    } else {
+      meltCtx.fillStyle = color;
+      const r = Math.max(0.6, (p.size || 0.02) * MELT_W);
+      meltCtx.beginPath();
+      meltCtx.arc(toX(p.x), toY(p.y), r, 0, Math.PI * 2);
+      meltCtx.fill();
+    }
+  }
+  meltCtx.globalAlpha = 1;
+}
+
+/* Same opacity-crossfade approach as the waveform layer, and for the same
+   reason: two particle scripts (a ring burst fading into a rotating cube,
+   say) have no shared geometry worth interpolating, but drawing both at
+   complementary opacities reads as a clean crossfade regardless. */
+function meltDrawParticles(wave, bars) {
+  const sched = meltParticleSched;
+  meltDrawParticleScript(
+    MELT_PARTICLES[sched.a], meltParticleStateA, wave, bars, 1 - sched.blend);
+  if (sched.b !== -1) {
+    meltDrawParticleScript(
+      MELT_PARTICLES[sched.b], meltParticleStateB, wave, bars, sched.blend);
+  }
+}
+
+function drawMelt(ctx, w, h, bars, wave) {
+  if (!meltInited) meltInit();
+
+  // Advance the shared frame clock and let every category's independent
+  // hold/fade scheduler catch up to it - this is the part 5 rotation that
+  // replaces parts 1-4's fixed preset picks with the real vis.ini-style
+  // behavior: each category holding, then crossfading to a new random
+  // pick, entirely on its own randomized timer.
+  meltClock += 1 / 30;
+  meltTickAllSchedulers();
+
+  // 1. Warp: resample the buffer we ended last frame with through the
+  //    active movemap (or a blend of two, mid-crossfade), producing this
+  //    frame's starting point.
+  meltWarpFrame();
+
+  // 2. Get that warped buffer onto the actual canvas element so normal
+  //    canvas draw calls (the waveform paths and particle shapes) can be
+  //    layered on top of it with real strokes/fills rather than manual
+  //    pixel writes.
+  meltCtx.putImageData(meltPixels, 0, 0);
+
+  // 3. Rebuild the palette every frame: cheap (256 entries) regardless of
+  //    whether the active colormap animates over time or two are being
+  //    crossfaded, so there is no reason to special-case either.
+  meltBuildPalette();
+
+  // 4. New content for this frame, drawn with ordinary canvas calls.
+  meltDrawWaveforms(wave, bars);
+  meltDrawParticles(wave, bars);
+
+  // 5. Re-capture the buffer, now including what was just drawn, so next
+  //    frame's warp pass carries it forward too - this is what makes a
+  //    stroke drawn once keep spiraling/rippling on every subsequent
+  //    frame instead of only appearing for one.
+  meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
+
+  // 6. Blit the low-res buffer up to the full visible canvas. The browser's
+  //    own image smoothing does the upscale interpolation for free.
+  ctx.imageSmoothingEnabled = true;
+  ctx.clearRect(0, 0, w, h);
+  ctx.drawImage(meltCanvas, 0, 0, MELT_W, MELT_H, 0, 0, w, h);
 }
 
 $("art").addEventListener("dblclick", cycleVisualizer);
