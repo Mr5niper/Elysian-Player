@@ -3068,6 +3068,9 @@ function drawBelt(ctx, w, h, bars, wave) {
   // beltStars above), but each one drifts slowly and independently -
   // no rotation of any kind, around any axis, shared or otherwise - and
   // reacts to one spectrum bar's energy for its own size/brightness.
+  // Unlike the plain white starfield, each of these also trails a
+  // short fading tracer behind its own recent motion - the one visual
+  // difference between the two star layers, not just a color swap.
   if (!beltParticles) {
     beltParticles = Array.from({ length: 46 }, () => ({
       lx: Math.random() * 2 - 1,
@@ -3079,22 +3082,44 @@ function drawBelt(ctx, w, h, bars, wave) {
   }
   const particleHalfW = (w / 2) * 1.05, particleHalfH = (h / 2) * 1.05;
   for (const particle of beltParticles) {
+    const prevLx = particle.lx, prevLy = particle.ly;
     // A gentle, bass-nudged drift - not a spin of any kind. Wraps back in
     // from the opposite edge rather than accelerating away, so this
     // stays a continuous field instead of eventually draining off one
     // side.
     particle.lx += particle.vx * (1 + bass * 2);
     particle.ly += particle.vy * (1 + bass * 2);
-    if (particle.lx > 1.1) particle.lx = -1.1;
-    if (particle.lx < -1.1) particle.lx = 1.1;
-    if (particle.ly > 1.1) particle.ly = -1.1;
-    if (particle.ly < -1.1) particle.ly = 1.1;
+    let wrapped = false;
+    if (particle.lx > 1.1) { particle.lx = -1.1; wrapped = true; }
+    if (particle.lx < -1.1) { particle.lx = 1.1; wrapped = true; }
+    if (particle.ly > 1.1) { particle.ly = -1.1; wrapped = true; }
+    if (particle.ly < -1.1) { particle.ly = 1.1; wrapped = true; }
 
     const x = cx + particle.lx * particleHalfW;
     const y = cy + particle.ly * particleHalfH;
     const energy = bars[particle.bar] || 0;
     const size = Math.max(1, 1.3 + energy * 4.5) * starSizeScale;
     const alpha = Math.min(1, 0.35 + energy * 0.65);
+
+    // Tracer: a short fading streak along the particle's own last step,
+    // brightest at its current position and fading to nothing at its
+    // previous one. Skipped on the one frame a particle wraps to the
+    // opposite edge, since a straight line from the old side of the
+    // screen to the new one would otherwise draw a stray line clear
+    // across the canvas.
+    if (!wrapped) {
+      const px = cx + prevLx * particleHalfW, py = cy + prevLy * particleHalfH;
+      const grad = ctx.createLinearGradient(px, py, x, y);
+      grad.addColorStop(0, "rgba(255,205,180,0)");
+      grad.addColorStop(1, `rgba(255,205,180,${(alpha * 0.85).toFixed(3)})`);
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = Math.max(1, size * 0.6);
+      ctx.beginPath();
+      ctx.moveTo(px, py);
+      ctx.lineTo(x, y);
+      ctx.stroke();
+    }
+
     ctx.fillStyle = `rgba(255,205,180,${alpha.toFixed(3)})`;
     ctx.beginPath();
     ctx.arc(x, y, size, 0, Math.PI * 2);
@@ -3111,30 +3136,31 @@ function drawBelt(ctx, w, h, bars, wave) {
 
   // The belt itself: a ring whose radius at each point answers to the
   // waveform, so it reads as a line reacting to the music rather than a
-  // static hoop the camera merely orbits around. Same treatment as the
-  // tunnel mode's rings: fewer segments so the waveform's own jaggedness
-  // shows through as visible angles rather than being oversampled smooth,
-  // a bigger wave-amplitude multiplier for a rougher shape, and a much
-  // higher brightness floor that isn't dimmed by loudness on top of
-  // depth - there's only the one ring here, so no ring-count/spacing
-  // change applies, just shape and brightness.
-  const segments = 56;
+  // static hoop the camera merely orbits around. Pushed rougher/wilder
+  // than the first pass: fewer segments (was 56) so the waveform's own
+  // jaggedness reads as sharp angles rather than a gentle curve, a much
+  // bigger wave-amplitude multiplier (0.32 -> 0.65) so the shape swings
+  // hard rather than just wobbling, mid contribution raised too, and
+  // bass now also pushes the radius directly (a genuine pulse on the
+  // beat, not just texture) on top of lineWidth/glow already reacting to
+  // it.
+  const segments = 40;
   const points = [];
   for (let s = 0; s <= segments; s++) {
     const a = (s / segments) * Math.PI * 2;
     const waveIdx = Math.floor((s / segments) * wave.length) % Math.max(1, wave.length);
     const sample = wave.length ? wave[waveIdx] : 0;
-    const r = beltRadius * (1 + sample * 0.32 + mid * 0.08);
+    const r = beltRadius * (1 + sample * 0.65 + mid * 0.2 + bass * 0.18);
     const lx = Math.cos(a) * r;
     const ly = Math.sin(a) * r * 0.5;
     points.push(_project3D(lx, ly, 0, beltYaw, beltPitch, cx, cy, focal, scale));
   }
   ctx.beginPath();
   points.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
-  ctx.lineWidth = Math.max(2.5, 2.5 + overall * 4);
+  ctx.lineWidth = Math.max(2.5, 2.5 + overall * 4 + bass * 3);
   ctx.strokeStyle = `rgba(224,75,60,${(0.7 + overall * 0.3).toFixed(3)})`;
   ctx.shadowColor = "rgba(224,75,60,0.8)";
-  ctx.shadowBlur = 10 + overall * 14;
+  ctx.shadowBlur = 10 + overall * 14 + bass * 10;
   ctx.stroke();
   ctx.shadowBlur = 0;
 }
