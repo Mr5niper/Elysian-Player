@@ -2671,8 +2671,10 @@ function stopVisualizer() {
   beltStars = null;
   beltParticles = null;
   meltInited = false;
-  meltWaveformState = null;
-  meltParticleState = null;
+  meltWaveformStateA = null;
+  meltWaveformStateB = null;
+  meltParticleStateA = null;
+  meltParticleStateB = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2688,8 +2690,10 @@ function cycleVisualizer() {
     beltStars = null;
     beltParticles = null;
     meltInited = false;
-    meltWaveformState = null;
-    meltParticleState = null;
+    meltWaveformStateA = null;
+    meltWaveformStateB = null;
+    meltParticleStateA = null;
+    meltParticleStateB = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -3016,8 +3020,121 @@ let meltCanvas = null;      // offscreen canvas holding the low-res buffer
 let meltCtx = null;
 let meltPixels = null;      // ImageData: current frame, about to be read from
 let meltScratch = null;     // ImageData: next frame, being built
-let meltMovemap = null;     // active movemap function, see MELT_MOVEMAPS
 let meltInited = false;
+let meltClock = 0;          // seconds, advances once per drawMelt() call -
+                             // frame-driven rather than wall-clock, so it
+                             // naturally stops advancing whenever this mode
+                             // isn't actually being polled/drawn
+
+/* ---------- Independent hold/fade scheduler (part 5) ----------
+   Each of the four preset categories (movemap, colormap, waveform,
+   particle) rotates and cross-fades entirely on its own clock, exactly
+   the way the original plugin's vis.ini drove its own four categories:
+   a "hold" duration for how long a preset stays active, a "fade" duration
+   for the crossfade into the next one, and both randomized within +/-50%
+   of their base value each time, so no two runs land on the same rhythm.
+
+   A scheduler only tracks *which* index is active/incoming and *how far*
+   the current fade has gotten (0..1, "blend"); it has no opinion on what a
+   "preset" actually is. Each category's own draw code decides what to do
+   with .a (current index), .b (incoming index, or -1 when not fading) and
+   .blend. */
+const MELT_HOLD_FADE = {
+  movemap:  { hold: 14, fade: 3.0 },
+  colormap: { hold: 11, fade: 2.5 },
+  waveform: { hold: 13, fade: 2.5 },
+  particle: { hold: 10, fade: 2.0 },
+};
+
+// +/-50% of base, matching the original's own "the actual value will be
+// +/- 50% each time it is used" note for every one of its hold/fade knobs.
+function meltJitter(base) {
+  return base * (0.5 + Math.random());
+}
+
+function meltMakeScheduler(count, holdBase, fadeBase) {
+  return {
+    count, holdBase, fadeBase,
+    a: Math.floor(Math.random() * count),
+    b: -1,
+    blend: 0,               // 0 = fully on `a`, 1 = fully on `b`
+    holdUntil: meltClock + meltJitter(holdBase),
+    fadeUntil: -1,
+    fadeDuration: fadeBase,
+  };
+}
+
+/* Advances one scheduler by one frame's worth of meltClock. Does not know
+   or care what `a`/`b` mean to the caller - swapping in a newly-picked
+   preset's own per-instance state (if it has any) is the caller's job,
+   done by comparing `b` before and after this call (see
+   meltTickAllSchedulers below). */
+function meltTickScheduler(sched) {
+  if (sched.count <= 1) return; // nothing else to rotate to
+  if (sched.b === -1) {
+    if (meltClock < sched.holdUntil) return;
+    let next = sched.a;
+    while (next === sched.a) next = Math.floor(Math.random() * sched.count);
+    sched.b = next;
+    sched.fadeDuration = meltJitter(sched.fadeBase);
+    sched.fadeUntil = meltClock + sched.fadeDuration;
+    sched.blend = 0;
+    return;
+  }
+  const remaining = sched.fadeUntil - meltClock;
+  sched.blend = Math.max(0, Math.min(1, 1 - remaining / sched.fadeDuration));
+  if (meltClock >= sched.fadeUntil) {
+    sched.a = sched.b;
+    sched.b = -1;
+    sched.blend = 0;
+    sched.holdUntil = meltClock + meltJitter(sched.holdBase);
+  }
+}
+
+let meltMovemapSched = null;
+let meltColormapSched = null;
+let meltWaveformSched = null;
+let meltParticleSched = null;
+// Waveform and particle scripts carry their own per-instance state (random
+// parameters picked once when a script becomes active, then reused every
+// frame it runs) - two slots each, since during a crossfade the outgoing
+// and incoming script are both running and drawing at once. Movemaps and
+// colormaps are pure functions of their input with no such state, so they
+// need nothing equivalent.
+let meltWaveformStateA = null;
+let meltWaveformStateB = null;
+let meltParticleStateA = null;
+let meltParticleStateB = null;
+
+/* Runs every category's scheduler for one frame, and handles the state
+   handoff a plain meltTickScheduler() call can't: when a category's `b`
+   is newly assigned (a fade just started), build fresh per-instance state
+   for the incoming script; when `b` drops back to -1 (a fade just
+   finished), what was building in slot B becomes slot A, so the preset
+   that's now current keeps the same per-instance state it had been
+   running with all through the fade rather than restarting fresh. */
+function meltTickAllSchedulers() {
+  meltTickScheduler(meltMovemapSched);
+  meltTickScheduler(meltColormapSched);
+
+  const wasWaveB = meltWaveformSched.b;
+  meltTickScheduler(meltWaveformSched);
+  if (meltWaveformSched.b !== -1 && meltWaveformSched.b !== wasWaveB) {
+    meltWaveformStateB = MELT_WAVEFORMS[meltWaveformSched.b].init();
+  } else if (wasWaveB !== -1 && meltWaveformSched.b === -1) {
+    meltWaveformStateA = meltWaveformStateB;
+    meltWaveformStateB = null;
+  }
+
+  const wasPartB = meltParticleSched.b;
+  meltTickScheduler(meltParticleSched);
+  if (meltParticleSched.b !== -1 && meltParticleSched.b !== wasPartB) {
+    meltParticleStateB = MELT_PARTICLES[meltParticleSched.b].init();
+  } else if (wasPartB !== -1 && meltParticleSched.b === -1) {
+    meltParticleStateA = meltParticleStateB;
+    meltParticleStateB = null;
+  }
+}
 
 /* Each movemap takes (x, y) in aspect-corrected -1..1 space - "the pixel
    currently being written" - and returns [srcX, srcY] in that same space -
@@ -3070,12 +3187,11 @@ const MELT_MOVEMAPS = [
 const MELT_PALETTE_SIZE = 256;
 
 let meltPalette = null;          // Uint8ClampedArray, MELT_PALETTE_SIZE*3 (rgb triples)
-let meltColormapIndex = 1;       // which MELT_COLORMAPS preset is active
-                                  // (defaulted to the hue-cycling one so
-                                  // this part is visibly checkable before
-                                  // part 5's rotation exists; part 5 will
-                                  // drive this instead of a fixed default)
-let meltTime = 0;                // seconds since this colormap became active
+                                  // meltColormapSched (declared above) now
+                                  // drives which preset(s) are active and
+                                  // any in-progress crossfade; meltClock
+                                  // (also declared above) stands in for
+                                  // each preset's own $Time.
 
 function _hsvToRgb(h, s, v) {
   h = ((h % 1) + 1) % 1;
@@ -3145,10 +3261,19 @@ const MELT_COLORMAPS = [
 
 function meltBuildPalette() {
   if (!meltPalette) meltPalette = new Uint8ClampedArray(MELT_PALETTE_SIZE * 3);
-  const cm = MELT_COLORMAPS[meltColormapIndex];
+  const sched = meltColormapSched;
+  const cmA = MELT_COLORMAPS[sched.a];
+  const cmB = sched.b !== -1 ? MELT_COLORMAPS[sched.b] : null;
   for (let i = 0; i < MELT_PALETTE_SIZE; i++) {
     const value = i / (MELT_PALETTE_SIZE - 1);
-    const [r, g, b] = cm.fn(value, meltTime);
+    const [ra, ga, ba] = cmA.fn(value, meltClock);
+    let r = ra, g = ga, b = ba;
+    if (cmB) {
+      const [rb, gb, bb] = cmB.fn(value, meltClock);
+      r = ra + (rb - ra) * sched.blend;
+      g = ga + (gb - ga) * sched.blend;
+      b = ba + (bb - ba) * sched.blend;
+    }
     const o = i * 3;
     meltPalette[o] = r; meltPalette[o + 1] = g; meltPalette[o + 2] = b;
   }
@@ -3173,10 +3298,22 @@ function meltInit() {
   meltCtx.fillRect(0, 0, MELT_W, MELT_H);
   meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
   meltScratch = meltCtx.createImageData(MELT_W, MELT_H);
-  // Part 5 will replace this fixed pick with the hold/fade rotation; for
-  // now, one movemap for the life of this mode is enough to prove the warp.
-  meltMovemap = MELT_MOVEMAPS[0];
-  meltTime = 0;
+  meltClock = 0;
+
+  meltMovemapSched = meltMakeScheduler(
+    MELT_MOVEMAPS.length, MELT_HOLD_FADE.movemap.hold, MELT_HOLD_FADE.movemap.fade);
+  meltColormapSched = meltMakeScheduler(
+    MELT_COLORMAPS.length, MELT_HOLD_FADE.colormap.hold, MELT_HOLD_FADE.colormap.fade);
+  meltWaveformSched = meltMakeScheduler(
+    MELT_WAVEFORMS.length, MELT_HOLD_FADE.waveform.hold, MELT_HOLD_FADE.waveform.fade);
+  meltParticleSched = meltMakeScheduler(
+    MELT_PARTICLES.length, MELT_HOLD_FADE.particle.hold, MELT_HOLD_FADE.particle.fade);
+
+  meltWaveformStateA = MELT_WAVEFORMS[meltWaveformSched.a].init();
+  meltWaveformStateB = null;
+  meltParticleStateA = MELT_PARTICLES[meltParticleSched.a].init();
+  meltParticleStateB = null;
+
   meltBuildPalette();
   meltInited = true;
 }
@@ -3192,12 +3329,25 @@ function meltWarpFrame() {
   const src = meltPixels.data;
   const dst = meltScratch.data;
   const aspect = w / h;
+  const sched = meltMovemapSched;
+  const fnA = MELT_MOVEMAPS[sched.a];
+  const fnB = sched.b !== -1 ? MELT_MOVEMAPS[sched.b] : null;
+  const blend = sched.blend;
   for (let py = 0; py < h; py++) {
     const ny = (py / (h - 1)) * 2 - 1;
     for (let px = 0; px < w; px++) {
       const nx = ((px / (w - 1)) * 2 - 1) * aspect;
-      const out = meltMovemap(nx, ny);
-      const sx = out[0], sy = out[1];
+      const outA = fnA(nx, ny);
+      let sx = outA[0], sy = outA[1];
+      // Blending two movemaps means evaluating both for every pixel during
+      // a crossfade - noticeably pricier than either alone, same as the
+      // original plugin's own documented warning that movemap crossfades
+      // are the single biggest performance cost in the whole effect.
+      if (fnB) {
+        const outB = fnB(nx, ny);
+        sx += (outB[0] - sx) * blend;
+        sy += (outB[1] - sy) * blend;
+      }
       const ix = Math.round(((sx / aspect) * 0.5 + 0.5) * (w - 1));
       const iy = Math.round((sy * 0.5 + 0.5) * (h - 1));
       const di = (py * w + px) * 4;
@@ -3238,9 +3388,6 @@ function _sampleArray(arr, t) {
   const idx = Math.min(arr.length - 1, Math.max(0, Math.round(t * (arr.length - 1))));
   return arr[idx];
 }
-
-let meltWaveformIndex = 0;
-let meltWaveformState = null;
 
 const MELT_WAVEFORMS = [
   // A single scope trace across the middle - the direct descendant of
@@ -3297,29 +3444,23 @@ const MELT_WAVEFORMS = [
   },
 ];
 
-function meltDrawWaveforms(wave, bars) {
-  if (!wave.length && !bars.length) return;
-  if (MELT_COLORMAPS[meltColormapIndex].useTime) {
-    meltTime += 1 / 30;
-    meltBuildPalette();
-  }
-
-  const script = MELT_WAVEFORMS[meltWaveformIndex];
-  if (!meltWaveformState) meltWaveformState = script.init();
-  script.newline(meltWaveformState);
+function meltDrawWaveformScript(script, state, wave, bars, alpha) {
+  if (alpha <= 0) return;
+  script.newline(state, wave, bars);
 
   // One point array per simultaneous path this script draws.
   const pathPoints = Array.from({ length: script.numPaths }, () => []);
   const n = script.steps;
   for (let i = 0; i < n; i++) {
     const t = i / (n - 1);
-    const pts = script.step(meltWaveformState, t, wave, bars);
+    const pts = script.step(state, t, wave, bars);
     for (let p = 0; p < pts.length; p++) pathPoints[p].push(pts[p]);
   }
 
   const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
   const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
 
+  meltCtx.globalAlpha = alpha;
   meltCtx.lineWidth = 1.5;
   for (const pts of pathPoints) {
     for (let i = 1; i < pts.length; i++) {
@@ -3334,6 +3475,25 @@ function meltDrawWaveforms(wave, bars) {
       meltCtx.lineTo(toX(pts[i].x), toY(pts[i].y));
       meltCtx.stroke();
     }
+  }
+  meltCtx.globalAlpha = 1;
+}
+
+/* Runs whichever waveform script(s) are currently active - during a
+   crossfade that's the outgoing script drawn at (1-blend) opacity and the
+   incoming one at (blend) opacity, both onto the same buffer, rather than
+   trying to blend their geometry directly: two differently-shaped scripts
+   (a scope trace fading into three orbiting rings, say) have no natural
+   shared geometry to interpolate between, but a plain opacity crossfade
+   reads correctly regardless of how different the two look. */
+function meltDrawWaveforms(wave, bars) {
+  if (!wave.length && !bars.length) return;
+  const sched = meltWaveformSched;
+  meltDrawWaveformScript(
+    MELT_WAVEFORMS[sched.a], meltWaveformStateA, wave, bars, 1 - sched.blend);
+  if (sched.b !== -1) {
+    meltDrawWaveformScript(
+      MELT_WAVEFORMS[sched.b], meltWaveformStateB, wave, bars, sched.blend);
   }
 }
 
@@ -3359,9 +3519,6 @@ function _melt3DProject(x, y, z, yaw, pitch) {
   const p = focal / Math.max(depth, 0.3);
   return { x: x1 * p, y: y2 * p, p };
 }
-
-let meltParticleIndex = 0;
-let meltParticleState = null;
 
 const MELT_PARTICLES = [
   // One particle per position around a ring, each tracking one point of
@@ -3446,16 +3603,16 @@ const MELT_PARTICLES = [
   },
 ];
 
-function meltDrawParticles(wave, bars) {
-  const script = MELT_PARTICLES[meltParticleIndex];
-  if (!meltParticleState) meltParticleState = script.init();
-  script.newframe(meltParticleState, wave, bars);
+function meltDrawParticleScript(script, state, wave, bars, alpha) {
+  if (alpha <= 0) return;
+  script.newframe(state, wave, bars);
 
   const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
   const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
 
-  for (let i = 0; i < meltParticleState.count; i++) {
-    const p = script.particle(meltParticleState, i, wave, bars);
+  meltCtx.globalAlpha = alpha;
+  for (let i = 0; i < state.count; i++) {
+    const p = script.particle(state, i, wave, bars);
     const color = meltPaletteFade(p.fade);
     if (p.style === 2) {
       meltCtx.strokeStyle = color;
@@ -3472,13 +3629,37 @@ function meltDrawParticles(wave, bars) {
       meltCtx.fill();
     }
   }
+  meltCtx.globalAlpha = 1;
+}
+
+/* Same opacity-crossfade approach as the waveform layer, and for the same
+   reason: two particle scripts (a ring burst fading into a rotating cube,
+   say) have no shared geometry worth interpolating, but drawing both at
+   complementary opacities reads as a clean crossfade regardless. */
+function meltDrawParticles(wave, bars) {
+  const sched = meltParticleSched;
+  meltDrawParticleScript(
+    MELT_PARTICLES[sched.a], meltParticleStateA, wave, bars, 1 - sched.blend);
+  if (sched.b !== -1) {
+    meltDrawParticleScript(
+      MELT_PARTICLES[sched.b], meltParticleStateB, wave, bars, sched.blend);
+  }
 }
 
 function drawMelt(ctx, w, h, bars, wave) {
   if (!meltInited) meltInit();
 
+  // Advance the shared frame clock and let every category's independent
+  // hold/fade scheduler catch up to it - this is the part 5 rotation that
+  // replaces parts 1-4's fixed preset picks with the real vis.ini-style
+  // behavior: each category holding, then crossfading to a new random
+  // pick, entirely on its own randomized timer.
+  meltClock += 1 / 30;
+  meltTickAllSchedulers();
+
   // 1. Warp: resample the buffer we ended last frame with through the
-  //    active movemap, producing this frame's starting point.
+  //    active movemap (or a blend of two, mid-crossfade), producing this
+  //    frame's starting point.
   meltWarpFrame();
 
   // 2. Get that warped buffer onto the actual canvas element so normal
@@ -3487,17 +3668,22 @@ function drawMelt(ctx, w, h, bars, wave) {
   //    manual pixel writes.
   meltCtx.putImageData(meltPixels, 0, 0);
 
-  // 3. New content for this frame, drawn with ordinary canvas calls.
+  // 3. Rebuild the palette every frame: cheap (256 entries) regardless of
+  //    whether the active colormap animates over time or two are being
+  //    crossfaded, so there is no reason to special-case either.
+  meltBuildPalette();
+
+  // 4. New content for this frame, drawn with ordinary canvas calls.
   meltDrawWaveforms(wave, bars);
   meltDrawParticles(wave, bars);
 
-  // 4. Re-capture the buffer, now including what was just drawn, so next
+  // 5. Re-capture the buffer, now including what was just drawn, so next
   //    frame's warp pass carries it forward too - this is what makes a
   //    stroke drawn once keep spiraling/rippling on every subsequent
   //    frame instead of only appearing for one.
   meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
 
-  // 5. Blit the low-res buffer up to the full visible canvas. The browser's
+  // 6. Blit the low-res buffer up to the full visible canvas. The browser's
   //    own image smoothing does the upscale interpolation for free.
   ctx.imageSmoothingEnabled = true;
   ctx.clearRect(0, 0, w, h);
