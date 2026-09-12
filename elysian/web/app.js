@@ -2672,6 +2672,7 @@ function stopVisualizer() {
   beltParticles = null;
   meltInited = false;
   meltWaveformState = null;
+  meltParticleState = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2688,6 +2689,7 @@ function cycleVisualizer() {
     beltParticles = null;
     meltInited = false;
     meltWaveformState = null;
+    meltParticleState = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -3335,6 +3337,143 @@ function meltDrawWaveforms(wave, bars) {
   }
 }
 
+/* ---------- Particle-script-style shapes (part 4) ----------
+   Mirrors the Stutter Particle script convention: init() builds
+   per-instance state including how many particles this script draws
+   (state.count), newframe() updates whatever per-frame animation state
+   the script needs, and particle() is called once per particle (i in
+   0..state.count-1) returning a position, size and style (1 = filled
+   circle using size; 2 = a line from (x,y) to (xEnd,yEnd), size ignored -
+   the same two styles Stutter's own Particle scripts supported) plus a
+   fade in the same 0=brightest/1=background convention everything else
+   here already uses. */
+function _melt3DProject(x, y, z, yaw, pitch) {
+  const cosY = Math.cos(yaw), sinY = Math.sin(yaw);
+  const x1 = x * cosY + z * sinY;
+  const z1 = -x * sinY + z * cosY;
+  const cosP = Math.cos(pitch), sinP = Math.sin(pitch);
+  const y2 = y * cosP - z1 * sinP;
+  const z2 = y * sinP + z1 * cosP;
+  const focal = 2.2;
+  const depth = focal + z2;
+  const p = focal / Math.max(depth, 0.3);
+  return { x: x1 * p, y: y2 * p, p };
+}
+
+let meltParticleIndex = 0;
+let meltParticleState = null;
+
+const MELT_PARTICLES = [
+  // One particle per position around a ring, each tracking one point of
+  // the spectrum: the ring's radius at that point pulses with that bar's
+  // own energy, so the whole ring reads as the spectrum bent into a loop.
+  {
+    init() { return { count: 24 }; },
+    newframe() {},
+    particle(state, i, wave, bars) {
+      const t = i / state.count;
+      const theta = t * Math.PI * 2;
+      const e = _sampleArray(bars, t);
+      const r = 0.35 + e * 0.5;
+      return {
+        x: Math.cos(theta) * r, y: Math.sin(theta) * r,
+        size: 0.015 + e * 0.05, style: 1, fade: 1 - e,
+      };
+    },
+  },
+  // A rotating wireframe cube, its edges drawn as line-style particles -
+  // directly modeled on the "rotating cube that pulses with the music"
+  // particle script decoded from the plugin that inspired this mode.
+  // Rotation speed is randomized once per selection (init runs once when
+  // this script becomes active), same as that original's own per-instance
+  // random $xrchange/$yrchange; scale pulses with the mid-band average.
+  {
+    init() {
+      const dots = 4;   // subdivisions per edge, between corners
+      const corners = [
+        [1, 1, 1], [-1, 1, 1], [1, -1, 1], [-1, -1, 1],
+        [1, 1, -1], [-1, 1, -1], [1, -1, -1], [-1, -1, -1],
+      ];
+      const edges = [
+        [0, 1], [0, 2], [0, 4], [1, 3], [1, 5], [2, 3],
+        [2, 6], [3, 7], [4, 5], [4, 6], [5, 7], [6, 7],
+      ];
+      const points = [];
+      for (const [a, b] of edges) {
+        for (let d = 0; d < dots; d++) {
+          const t = d / dots;
+          points.push(corners[a].map((v, k) => v + (corners[b][k] - v) * t));
+        }
+      }
+      return {
+        count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
+        yawSpeed: 0.006 + Math.random() * 0.01,
+        pitchSpeed: 0.004 + Math.random() * 0.008,
+      };
+    },
+    newframe(state, wave, bars) {
+      const mid = _bandAvg(bars, 6, 20);
+      state.yaw += state.yawSpeed;
+      state.pitch += state.pitchSpeed;
+      state.scale = 0.28 + mid * 0.15;
+    },
+    particle(state, i) {
+      const [x, y, z] = state.points[i];
+      const proj = _melt3DProject(x, y, z, state.yaw, state.pitch);
+      return {
+        x: proj.x * state.scale, y: proj.y * state.scale,
+        size: 0.012, style: 1, fade: Math.max(0, 1 - proj.p * 0.7),
+      };
+    },
+  },
+  // Spokes radiating from the centre, one per bar, each a line-style
+  // particle whose length is that bar's energy - the whole spectrum drawn
+  // as a burst rather than a bar chart or a ring.
+  {
+    init() { return { count: 32 }; },
+    newframe() {},
+    particle(state, i, wave, bars) {
+      const t = i / state.count;
+      const theta = t * Math.PI * 2;
+      const e = _sampleArray(bars, t);
+      const rInner = 0.08, rOuter = 0.08 + e * 0.55;
+      return {
+        x: Math.cos(theta) * rInner, y: Math.sin(theta) * rInner,
+        xEnd: Math.cos(theta) * rOuter, yEnd: Math.sin(theta) * rOuter,
+        size: 0.01, style: 2, fade: 1 - e,
+      };
+    },
+  },
+];
+
+function meltDrawParticles(wave, bars) {
+  const script = MELT_PARTICLES[meltParticleIndex];
+  if (!meltParticleState) meltParticleState = script.init();
+  script.newframe(meltParticleState, wave, bars);
+
+  const toX = (x) => (x * 0.5 + 0.5) * MELT_W;
+  const toY = (y) => (y * 0.5 + 0.5) * MELT_H;
+
+  for (let i = 0; i < meltParticleState.count; i++) {
+    const p = script.particle(meltParticleState, i, wave, bars);
+    const color = meltPaletteFade(p.fade);
+    if (p.style === 2) {
+      meltCtx.strokeStyle = color;
+      meltCtx.lineWidth = Math.max(1, (p.size || 0.01) * MELT_W);
+      meltCtx.beginPath();
+      meltCtx.moveTo(toX(p.x), toY(p.y));
+      meltCtx.lineTo(toX(p.xEnd), toY(p.yEnd));
+      meltCtx.stroke();
+    } else {
+      meltCtx.fillStyle = color;
+      const r = Math.max(0.6, (p.size || 0.02) * MELT_W);
+      meltCtx.beginPath();
+      meltCtx.arc(toX(p.x), toY(p.y), r, 0, Math.PI * 2);
+      meltCtx.fill();
+    }
+  }
+}
+
 function drawMelt(ctx, w, h, bars, wave) {
   if (!meltInited) meltInit();
 
@@ -3343,13 +3482,14 @@ function drawMelt(ctx, w, h, bars, wave) {
   meltWarpFrame();
 
   // 2. Get that warped buffer onto the actual canvas element so normal
-  //    canvas draw calls (the waveform paths, and later the particle
-  //    layer) can be layered on top of it with real strokes/fills rather
-  //    than more manual pixel writes.
+  //    canvas draw calls (the waveform paths and particle shapes) can be
+  //    layered on top of it with real strokes/fills rather than more
+  //    manual pixel writes.
   meltCtx.putImageData(meltPixels, 0, 0);
 
   // 3. New content for this frame, drawn with ordinary canvas calls.
   meltDrawWaveforms(wave, bars);
+  meltDrawParticles(wave, bars);
 
   // 4. Re-capture the buffer, now including what was just drawn, so next
   //    frame's warp pass carries it forward too - this is what makes a
