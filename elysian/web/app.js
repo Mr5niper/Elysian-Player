@@ -2703,7 +2703,14 @@ function cycleVisualizer() {
   $("visualizer").classList.remove("hidden");
   $("artwrap").classList.add("hidden");
   $("wave").classList.add("hidden");
-  if (vizMode === 3 || vizMode === 4 || vizMode === 5) {
+  // Cleared here, synchronously, regardless of which mode is being
+  // entered - not just 3/4/5. Making the canvas visible happens
+  // immediately, but the first real draw for the new mode only arrives
+  // asynchronously (after the next visualizer_frame() round trip), and
+  // in between, whatever this canvas last held (most visibly, a melt
+  // frame - going back to mode 0 only hides the canvas, it never clears
+  // the pixels underneath) would otherwise flash on screen for that gap.
+  {
     const c = $("visualizer");
     const ctx = c.getContext("2d");
     ctx.clearRect(0, 0, c.width, c.height);
