@@ -2649,16 +2649,21 @@ function drawWave() {
    rather than folding into the main poll(): it only needs to run for the
    brief periods it is actually open, at a much faster rate (33ms, ~30fps)
    than the rest of the app ever needs, and nothing else here cares about
-   its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope
-   - double-clicking cycles through all three, so the same gesture that
-   opens it is also how it closes, with no separate control needed. */
+   its result. 0 = off (normal cover+wave), 1 = spectrum, 2 = oscilloscope,
+   3 = procedural tunnel - double-clicking cycles through all four, so the
+   same gesture that opens it is also how it closes, with no separate
+   control needed. */
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
+let tunnelPhase = 0;
+let tunnelBlobs = null;
 
 function stopVisualizer() {
   if (vizMode === 0) return;
   vizMode = 0;
+  tunnelPhase = 0;
+  tunnelBlobs = null;
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2666,8 +2671,10 @@ function stopVisualizer() {
 }
 
 function cycleVisualizer() {
-  vizMode = (vizMode + 1) % 3;
+  vizMode = (vizMode + 1) % 4;
   if (vizMode === 0) {
+    tunnelPhase = 0;
+    tunnelBlobs = null;
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
@@ -2677,6 +2684,11 @@ function cycleVisualizer() {
   $("visualizer").classList.remove("hidden");
   $("artwrap").classList.add("hidden");
   $("wave").classList.add("hidden");
+  if (vizMode === 3) {
+    const c = $("visualizer");
+    const ctx = c.getContext("2d");
+    ctx.clearRect(0, 0, c.width, c.height);
+  }
   vizPoll();
 }
 
@@ -2704,9 +2716,14 @@ function drawVisualizerFrame(frame) {
   // assigning it clears the canvas even when the size did not change.
   if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
   const ctx = c.getContext("2d");
-  ctx.clearRect(0, 0, w, h);
+  // The tunnel mode deliberately does not get a clear: it paints its own
+  // translucent fill each frame instead, so the previous frame's rings
+  // and blobs fade rather than vanish outright, building up the trail
+  // that gives it a glowing look rather than a flat wireframe redraw.
+  if (vizMode !== 3) ctx.clearRect(0, 0, w, h);
   if (vizMode === 1) drawSpectrumBars(ctx, w, h, frame.bars || []);
   else if (vizMode === 2) drawOscilloscope(ctx, w, h, frame.wave || []);
+  else if (vizMode === 3) drawTunnel(ctx, w, h, frame.bars || []);
 }
 
 function drawSpectrumBars(ctx, w, h, bars) {
@@ -2736,6 +2753,92 @@ function drawOscilloscope(ctx, w, h, wave) {
     if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
   }
   ctx.stroke();
+}
+
+function _bandAvg(bars, lo, hi) {
+  if (!bars.length) return 0;
+  lo = Math.max(0, lo); hi = Math.min(bars.length, hi);
+  if (hi <= lo) return 0;
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += bars[i];
+  return sum / (hi - lo);
+}
+
+/* Aorta-style procedural tunnel: concentric rings receding toward a
+   vanishing point at the centre, continuously advancing toward the
+   viewer, with a handful of glowing blobs flowing along the same path.
+   Bass (low bars) drives how fast the tunnel rushes past and how hard it
+   pulses; mid bars drive a per-ring wobble so the tunnel morphs rather
+   than staying a perfect circle; each blob tracks one specific bar the
+   whole time it's alive, so a particular blob's brightness answers to a
+   particular part of the spectrum rather than the mix as a whole. */
+function drawTunnel(ctx, w, h, bars) {
+  const cx = w / 2, cy = h / 2;
+  const maxR = Math.hypot(cx, cy) * 1.05;
+
+  const bass = _bandAvg(bars, 0, 6);
+  const mid = _bandAvg(bars, 6, 20);
+  const overall = _bandAvg(bars, 0, bars.length);
+
+  tunnelPhase = (tunnelPhase + 0.006 + bass * 0.05) % 1;
+
+  // A translucent fill instead of a full clear leaves a faint trail
+  // behind each ring and blob rather than a hard-edged redraw every
+  // frame, closer to the soft, glowing look the source material
+  // describes than a crisp vector wireframe would be.
+  ctx.fillStyle = "rgba(12,5,5,0.35)";
+  ctx.fillRect(0, 0, w, h);
+
+  const rings = 24;
+  const segments = 28;
+  for (let i = 0; i < rings; i++) {
+    const z = ((i / rings) + tunnelPhase) % 1;
+    const depth = z * z;
+    const radius = depth * maxR;
+    if (radius < 2) continue;
+    const alpha = Math.min(1, z * 1.3) * (0.12 + overall * 0.55);
+    ctx.beginPath();
+    for (let s = 0; s <= segments; s++) {
+      const a = (s / segments) * Math.PI * 2 + tunnelPhase * 2 + i * 0.15;
+      const wobble = 1 + Math.sin(a * 3 + tunnelPhase * 6) * (0.05 + mid * 0.2);
+      const r = radius * wobble;
+      const x = cx + Math.cos(a) * r;
+      const y = cy + Math.sin(a) * r;
+      if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.closePath();
+    ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
+    ctx.lineWidth = Math.max(1, 1 + z * 3);
+    ctx.stroke();
+  }
+
+  if (!tunnelBlobs) {
+    const count = 7;
+    tunnelBlobs = Array.from({ length: count }, (_, i) => ({
+      z: i / count,
+      angle: (i / count) * Math.PI * 2,
+      angleSpeed: (i % 2 === 0 ? 1 : -1) * (0.004 + i * 0.0015),
+      bar: Math.floor((i / count) * bars.length),
+    }));
+  }
+  for (const blob of tunnelBlobs) {
+    blob.z = (blob.z + 0.004 + bass * 0.03) % 1;
+    blob.angle += blob.angleSpeed;
+    const depth = blob.z * blob.z;
+    const radius = depth * maxR * 0.8;
+    const x = cx + Math.cos(blob.angle) * radius;
+    const y = cy + Math.sin(blob.angle) * radius;
+    const energy = bars[blob.bar] || 0;
+    const size = Math.max(2, (2 + energy * 16) * (0.3 + blob.z));
+    const alpha = Math.min(1, blob.z * 1.4);
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, size * 2);
+    grad.addColorStop(0, `rgba(255,190,150,${alpha.toFixed(3)})`);
+    grad.addColorStop(1, "rgba(224,75,60,0)");
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, size * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
 }
 
 $("art").addEventListener("dblclick", cycleVisualizer);
