@@ -2855,7 +2855,12 @@ function drawTunnel(ctx, w, h, bars) {
     // entirely by alpha - no hue shift toward orange/white as it gets
     // brighter or closer, just this one red at varying intensity.
     ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
-    ctx.lineWidth = Math.max(1, 1 + z * 3);
+    // Thicker across the board: a thin anti-aliased stroke only covers a
+    // sliver of each pixel it crosses, so it reads as lighter than a
+    // solid-filled shape (the waveform's bars) even at the same color and
+    // alpha. Floor raised well past 1px, and the near/far scaling kept
+    // but off a higher base.
+    ctx.lineWidth = Math.max(2.5, 2 + z * 4);
     ctx.stroke();
   }
 
