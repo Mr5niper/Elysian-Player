@@ -164,6 +164,16 @@ html, body {
      an explicit height here, a flex container with no visible in-flow
      children left collapses to zero, taking the canvas down with it. */
   min-height: var(--np-art);
+  /* min-height alone only set a floor - #view-now's own justify-content:
+     center then centered this element inside whatever taller space was
+     actually available, so the visualizer (absolute/inset:0 against this
+     element) was capped at exactly the album art's own height instead of
+     stretching to fill the room around it. flex:1 claims that full height;
+     the artwork itself is unaffected, still sized by --np-art and simply
+     centered (via align-items above) within the taller box instead of by
+     the parent - same place it always sat, just not the thing capping the
+     container's size anymore. */
+  flex: 1;
 }
 /* Double-clicking the cover or the waveform swaps this in over the whole
    row rather than replacing just one half of it - a spectrum display
