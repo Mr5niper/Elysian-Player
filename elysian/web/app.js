@@ -3394,6 +3394,20 @@ let meltClock = 0;          // seconds, advances once per drawMelt() call -
                              // frame-driven rather than wall-clock, so it
                              // naturally stops advancing whenever this mode
                              // isn't actually being polled/drawn
+// All three movemaps scale radius by some multiplier and rotate theta -
+// every point on that kind of transform has an exact fixed point at
+// radius=0 (any multiplier times zero is still zero), so the dead-centre
+// pixel never actually moved, frame after frame, no matter which
+// movemap or blend was active - and even close to but not exactly at
+// the centre, displacement stays tiny, since it's proportional to
+// distance from that same fixed point. Content drawn anywhere near the
+// middle of the buffer visibly sat still for a long time as a result,
+// only refreshing once something else happened to be drawn directly on
+// top of it. A small shared translational jitter (recomputed once per
+// frame, applied identically inside every movemap) breaks that fixed
+// point entirely: nothing, including dead centre, ever maps back onto
+// itself exactly.
+let _meltJitterX = 0, _meltJitterY = 0;
 
 /* ---------- Independent hold/fade scheduler (part 5) ----------
    Each of the four preset categories (movemap, colormap, waveform,
@@ -3524,23 +3538,23 @@ const MELT_MOVEMAPS = [
   function spiralIn(x, y, radius, theta, out) {
     const srcRadius = radius * 0.87;
     const srcTheta = theta - 0.075;
-    out.x = Math.cos(srcTheta) * srcRadius;
-    out.y = Math.sin(srcTheta) * srcRadius;
+    out.x = Math.cos(srcTheta) * srcRadius + _meltJitterX;
+    out.y = Math.sin(srcTheta) * srcRadius + _meltJitterY;
   },
   // Slow spiral outward with a gentle ripple layered on the radius.
   function rippleOut(x, y, radius, theta, out) {
     const srcRadius = radius + 0.04 * Math.sin(6.2831853 * radius);
     const srcTheta = theta + 0.015;
-    out.x = Math.cos(srcTheta) * srcRadius;
-    out.y = Math.sin(srcTheta) * srcRadius;
+    out.x = Math.cos(srcTheta) * srcRadius + _meltJitterX;
+    out.y = Math.sin(srcTheta) * srcRadius + _meltJitterY;
   },
   // A gentle two-lobed pinch: radius pulled in harder along two opposing
   // axes than the other two, so a plain circle warps into a soft square-ish
   // pulse instead of staying uniform.
   function pinch(x, y, radius, theta, out) {
     const srcRadius = radius * (0.92 + 0.03 * (1 + Math.sin(6 * theta)));
-    out.x = Math.cos(theta) * srcRadius;
-    out.y = Math.sin(theta) * srcRadius;
+    out.x = Math.cos(theta) * srcRadius + _meltJitterX;
+    out.y = Math.sin(theta) * srcRadius + _meltJitterY;
   },
 ];
 
@@ -3722,6 +3736,13 @@ function meltWarpFrame() {
   const fnB = sched.b !== -1 ? MELT_MOVEMAPS[sched.b] : null;
   const blend = sched.blend;
   const outA = _meltOutA, outB = _meltOutB;
+  // Small and slow relative to the existing motion at the buffer's own
+  // edges (~0.02 max, versus radius 1 reaching the edges) - just enough
+  // to keep dead-centre content (and anything near it) actively
+  // refreshing instead of sitting frozen, without visibly altering the
+  // established spiral/ripple/pinch character everywhere else.
+  _meltJitterX = Math.sin(meltClock * 1.3) * 0.02;
+  _meltJitterY = Math.cos(meltClock * 1.7) * 0.02;
   for (let py = 0; py < h; py++) {
     const ny = MELT_NY[py];
     const rowOffset = py * w;
@@ -3985,6 +4006,46 @@ const MELT_PARTICLES = [
           const t = d / dots;
           points.push(corners[a].map((v, k) => v + (corners[b][k] - v) * t));
         }
+      }
+      return {
+        count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
+        yawSpeed: 0.006 + Math.random() * 0.01,
+        pitchSpeed: 0.004 + Math.random() * 0.008,
+        out: { x: 0, y: 0, xEnd: 0, yEnd: 0, size: 0.012, style: 1, fade: 0 },
+      };
+    },
+    newframe(state, wave, bars) {
+      const mid = _bandAvg(bars, 6, 20);
+      state.yaw += state.yawSpeed;
+      state.pitch += state.pitchSpeed;
+      state.scale = 0.28 + mid * 0.15;
+    },
+    particle(state, i) {
+      const [x, y, z] = state.points[i];
+      const proj = _melt3DProject(x, y, z, state.yaw, state.pitch);
+      const o = state.out;
+      o.x = proj.x * state.scale; o.y = proj.y * state.scale;
+      o.fade = Math.max(0, 1 - proj.p * 0.7);
+      return o;
+    },
+  },
+  // A rotating dotted sphere - same rotation/projection machinery as the
+  // cube above (same state shape, same _melt3DProject call), just with
+  // points distributed evenly across a sphere's surface instead of along
+  // a cube's edges. Uses the golden-angle (a "Fibonacci sphere") method
+  // to spread points with roughly equal spacing and no pole clustering,
+  // rather than a naive latitude/longitude grid which bunches points
+  // tightly near the top and bottom.
+  {
+    init() {
+      const count = 60;
+      const golden = Math.PI * (3 - Math.sqrt(5));
+      const points = [];
+      for (let i = 0; i < count; i++) {
+        const yv = 1 - (i / (count - 1)) * 2;               // 1 down to -1
+        const radiusAtY = Math.sqrt(Math.max(0, 1 - yv * yv));
+        const theta = golden * i;
+        points.push([Math.cos(theta) * radiusAtY, yv, Math.sin(theta) * radiusAtY]);
       }
       return {
         count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
