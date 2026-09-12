@@ -3001,20 +3001,26 @@ function drawBelt(ctx, w, h, bars, wave) {
    touching the warp engine itself. Part 5 adds the independent hold/fade
    rotation between presets.
 
-   Deliberately run at a low internal resolution (MELT_W x MELT_H) rather
-   than the full visible canvas:
+   Run at a low-ish internal resolution (MELT_W x MELT_H) rather than the
+   full visible canvas:
      - A true per-pixel remap needs a JS loop over every buffer pixel, every
        frame; at full canvas resolution (which can be many hundreds of
        thousands of pixels once devicePixelRatio is factored in) that loop
        alone could cost more per frame than the rest of this app's entire
        30fps budget.
-     - At a coarse resolution the same loop is a few thousand iterations,
-       comfortably inside a 33ms frame even with trig-heavy movemaps.
-     - The blocky, softly-interpolated look this produces when the small
-       buffer is scaled up onto the visible canvas is not a compromise to
-       hide - it is genuinely close to how a real-time software-rendered
-       feedback effect actually looked at the resolutions common in 2000. */
-const MELT_W = 192, MELT_H = 108;
+     - At 384x216 (~83k pixels) that loop is still comfortably inside a
+       33ms frame even with trig-heavy movemaps and a movemap crossfade
+       evaluating two of them per pixel; doubling both dimensions from an
+       earlier 192x108 is 4x the pixels (and 4x the cost), not 2x, since
+       both axes doubled - if this ever needs to come back down for a
+       slower machine, halving both is the cheap way to cut the per-frame
+       cost by 4x again.
+     - The softly-interpolated look this produces when the buffer is
+       scaled up onto the visible canvas is not a compromise to hide - it
+       is genuinely close to how a real-time software-rendered feedback
+       effect actually looked at the resolutions common in 2000, just
+       with a bit more detail than the original 192x108 this started at. */
+const MELT_W = 384, MELT_H = 216;
 
 let meltCanvas = null;      // offscreen canvas holding the low-res buffer
 let meltCtx = null;
