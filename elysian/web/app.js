@@ -2928,7 +2928,7 @@ function drawBelt(ctx, w, h, bars, wave) {
       bar: Math.floor(Math.random() * bars.length),
     }));
   }
-  const beltRadius = Math.min(w, h) * 0.28;
+  const beltRadius = Math.min(w, h) * 0.58;
   for (const particle of beltParticles) {
     particle.z += 1.4 + bass * 6;
     if (particle.z > 200) particle.z -= 400;
