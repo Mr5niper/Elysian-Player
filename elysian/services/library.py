@@ -189,6 +189,12 @@ class LibraryService:
                     CREATE INDEX IF NOT EXISTS idx_album_group
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
+                    CREATE TABLE IF NOT EXISTS art_cache (
+                        key           TEXT PRIMARY KEY,
+                        source_path   TEXT NOT NULL,
+                        source_mtime  REAL NOT NULL,
+                        thumb_file    TEXT NOT NULL
+                    );
                 """)
                 # Older databases predate the compilation column. Add it,
                 # and clear modified_at so the next scan actually re-reads
@@ -613,6 +619,63 @@ class LibraryService:
         for row in rows:
             row["truncated"] = truncated
         return rows
+
+    def album_key_for_path(self, path: str):
+        """The (album, album_artist) grouping for one indexed file.
+
+        Uses the exact same _EFFECTIVE_ALBUM/_GROUP_ARTIST expressions as
+        album_paths and the grid's own album grouping, so a track looked up
+        this way lands on the identical cache key as its album's card -
+        never a per-file or per-folder key. Returns None for a path the
+        library has not indexed (e.g. a file played from outside any
+        library root), so callers can fall back to a direct per-file read.
+        """
+        sql = (f"SELECT {_EFFECTIVE_ALBUM} AS album, {_GROUP_ARTIST} AS album_artist "
+               "FROM tracks WHERE key = ? LIMIT 1")
+        rows = self._rows(sql, (pathutil.key(path),))
+        if not rows:
+            return None
+        return rows[0]["album"], rows[0]["album_artist"]
+
+    def get_art_cache_entry(self, key: str):
+        """The persisted cache row for one album, or None.
+
+        Returns a dict with source_path, source_mtime, thumb_file, so a
+        caller can stat source_path and decide whether the cached
+        thumbnail is still valid without touching the audio file itself.
+        """
+        rows = self._rows(
+            "SELECT source_path, source_mtime, thumb_file "
+            "FROM art_cache WHERE key = ?", (key,))
+        return dict(rows[0]) if rows else None
+
+    def set_art_cache_entry(self, key: str, source_path: str,
+                             source_mtime: float, thumb_file: str) -> None:
+        """Persist which file supplied an album's cover, and when.
+
+        source_path is whichever file actually supplied the image - the
+        audio file itself if the art was embedded, or the specific cover
+        image file if it came from the folder - never just "the folder",
+        so a re-tagged track or a swapped cover image is each detected by
+        checking the one file that actually matters for that album.
+        """
+        try:
+            with self._lock:
+                con = self._connect()
+                try:
+                    con.execute(
+                        "INSERT INTO art_cache (key, source_path, "
+                        "source_mtime, thumb_file) VALUES (?, ?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET "
+                        "source_path=excluded.source_path, "
+                        "source_mtime=excluded.source_mtime, "
+                        "thumb_file=excluded.thumb_file",
+                        (key, source_path, source_mtime, thumb_file))
+                    con.commit()
+                finally:
+                    con.close()
+        except Exception:
+            log.exception("could not persist art cache entry for %s", key)
 
     def album_paths(self, album: str, album_artist: str = "") -> list:
         """Candidate files for an album's cover, best first.
