@@ -1314,6 +1314,19 @@ class Api:
         for view in ("albums", "artists", "genres", "songs"):
             self._do_library_browser(view, "", remember=False)
 
+    def _do_library_note_view(self, view, needle="") -> None:
+        view = (view if view in ("albums", "artists", "genres", "songs")
+                else "albums")
+        needle = str(needle or "")
+        cached = self._library_browser_cache.get(view) if not needle else None
+        items = cached["items"] if cached else []
+        self._library_browser_revision += 1
+        self._library_browser = {"view": view, "items": items,
+                                 "needle": needle,
+                                 "revision": self._library_browser_revision}
+        self._settings["library_view"] = view
+        settings_store.save(self._settings)
+
     def _do_library_browser_ready(self, view, items, needle="",
                                   remember=True) -> None:
         if view == "albums" and not needle:
@@ -1898,6 +1911,18 @@ class Api:
     def library_request_browser(self, view, needle="") -> None:
         self._post("library_browser", str(view), str(needle or ""))
 
+    def library_note_view(self, view, needle="") -> None:
+        """Record a navigation the frontend already satisfied locally.
+
+        Used when the frontend rendered a view straight from its own
+        pre-warmed cache, without asking the backend for anything - which
+        means the backend otherwise never learns the user looked at this
+        view at all, so "last tab used" would never update once every
+        view's data is warm (which is effectively always, after the
+        first few seconds of the app running).
+        """
+        self._post("library_note_view", str(view), str(needle or ""))
+
     def library_request_detail(self, kind, key, key2="") -> None:
         self._post("library_detail", str(kind), str(key), str(key2 or ""))
 
@@ -2460,7 +2485,7 @@ class Api:
         "win_minimise", "win_maximise", "win_close",
         "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",
-        "library_cancel_scan", "library_request_browser",
+        "library_cancel_scan", "library_request_browser", "library_note_view",
         "library_request_detail", "library_get_state",
         "library_get_browser", "library_get_prewarmed", "library_get_detail",
         "library_enqueue", "library_play_context",

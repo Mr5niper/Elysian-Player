@@ -1567,6 +1567,7 @@ function libraryOpened() {
             renderLibrary();
             libTabState[libView] = captureCurrentLibTabState();
             libTabState[libView].stale = false;
+            a.library_note_view(view, "");
           } else if (stillWanted) {
             a.library_request_browser(libView, libDesiredNeedle);
           } else {
@@ -2545,6 +2546,7 @@ function setLibView(name) {
         renderLibrary();
         libTabState[libView] = captureCurrentLibTabState();
         libTabState[libView].stale = false;
+        a.library_note_view(name, "");
       } else if (stillWanted) {
         a.library_request_browser(name, activeNeedle);
       } else {
@@ -2631,6 +2633,7 @@ $("libfilter").addEventListener("input", () => {
           renderLibrary();
           libTabState[libView] = captureCurrentLibTabState();
           libTabState[libView].stale = false;
+          a.library_note_view(libView, "");
         } else if (stillWanted) {
           a.library_request_browser(libView, needle);
         } else {
@@ -2968,6 +2971,7 @@ function applyLibraryTick(tick) {
                 renderLibrary();
                 libTabState[libView] = captureCurrentLibTabState();
                 libTabState[libView].stale = false;
+                a.library_note_view(thisView, "");
               } else if (stillWanted) {
                 a.library_request_browser(thisView, thisNeedle);
               } else {
