@@ -465,6 +465,55 @@ html, body {
 #tagmodal-buttons .tbtn:disabled { opacity: 0.5; }
 .tbtn:disabled { opacity: 0.5; cursor: default; }
 
+#tag-art-section {
+  display: flex; gap: 12px; align-items: flex-start; margin-bottom: 2px;
+}
+#tag-art-preview {
+  width: 72px; height: 72px; border-radius: 8px; flex: none;
+  background-size: cover; background-position: center;
+  border: 1px solid var(--line);
+}
+#tag-art-preview.tag-art-empty {
+  background-color: rgba(0,0,0,0.28);
+  background-image: none;
+  border-style: dashed;
+}
+#tag-art-controls {
+  display: flex; flex-direction: column; gap: 7px; padding-top: 2px;
+}
+#tag-art-controls .tbtn {
+  align-self: flex-start; min-width: 96px; padding: 5px 10px; font-size: 11.5px;
+}
+#tag-art-file.hidden { display: none; }
+
+#artcropmodal {
+  position: fixed; inset: 0;
+  background: rgba(0,0,0,0.65);
+  display: none; align-items: center; justify-content: center;
+  z-index: 70;
+}
+#artcropmodal.show { display: flex; }
+#artcrop-box {
+  background: var(--panel-2);
+  border: 1px solid rgba(255,255,255,0.09);
+  border-radius: 10px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0,0,0,0.5);
+  display: flex; flex-direction: column; gap: 14px; align-items: center;
+}
+#artcrop-title {
+  color: var(--text); font-size: 14px; font-weight: 600; align-self: flex-start;
+}
+#artcrop-viewport {
+  width: 260px; height: 260px; overflow: hidden;
+  border-radius: 8px; border: 1px solid var(--line);
+  cursor: grab;
+}
+#artcrop-viewport:active { cursor: grabbing; }
+#artcrop-canvas { width: 260px; height: 260px; display: block; touch-action: none; }
+#artcrop-zoom { width: 260px; }
+#artcrop-buttons { display: flex; gap: 10px; justify-content: flex-end; width: 260px; }
+
 
 /* ---- press feedback ----
    A Windows control reacts on mouse-down, not on release. Without an :active

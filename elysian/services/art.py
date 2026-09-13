@@ -10,7 +10,8 @@ from collections import OrderedDict
 from io import BytesIO
 from pathlib import Path
 
-from ..config import ART_CACHE_DIR, ART_CACHE_LIMIT, ART_SIZE, COVER_NAMES
+from ..config import ART_CACHE_DIR, ART_CACHE_LIMIT, ART_SIZE, COVER_NAMES, \
+    EMBED_ART_SIZE
 from ..logs import get as _get_logger
 
 log = _get_logger("art")
@@ -197,6 +198,25 @@ class ArtProvider:
                 # art was being missed even though the file has it.
                 tags = getattr(meta, "tags", None)
                 if tags is not None:
+                    # True Vorbis containers (OGG/Opus) have no native
+                    # picture block; a cover there rides as a base64
+                    # -encoded FLAC Picture block under this key instead,
+                    # so .pictures above never sees it.
+                    block = tags.get("metadata_block_picture")
+                    if block:
+                        import base64
+
+                        from mutagen.flac import Picture
+
+                        try:
+                            pic = Picture(base64.b64decode(block[0]))
+                            if pic.data:
+                                return pic.data
+                        except Exception:
+                            log.debug("could not decode metadata_block_"
+                                      "picture in %s", audio_path,
+                                      exc_info=True)
+
                     from mutagen.id3 import APIC
 
                     for frame in getattr(tags, "values", lambda: [])():
@@ -209,3 +229,29 @@ class ArtProvider:
     def clear(self) -> None:
         with self._lock:
             self._urls.clear()
+
+
+def prepare_embed_jpeg(image_bytes: bytes, size: int = EMBED_ART_SIZE) -> bytes:
+    """Turn arbitrary image bytes into a clean square JPEG for embedding.
+
+    The frontend's crop tool already produces a square image, but this is
+    the one place that actually writes bytes into a user's file, so it
+    re-derives a guaranteed-square, guaranteed-sized, guaranteed-JPEG
+    result rather than trusting whatever arrived - a non-square source
+    (any format, any size) is center-cropped to square first, exactly
+    like the frontend's own crop viewport, so nothing gets stretched.
+    """
+    from PIL import Image
+
+    img = Image.open(BytesIO(image_bytes)).convert("RGB")
+    w, h = img.size
+    if w != h:
+        side = min(w, h)
+        left = (w - side) // 2
+        top = (h - side) // 2
+        img = img.crop((left, top, left + side, top + side))
+    if img.width != size:
+        img = img.resize((size, size), Image.LANCZOS)
+    buf = BytesIO()
+    img.save(buf, format="JPEG", quality=90)
+    return buf.getvalue()

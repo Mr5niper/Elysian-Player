@@ -1121,6 +1121,26 @@ let libEditor = { open: false, loading: false, saving: false, paths: [],
                   failed: 0 };
 let libEditorTouched = new Set();
 
+/* Album art editing. pendingArtDataUrl is the final cropped square JPEG
+   once the person confirms a crop; null means no art change is pending.
+   The crop tool itself works on a fixed-resolution square canvas (backing
+   store ART_EXPORT_SIZE, displayed smaller via CSS at ART_DISPLAY_SIZE),
+   drawing the source image at a "cover" scale (its shorter side exactly
+   fills the square) times whatever the zoom slider adds on top, panned by
+   dragging. What's actually painted on that canvas is exported directly
+   via toDataURL, so there is no separate final-render step to drift from
+   what the person saw. */
+let pendingArtDataUrl = null;
+const ART_EXPORT_SIZE = 500;
+const ART_DISPLAY_SIZE = 260;
+let artCropImg = null;
+let artCropBaseScale = 1;
+let artCropScale = 1;
+let artCropOffsetX = 0;
+let artCropOffsetY = 0;
+let artCropDragging = false;
+let artCropDragStart = null;
+
 function tagModalOpen() {
   return $("tagmodal").classList.contains("show");
 }
@@ -1137,6 +1157,8 @@ function openTagEditor(paths) {
   const a = api();
   if (!a || !paths.length) return;
   libEditorTouched.clear();
+  pendingArtDataUrl = null;
+  $("tag-art-whole-album").checked = false;
   a.library_open_editor(paths);
 }
 
@@ -1145,6 +1167,8 @@ function closeTagEditor() {
   if (a) a.library_close_editor();
   $("tagmodal").classList.remove("show");
   libEditorTouched.clear();
+  pendingArtDataUrl = null;
+  $("tag-art-whole-album").checked = false;
 }
 
 function renderTagEditor() {
@@ -1172,6 +1196,11 @@ function renderTagEditor() {
     comp.indeterminate = !!libEditor.mixed.compilation;
     comp.checked = !comp.indeterminate && !!libEditor.data.compilation;
   }
+
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  const artBox = $("tag-art-preview");
+  artBox.classList.toggle("tag-art-empty", !artUrl);
+  artBox.style.backgroundImage = artUrl ? `url("${artUrl}")` : "none";
 
   const errs = $("tagmodal-errors");
   if (libEditor.errors && libEditor.errors.length) {
@@ -1209,6 +1238,9 @@ function collectTagChanges() {
   if (libEditorTouched.has("compilation")) {
     changes.compilation = $("tag-compilation").checked ? 1 : 0;
   }
+  if (libEditorTouched.has("art") && pendingArtDataUrl) {
+    changes.art = pendingArtDataUrl;
+  }
   return changes;
 }
 
@@ -1228,7 +1260,140 @@ $("tag-save").addEventListener("click", () => {
   if (!a || !libEditor.paths.length) return;
   const changes = collectTagChanges();
   if (!Object.keys(changes).length) { closeTagEditor(); return; }
-  a.library_save_editor(libEditor.paths, changes);
+  const artWholeAlbum = $("tag-art-whole-album").checked;
+  a.library_save_editor(libEditor.paths, changes, artWholeAlbum);
+});
+
+/* ---------- album art crop tool ---------- */
+
+function artCropClamp() {
+  if (!artCropImg) return;
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+  const minX = ART_EXPORT_SIZE - dispW;
+  const minY = ART_EXPORT_SIZE - dispH;
+  // Both bounds are <= 0 at every valid zoom, since the image is always
+  // scaled to at least cover the square - clamping keeps the pan from
+  // ever dragging a gap into view on any edge.
+  artCropOffsetX = Math.min(0, Math.max(minX, artCropOffsetX));
+  artCropOffsetY = Math.min(0, Math.max(minY, artCropOffsetY));
+}
+
+function artCropRedraw() {
+  if (!artCropImg) return;
+  const canvas = $("artcrop-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, ART_EXPORT_SIZE, ART_EXPORT_SIZE);
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+  ctx.drawImage(artCropImg, artCropOffsetX, artCropOffsetY, dispW, dispH);
+}
+
+function openArtCropModal(img) {
+  artCropImg = img;
+  // "Cover" fit: the image's shorter side exactly fills the square, so
+  // there is never a gap regardless of the source's own aspect ratio.
+  artCropBaseScale = ART_EXPORT_SIZE / Math.min(img.naturalWidth, img.naturalHeight);
+  $("artcrop-zoom").value = 100;
+  artCropScale = artCropBaseScale;
+  const dispW = img.naturalWidth * artCropScale;
+  const dispH = img.naturalHeight * artCropScale;
+  artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
+  artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
+  artCropRedraw();
+  $("artcropmodal").classList.add("show");
+}
+
+function closeArtCropModal() {
+  $("artcropmodal").classList.remove("show");
+  artCropImg = null;
+}
+
+$("artcrop-zoom").addEventListener("input", () => {
+  if (!artCropImg) return;
+  const newScale = artCropBaseScale * ($("artcrop-zoom").value / 100);
+  // Keep whatever point is currently at the viewport's center fixed while
+  // the scale changes, rather than re-centering on the image's own
+  // center, so zooming feels anchored to what's actually being looked at.
+  const centerImgX = (ART_EXPORT_SIZE / 2 - artCropOffsetX) / artCropScale;
+  const centerImgY = (ART_EXPORT_SIZE / 2 - artCropOffsetY) / artCropScale;
+  artCropScale = newScale;
+  artCropOffsetX = ART_EXPORT_SIZE / 2 - centerImgX * artCropScale;
+  artCropOffsetY = ART_EXPORT_SIZE / 2 - centerImgY * artCropScale;
+  artCropClamp();
+  artCropRedraw();
+});
+
+const artCropViewport = $("artcrop-viewport");
+artCropViewport.addEventListener("pointerdown", (e) => {
+  if (!artCropImg) return;
+  artCropDragging = true;
+  artCropDragStart = { x: e.clientX, y: e.clientY,
+                       offsetX: artCropOffsetX, offsetY: artCropOffsetY };
+  artCropViewport.setPointerCapture(e.pointerId);
+});
+artCropViewport.addEventListener("pointermove", (e) => {
+  if (!artCropDragging || !artCropDragStart) return;
+  // The canvas backing store is ART_EXPORT_SIZE but displayed at
+  // ART_DISPLAY_SIZE via CSS, so a screen-pixel drag delta has to be
+  // scaled up to canvas-pixel space before it's applied as an offset.
+  const ratio = ART_EXPORT_SIZE / ART_DISPLAY_SIZE;
+  artCropOffsetX = artCropDragStart.offsetX + (e.clientX - artCropDragStart.x) * ratio;
+  artCropOffsetY = artCropDragStart.offsetY + (e.clientY - artCropDragStart.y) * ratio;
+  artCropClamp();
+  artCropRedraw();
+});
+function artCropEndDrag() {
+  artCropDragging = false;
+  artCropDragStart = null;
+}
+artCropViewport.addEventListener("pointerup", artCropEndDrag);
+artCropViewport.addEventListener("pointercancel", artCropEndDrag);
+
+$("artcrop-cancel").addEventListener("click", closeArtCropModal);
+$("artcrop-use").addEventListener("click", () => {
+  // What's on the canvas right now is exactly what the person positioned,
+  // so exporting it directly means there's no separate render step that
+  // could ever look different from the preview they just confirmed.
+  pendingArtDataUrl = $("artcrop-canvas").toDataURL("image/jpeg", 0.92);
+  libEditorTouched.add("art");
+  closeArtCropModal();
+  renderTagEditor();
+});
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+$("tag-art-choose").addEventListener("click", () => $("tag-art-file").click());
+$("tag-art-file").addEventListener("change", () => {
+  const file = $("tag-art-file").files && $("tag-art-file").files[0];
+  $("tag-art-file").value = "";
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const img = await loadImageFromDataUrl(reader.result);
+      openArtCropModal(img);
+    } catch { /* not a decodable image; nothing to do */ }
+  };
+  reader.readAsDataURL(file);
+});
+
+$("tag-art-paste").addEventListener("click", async () => {
+  const a = api();
+  if (!a) return;
+  const dataUrl = await a.paste_image_from_clipboard();
+  if (!dataUrl) return;
+  try {
+    const img = await loadImageFromDataUrl(dataUrl);
+    openArtCropModal(img);
+  } catch { /* not a decodable image; nothing to do */ }
 });
 
 /* Windows paths are case-insensitive, and the path for whatever is

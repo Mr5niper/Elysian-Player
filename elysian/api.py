@@ -4,6 +4,7 @@ Every method here is callable from the frontend. All application state lives on
 the Python side; the frontend polls get_tick()/get_full() and renders whatever
 it is given, so there is exactly one source of truth.
 """
+import base64
 import os
 import queue
 import random
@@ -20,10 +21,11 @@ from .models.playlist import Playlist
 from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
-from .services.art import ArtProvider
+from .services.art import ArtProvider, prepare_embed_jpeg
 from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.tag_editor import write_many as _write_tags
+from .services.tag_editor import write_art_many as _write_art_tags
 from .services.waveform import peaks_for
 from .services.visualizer import VisualizerProvider, BARS as VIS_BARS, \
     WAVE_POINTS as VIS_WAVE_POINTS
@@ -1539,6 +1541,18 @@ class Api:
             except Exception:
                 log.exception("could not build the tag editor payload")
                 payload = {"count": 0, "paths": [], "data": {}, "mixed": {}}
+            try:
+                jpeg_bytes, _source, _mtime = self._art.resolve([clean[0]])
+                if jpeg_bytes is not None:
+                    import base64
+                    art_url = ("data:image/jpeg;base64," +
+                               base64.b64encode(jpeg_bytes).decode("ascii"))
+                else:
+                    art_url = None
+                payload.setdefault("data", {})["art"] = art_url
+            except Exception:
+                log.warning("could not read current art for %s", clean[0],
+                            exc_info=True)
             self._post("library_editor_ready", payload)
 
         threading.Thread(target=work, name="elysian-lib-editor-open",
@@ -1563,31 +1577,74 @@ class Api:
         }
         self._bump_library_editor()
 
-    def _do_library_save_editor(self, paths, changes) -> None:
-        """Write the edited tags to disk, off the worker, then reindex.
+    def _do_library_save_editor(self, paths, changes, art_whole_album=False) -> None:
+        """Write the edited tags (and optionally new art) to disk, off the
+        worker, then reindex.
 
         The write itself can touch a file on a slow share, which is why it
         runs on its own thread rather than here: the worker also owns
         transport, and a write that took a second would be a second of
         nothing else in this app responding either.
+
+        art_whole_album only changes what the *art* change applies to -
+        every other field in changes always applies only to paths, exactly
+        as it always has. Unchecked (the default), art applies to paths
+        too, same as everything else.
         """
         clean = [str(p) for p in (paths or []) if p]
         changes = dict(changes or {})
-        if not clean or not changes:
+        art_data_url = changes.pop("art", None)
+        if not clean or (not changes and not art_data_url):
             self._do_library_close_editor()
             return
-        # Album/artist grouping for each file *before* the write, so a
-        # save that changes the album tag itself invalidates the album
-        # it left as well as whichever one it landed on - both may have
-        # a persistent cover cached that a save no longer reflects.
+
+        # What the art change actually applies to. Independent of clean:
+        # unchecked, it's the same selection as everything else; checked,
+        # it widens to every track the library knows about on the same
+        # album(s) - which can be more than what's open in the editor.
+        art_paths = []
+        if art_data_url:
+            if art_whole_album:
+                seen = set()
+                for p in clean:
+                    try:
+                        info = self._library.album_key_for_path(p)
+                    except Exception:
+                        info = None
+                    if info:
+                        try:
+                            rows = self._library.album_tracks(*info)
+                        except Exception:
+                            rows = []
+                        for row in rows:
+                            rp = row.get("path")
+                            if rp and rp not in seen:
+                                seen.add(rp)
+                                art_paths.append(rp)
+                    elif p not in seen:
+                        # Not indexed by the library - nothing to expand
+                        # to, so at least still apply it to the file itself.
+                        seen.add(p)
+                        art_paths.append(p)
+            else:
+                art_paths = list(clean)
+
+        # Album/artist grouping for every file this save can touch, before
+        # the write - both text changes (which can move a file to a
+        # different album) and art changes (which can reach past the
+        # current selection) may leave a cached cover pointing at the
+        # wrong thing, for the album a file left as well as the one it
+        # landed on.
+        touched = set(clean) | set(art_paths)
         self._tag_save_old_art_keys = set()
-        for p in clean:
+        for p in touched:
             try:
                 info = self._library.album_key_for_path(p)
             except Exception:
                 info = None
             if info:
                 self._tag_save_old_art_keys.add(f"{info[1]}\u0000{info[0]}")
+
         self._library_editor["saving"] = True
         self._bump_library_editor()
 
@@ -1600,7 +1657,7 @@ class Api:
         # way it goes, is actually done.
         self._tag_save_resume = None
         if self._engine.active and self._engine.path:
-            if pathutil.key(self._engine.path) in pathutil.keys(clean):
+            if pathutil.key(self._engine.path) in pathutil.keys(list(touched)):
                 self._tag_save_resume = {
                     "id": self._current_id,
                     "position": self._engine.position,
@@ -1610,21 +1667,56 @@ class Api:
                 self._bump()
 
         def work():
+            text_result = {"ok": 0, "failed": 0, "results": []}
             try:
-                result = _write_tags(clean, changes)
+                if changes:
+                    text_result = _write_tags(clean, changes)
             except Exception as exc:
                 log.exception("tag save failed outright")
                 self._post("library_save_failed", str(exc))
                 return
-            written = [r["path"] for r in result["results"] if r["ok"]]
-            errors = [r for r in result["results"] if not r["ok"]]
-            reindexed = 0
+
+            art_result = {"ok": 0, "failed": 0, "results": []}
+            if art_data_url and art_paths:
+                try:
+                    _header, _, b64data = art_data_url.partition(",")
+                    jpeg_bytes = prepare_embed_jpeg(base64.b64decode(b64data))
+                    art_result = _write_art_tags(art_paths, jpeg_bytes)
+                except Exception as exc:
+                    log.exception("art save failed outright")
+                    art_result = {
+                        "ok": 0, "failed": len(art_paths),
+                        "results": [{"path": p, "ok": False, "error": str(exc)}
+                                   for p in art_paths],
+                    }
+
+            # A path can appear in both operations' results (edited text
+            # and art together, the common case), so this is folded per
+            # path rather than counted per result - otherwise every
+            # ordinary save would report double the actual track count.
+            ok_flags: dict = {}
+            error_msgs: dict = {}
+            for r in text_result["results"] + art_result["results"]:
+                p = r["path"]
+                ok_flags[p] = ok_flags.get(p, True) and r["ok"]
+                if not r["ok"]:
+                    error_msgs.setdefault(p, []).append(str(r.get("error", "")))
+            all_paths = sorted(ok_flags)
+            combined_results = [
+                {"path": p, "ok": True} if ok_flags[p] else
+                {"path": p, "ok": False, "error": "; ".join(error_msgs[p])}
+                for p in all_paths
+            ]
+            written = [p for p in all_paths if ok_flags[p]]
+            errors = [r for r in combined_results if not r["ok"]]
+            combined = {"ok": len(written), "failed": len(errors),
+                       "results": combined_results}
             if written:
                 try:
-                    reindexed = self._library.refresh_paths(written)
+                    self._library.refresh_paths(written)
                 except Exception:
                     log.exception("could not reindex after saving tags")
-            self._post("library_save_done", result, written, errors)
+            self._post("library_save_done", combined, written, errors)
 
         threading.Thread(target=work, name="elysian-lib-editor-save",
                          daemon=True).start()
@@ -1805,9 +1897,44 @@ class Api:
     def library_close_editor(self) -> None:
         self._post("library_close_editor")
 
-    def library_save_editor(self, paths, changes) -> None:
+    def library_save_editor(self, paths, changes, art_whole_album=False) -> None:
         self._post("library_save_editor",
-                   [str(p) for p in (paths or []) if p], dict(changes or {}))
+                   [str(p) for p in (paths or []) if p], dict(changes or {}),
+                   bool(art_whole_album))
+
+    def paste_image_from_clipboard(self):
+        """The image currently on the system clipboard, as a data URL.
+
+        None if the clipboard holds no image. Used by the album art
+        editor's Paste button; ImageGrab.grabclipboard() is a Pillow
+        call, not tkinter, and is fast and local, so this runs directly
+        rather than being queued for the worker.
+        """
+        try:
+            from io import BytesIO
+
+            from PIL import Image, ImageGrab
+
+            data = ImageGrab.grabclipboard()
+            img = None
+            if isinstance(data, Image.Image):
+                img = data
+            elif isinstance(data, list) and data:
+                # Some platforms hand back a list of file paths (e.g. a
+                # file copied in Explorer) rather than pixel data.
+                try:
+                    img = Image.open(data[0])
+                except Exception:
+                    img = None
+            if img is None:
+                return None
+            buf = BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            return ("data:image/png;base64," +
+                   base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception:
+            log.warning("clipboard image paste failed", exc_info=True)
+            return None
 
     def library_get_editor_state(self) -> dict:
         src = self._library_editor
@@ -2204,6 +2331,7 @@ class Api:
         "library_request_art", "library_visible_art", "library_get_art",
         "library_open_editor", "library_close_editor",
         "library_save_editor", "library_get_editor_state",
+        "paste_image_from_clipboard",
     })
 
     #: Public for the host process only, never called from JavaScript, but
