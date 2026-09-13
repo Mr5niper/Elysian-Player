@@ -4166,9 +4166,7 @@ function drawMelt(ctx, w, h, bars, wave) {
   ctx.drawImage(meltCanvas, 0, 0, MELT_W, MELT_H, 0, 0, w, h);
 }
 
-$("art").addEventListener("dblclick", cycleVisualizer);
-$("wave").addEventListener("dblclick", cycleVisualizer);
-$("visualizer").addEventListener("dblclick", cycleVisualizer);
+$("nowplaying").addEventListener("dblclick", cycleVisualizer);
 
 let libResizeTimer = 0;
 /* Whichever card or row sits topmost-and-leftmost, fully in view, right
