@@ -7,6 +7,7 @@ APP_VERSION = "2.5.2.0"
 
 SETTINGS_FILE = Path.home() / ".elysian_player.json"
 LIBRARY_DB_FILE = Path.home() / ".elysian_library.db"
+ART_CACHE_DIR = Path.home() / ".elysian_art_cache"
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".ogg"}
 

@@ -42,6 +42,10 @@ class Api:
         self._playlist = Playlist()
         self._engine = PlaybackEngine()
         self._art = ArtProvider()
+        # A separate instance (own small in-process decode cache), not a
+        # shared one, so Now Playing and the library's background workers
+        # never contend over the same slots.
+        self._lib_art = ArtProvider()
         self._scanner = MetadataScanner()
         self._scanner.start()
 
@@ -190,6 +194,11 @@ class Api:
                             "art": None, "revision": -1}
         self._full_revision = -1
         self._art_cache: dict[str, str | None] = {}
+        # path -> album-art key ("artist\u0000album") this Now Playing
+        # track is waiting on, while its own dedicated resolve thread is
+        # still running. Consumed and cleared by _do_library_art_ready
+        # the moment that key resolves.
+        self._art_wait_key: dict[str, str] = {}
         self._cmd: queue.Queue = queue.Queue()
         self._snap_lock = threading.RLock()
         self._worker = threading.Thread(target=self._run, name="elysian-core",
@@ -473,11 +482,17 @@ class Api:
                 self._full = full
 
     def _ensure_art(self, track) -> None:
-        """Extract album art on a thread of its own.
+        """Resolve album art for the current track.
 
-        Not on the command worker: reading art from a file on a network share
-        takes long enough that a play or next press would sit in the queue
-        behind it.
+        Runs on a thread of its own, entirely independent of the
+        library's on-screen (urgent) and background (bulk) queues, so it
+        can never sit ahead of, or be dropped alongside, whatever Library
+        cards are actually on screen. Keyed by the same (album, artist)
+        grouping the library grid uses, and backed by the same
+        persistent on-disk cache, so a track whose album was already
+        resolved - this session, a previous session, or by the grid
+        itself - loads with a stat() and a small local file read rather
+        than a fresh decode.
         """
         if track is None or track.path in self._art_cache:
             return
@@ -485,17 +500,50 @@ class Api:
         self._art_cache[path] = None
 
         def work():
+            info = None
             try:
-                url = self._art.data_url(path)
+                info = self._library.album_key_for_path(path)
             except Exception:
-                # A track with no artwork is normal and returns None; reaching
-                # here means the extraction itself broke.
+                log.warning("album key lookup failed for %s", path,
+                            exc_info=True)
+            if info is None:
+                # Not indexed by the library (e.g. played from outside
+                # any library root) - no album grouping to share or
+                # persist against, fall back to a direct per-file read.
+                try:
+                    url = self._art.data_url(path)
+                except Exception:
+                    log.warning("album art extraction failed for %s", path,
+                                exc_info=True)
+                    url = None
+                self._post("art_ready", path, url)
+                return
+            album, album_artist = info
+            key = f"{album_artist}\u0000{album}"
+            cached = self._library_art.get(key)
+            if cached is not None:
+                # Another track of this same album already resolved this
+                # session - reuse it instantly, no decode, no disk cache
+                # check needed.
+                self._post("art_ready", path, cached[1] or None)
+                return
+            try:
+                candidates = self._library.album_paths(album, album_artist)
+                url = self._lib_art.resolve_cached(
+                    key, candidates,
+                    self._library.get_art_cache_entry,
+                    self._library.set_art_cache_entry)
+            except Exception:
                 log.warning("album art extraction failed for %s", path,
                             exc_info=True)
                 url = None
-            # Hand the result back to the worker rather than touching shared
-            # state and the revision counter from this thread.
-            self._post("art_ready", path, url)
+            # Posted as a library_art result, not art_ready: this fills
+            # the one shared cache every other track on the album (and
+            # the grid) also reads from, and _do_library_art_ready
+            # already knows how to also satisfy a waiting Now Playing
+            # path (see _art_wait_key below).
+            self._art_wait_key[path] = key
+            self._post("library_art_ready", key, url)
 
         threading.Thread(target=work, name="elysian-art", daemon=True).start()
 
@@ -829,6 +877,7 @@ class Api:
         self._resume_id = -1
         self._resume_at = 0.0
         self._art_cache.clear()
+        self._art_wait_key.clear()
 
     def _do_clear_playlist(self) -> None:
         """Remove every track and reset playlist-related state.
@@ -1289,10 +1338,11 @@ class Api:
                 self._art_bulk_pending.discard(key)
             url = None
             try:
-                for path in self._library.album_paths(album, artist):
-                    url = self._art.data_url(path)
-                    if url:
-                        break
+                candidates = self._library.album_paths(album, artist)
+                url = self._lib_art.resolve_cached(
+                    key, candidates,
+                    self._library.get_art_cache_entry,
+                    self._library.set_art_cache_entry)
             except Exception:
                 log.warning("library art failed for %s", album, exc_info=True)
                 url = None
@@ -1375,6 +1425,17 @@ class Api:
         while len(self._library_art) > 4000:
             self._library_art.pop(next(iter(self._library_art)), None)
         self._library_art_revision += 1
+        # Satisfy any Now Playing track waiting on this exact album/artist
+        # key - it was resolved on its own dedicated thread precisely so
+        # it never touched the library's queues, but the result still
+        # belongs in the one shared cache, and still needs to reach the
+        # track waiting on it.
+        waiting = [p for p, k in self._art_wait_key.items() if k == key]
+        for p in waiting:
+            del self._art_wait_key[p]
+            self._art_cache[p] = url or None
+        if waiting:
+            self._bump()
 
     def _do_library_enqueue(self, paths) -> None:
         # _do_add_audio_paths already sets an "Added N tracks" status; a
@@ -1976,6 +2037,22 @@ class Api:
                 log.warning("could not restore library root %s", root,
                             exc_info=True)
         self._refresh_library_summary()
+
+        # Prime the background cover fill unconditionally, not only once the
+        # user visits the Library tab. This is the exact same path a Library
+        # visit already triggers (_do_library_browser -> ...browser_ready ->
+        # _do_library_fill_art), just fired here too so the 4 art workers
+        # have something to chew on from the moment the app opens, whether
+        # or not Library is ever opened this session. Reads the local
+        # SQLite index only - no network I/O, no folder walk - so this is
+        # safe even with a multi-thousand-track library on a slow share.
+        # _do_library_browser_ready only feeds the fill queue for the
+        # unfiltered "albums" view, which is what this asks for; it also
+        # updates self._library_browser and bumps library_browser_revision,
+        # but the frontend ignores that bump until libOpened is true (set
+        # only once the user actually switches to the Library tab), so this
+        # has no visible effect until then.
+        self._do_library_browser("albums", "")
 
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
