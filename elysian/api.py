@@ -22,7 +22,7 @@ from .models.playlist import Playlist
 from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
-from .services.art import ArtProvider, prepare_embed_jpeg
+from .services.art import ArtProvider, prepare_embed_jpeg, read_full_source_bytes
 from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.tag_editor import write_many as _write_tags
@@ -1543,11 +1543,10 @@ class Api:
                 log.exception("could not build the tag editor payload")
                 payload = {"count": 0, "paths": [], "data": {}, "mixed": {}}
             try:
-                jpeg_bytes, _source, _mtime = self._art.resolve([clean[0]])
-                if jpeg_bytes is not None:
-                    import base64
-                    art_url = ("data:image/jpeg;base64," +
-                               base64.b64encode(jpeg_bytes).decode("ascii"))
+                raw, mime, _source = read_full_source_bytes([clean[0]])
+                if raw is not None:
+                    art_url = (f"data:{mime};base64," +
+                               base64.b64encode(raw).decode("ascii"))
                 else:
                     art_url = None
                 payload.setdefault("data", {})["art"] = art_url

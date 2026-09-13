@@ -1287,13 +1287,22 @@ function artCropClamp() {
   if (!artCropImg) return;
   const dispW = artCropImg.naturalWidth * artCropScale;
   const dispH = artCropImg.naturalHeight * artCropScale;
-  const minX = ART_EXPORT_SIZE - dispW;
-  const minY = ART_EXPORT_SIZE - dispH;
-  // Both bounds are <= 0 at every valid zoom, since the image is always
-  // scaled to at least cover the square - clamping keeps the pan from
-  // ever dragging a gap into view on any edge.
-  artCropOffsetX = Math.min(0, Math.max(minX, artCropOffsetX));
-  artCropOffsetY = Math.min(0, Math.max(minY, artCropOffsetY));
+  // Independent per axis: an axis the image doesn't reach across (still
+  // showing transparent padding on that axis) stays centered rather than
+  // being panned, since there is nothing useful to drag into view there.
+  // An axis the image fully covers clamps normally, same as before.
+  if (dispW <= ART_EXPORT_SIZE) {
+    artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
+  } else {
+    const minX = ART_EXPORT_SIZE - dispW;
+    artCropOffsetX = Math.min(0, Math.max(minX, artCropOffsetX));
+  }
+  if (dispH <= ART_EXPORT_SIZE) {
+    artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
+  } else {
+    const minY = ART_EXPORT_SIZE - dispH;
+    artCropOffsetY = Math.min(0, Math.max(minY, artCropOffsetY));
+  }
 }
 
 function artCropRedraw() {
@@ -1308,9 +1317,10 @@ function artCropRedraw() {
 
 function openArtCropModal(img) {
   artCropImg = img;
-  // "Cover" fit: the image's shorter side exactly fills the square, so
-  // there is never a gap regardless of the source's own aspect ratio.
-  artCropBaseScale = ART_EXPORT_SIZE / Math.min(img.naturalWidth, img.naturalHeight);
+  // "Contain" fit: the image's longer side exactly fills the square, so
+  // the whole image is visible with the shorter axis left as transparent
+  // padding - never cropping anything away until the person zooms in.
+  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.naturalWidth, img.naturalHeight);
   $("artcrop-zoom").value = 100;
   artCropScale = artCropBaseScale;
   const dispW = img.naturalWidth * artCropScale;
@@ -1369,10 +1379,45 @@ artCropViewport.addEventListener("pointercancel", artCropEndDrag);
 
 $("artcrop-cancel").addEventListener("click", closeArtCropModal);
 $("artcrop-use").addEventListener("click", () => {
-  // What's on the canvas right now is exactly what the person positioned,
-  // so exporting it directly means there's no separate render step that
-  // could ever look different from the preview they just confirmed.
-  pendingArtDataUrl = $("artcrop-canvas").toDataURL("image/jpeg", 0.92);
+  if (!artCropImg) return;
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+
+  // The actual visible portion of the ORIGINAL image, in that image's
+  // own pixel coordinates - not the padded workspace square. At "fit"
+  // (the default) this is the whole image; only zooming in past fit
+  // narrows it to a genuine sub-crop.
+  let sx0, sx1, sy0, sy1;
+  if (dispW <= ART_EXPORT_SIZE) {
+    sx0 = 0; sx1 = artCropImg.naturalWidth;
+  } else {
+    sx0 = Math.max(0, (0 - artCropOffsetX) / artCropScale);
+    sx1 = Math.min(artCropImg.naturalWidth,
+                    (ART_EXPORT_SIZE - artCropOffsetX) / artCropScale);
+  }
+  if (dispH <= ART_EXPORT_SIZE) {
+    sy0 = 0; sy1 = artCropImg.naturalHeight;
+  } else {
+    sy0 = Math.max(0, (0 - artCropOffsetY) / artCropScale);
+    sy1 = Math.min(artCropImg.naturalHeight,
+                    (ART_EXPORT_SIZE - artCropOffsetY) / artCropScale);
+  }
+  const srcW = sx1 - sx0, srcH = sy1 - sy0;
+
+  // Sized so the longer side is exactly ART_EXPORT_SIZE, keeping
+  // whatever aspect ratio the visible crop actually has - never forced
+  // to square, and drawn straight from the full-resolution source so
+  // this is one resample, not a second pass over an already-scaled copy.
+  const outScale = ART_EXPORT_SIZE / Math.max(srcW, srcH);
+  const outW = Math.max(1, Math.round(srcW * outScale));
+  const outH = Math.max(1, Math.round(srcH * outScale));
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = outW;
+  outCanvas.height = outH;
+  outCanvas.getContext("2d")
+    .drawImage(artCropImg, sx0, sy0, srcW, srcH, 0, 0, outW, outH);
+
+  pendingArtDataUrl = outCanvas.toDataURL("image/jpeg", 0.92);
   libEditorTouched.add("art");
   closeArtCropModal();
   renderTagEditor();

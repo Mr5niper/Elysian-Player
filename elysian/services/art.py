@@ -231,27 +231,73 @@ class ArtProvider:
             self._urls.clear()
 
 
-def prepare_embed_jpeg(image_bytes: bytes, size: int = EMBED_ART_SIZE) -> bytes:
-    """Turn arbitrary image bytes into a clean square JPEG for embedding.
+def read_full_source_bytes(candidate_paths):
+    """Find the same source resolve() would, but return it untouched.
 
-    The frontend's crop tool already produces a square image, but this is
-    the one place that actually writes bytes into a user's file, so it
-    re-derives a guaranteed-square, guaranteed-sized, guaranteed-JPEG
-    result rather than trusting whatever arrived - a non-square source
-    (any format, any size) is center-cropped to square first, exactly
-    like the frontend's own crop viewport, so nothing gets stretched.
+    resolve() decodes and re-encodes down to the app's own small display
+    size, which is correct for the library grid and Now Playing, but
+    wrong for anything that needs the true original: copying art to the
+    system clipboard, or re-cropping an already-embedded cover without
+    quietly starting from a downsized copy of it.
+
+    Returns (raw_bytes, mime, source_path), or (None, None, None) if
+    nothing was found in any candidate. mime is best-effort from the
+    image's actual format, not assumed from the file extension.
+    """
+    for path in candidate_paths:
+        raw = ArtProvider._embedded_bytes(path)
+        source = path
+        if raw is None:
+            folder = Path(path).parent
+            for name in COVER_NAMES:
+                candidate = folder / name
+                try:
+                    if candidate.is_file():
+                        raw = candidate.read_bytes()
+                        source = str(candidate)
+                        break
+                except Exception:
+                    log.debug("cover file %s could not be read",
+                              candidate, exc_info=True)
+                    continue
+        if raw:
+            mime = "image/jpeg"
+            try:
+                from PIL import Image
+
+                fmt = (Image.open(BytesIO(raw)).format or "JPEG").upper()
+                if fmt == "PNG":
+                    mime = "image/png"
+                elif fmt in ("JPEG", "JPG"):
+                    mime = "image/jpeg"
+                else:
+                    mime = f"image/{fmt.lower()}"
+            except Exception:
+                log.debug("could not read format of %s", source,
+                          exc_info=True)
+            return raw, mime, source
+    return None, None, None
+
+
+def prepare_embed_jpeg(image_bytes: bytes, size: int = EMBED_ART_SIZE) -> bytes:
+    """Turn arbitrary image bytes into a clean JPEG for embedding.
+
+    Never forced to square - many real covers (tall DVD-style inserts,
+    for one) legitimately aren't, and the app's own display already
+    handles a non-square cover correctly (see CSS contain-fit), so
+    there's no reason to crop or pad one on the way into the file. Only
+    the longer side is capped at `size`; the shorter side follows
+    whatever the source's own aspect ratio is.
     """
     from PIL import Image
 
     img = Image.open(BytesIO(image_bytes)).convert("RGB")
     w, h = img.size
-    if w != h:
-        side = min(w, h)
-        left = (w - side) // 2
-        top = (h - side) // 2
-        img = img.crop((left, top, left + side, top + side))
-    if img.width != size:
-        img = img.resize((size, size), Image.LANCZOS)
+    if max(w, h) != size:
+        scale = size / max(w, h)
+        new_w = max(1, round(w * scale))
+        new_h = max(1, round(h * scale))
+        img = img.resize((new_w, new_h), Image.LANCZOS)
     buf = BytesIO()
     img.save(buf, format="JPEG", quality=90)
     return buf.getvalue()

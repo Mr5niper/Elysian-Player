@@ -199,7 +199,7 @@ html, body {
 #art {
   width: var(--np-art); height: var(--np-art);
   border-radius: 12px;
-  background: var(--panel-2) center/cover no-repeat;
+  background: var(--panel-2) center/contain no-repeat;
   display: flex; align-items: center; justify-content: center;
 }
 /* The placeholder scales with it rather than sitting small in a large box. */
@@ -411,7 +411,7 @@ html, body {
   border: 1px solid rgba(255,255,255,0.09);
   border-radius: 10px;
   padding: 22px 26px 18px;
-  width: 360px;
+  width: 420px;
   max-height: 80vh;
   overflow-y: auto;
   box-shadow: 0 12px 40px rgba(0,0,0,0.5);
@@ -496,8 +496,9 @@ html, body {
   display: flex; flex-direction: column; align-items: center; gap: 14px;
 }
 #tag-art-preview-large {
-  width: 200px; height: 200px; border-radius: 10px;
-  background-size: cover; background-position: center;
+  width: 320px; height: 320px; border-radius: 10px;
+  background-size: contain; background-repeat: no-repeat;
+  background-position: center;
   border: 1px solid var(--line); cursor: pointer;
 }
 #tag-art-preview-large.tag-art-empty {
@@ -537,7 +538,17 @@ html, body {
   cursor: grab;
 }
 #artcrop-viewport:active { cursor: grabbing; }
-#artcrop-canvas { width: 260px; height: 260px; display: block; touch-action: none; }
+#artcrop-canvas {
+  width: 260px; height: 260px; display: block; touch-action: none;
+  background-image:
+    linear-gradient(45deg, #7a7a7a 25%, transparent 25%),
+    linear-gradient(-45deg, #7a7a7a 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, #7a7a7a 75%),
+    linear-gradient(-45deg, transparent 75%, #7a7a7a 75%);
+  background-size: 16px 16px;
+  background-position: 0 0, 0 8px, 8px -8px, -8px 0px;
+  background-color: #a8a8a8;
+}
 #artcrop-zoom { width: 260px; }
 #artcrop-buttons { display: flex; gap: 10px; justify-content: flex-end; width: 260px; }
 
@@ -651,7 +662,7 @@ html, body {
 .libcard .art svg { width: 34px; height: 34px; stroke: var(--accent-dim); }
 .libcard .art img {
   width: 100%; height: 100%; border-radius: 7px;
-  object-fit: cover; display: block;
+  object-fit: contain; display: block;
 }
 .libcard .t1, .libcard .t2 {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -775,7 +786,7 @@ body.resizing .lib-expand-connector {
   overflow: hidden;
 }
 #libcover .cover img {
-  width: 100%; height: 100%; object-fit: cover; display: block;
+  width: 100%; height: 100%; object-fit: contain; display: block;
 }
 #libcover .cover svg { width: 48px; height: 48px; stroke: var(--accent-dim); }
 #libcover .ct {

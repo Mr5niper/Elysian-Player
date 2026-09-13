@@ -224,8 +224,8 @@ _OGG_EXTS = {".ogg", ".oga", ".opus"}
 def write_art_many(paths, jpeg_bytes) -> dict:
     """Embed the same cover image into every path. Never raises.
 
-    jpeg_bytes is expected to already be a clean, correctly-sized JPEG
-    (see art.prepare_embed_jpeg) - this only handles getting those exact
+    jpeg_bytes is expected to already be a clean JPEG (see
+    art.prepare_embed_jpeg) - this only handles getting those exact
     bytes into whichever container each file uses.
     """
     ok = failed = 0
