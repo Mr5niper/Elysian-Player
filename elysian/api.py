@@ -136,13 +136,27 @@ class Api:
         self._library_art = {}          # key -> [seq, data url or ""]
         self._library_art_seq = 0
         self._library_art_revision = 0
-        # Bumped on every browse or detail request so a query thread that
-        # is still running when a newer one starts can tell it has been
-        # superseded. Without this, a slow query fired first could finish
-        # after a fast one fired later and overwrite it - a filter typed
-        # quickly, a tab switched quickly, or a scan-triggered refresh
-        # landing after a manual request could all show stale results.
-        self._library_browser_gen = 0
+        # Per view, not one shared counter: a query for "artists" must
+        # never be invalidated by a later query for "albums" completing -
+        # which is exactly what a single shared counter would do once all
+        # four views are queried together (see _do_library_prewarm_all).
+        # Within one view, the same protection as before still applies: a
+        # slow query fired first finishing after a faster one fired later
+        # would otherwise overwrite it with something stale.
+        self._library_browser_gen = {}
+        # One entry per view (albums/artists/genres/songs), holding
+        # whichever unfiltered listing has most recently finished for
+        # that view - kept warm from startup and refreshed alongside the
+        # currently-viewed one on every library change, so opening any
+        # tab does not have to wait for a fresh query if one already
+        # finished, whatever tab was last open.
+        self._library_browser_cache = {}
+        # (view, needle) -> True while that exact query is already
+        # running, so a click on a tab whose prewarm hasn't finished yet
+        # never starts a second, duplicate query for the same thing -
+        # the one already in flight is left to finish and deliver its
+        # result normally.
+        self._library_browser_pending = {}
         self._library_detail_gen = 0
         self._library_art_pending = set()
         # The tag editor. Unlike everything else the library owns, opening
@@ -1167,6 +1181,7 @@ class Api:
         self._do_library_browser(
             self._library_browser.get("view", "albums"),
             self._library_browser.get("needle", ""))
+        self._do_library_prewarm_all()
 
     def _do_library_scan(self, root=None) -> None:
         if self._library_scanning:
@@ -1216,6 +1231,7 @@ class Api:
             self._do_library_browser(
                 self._library_browser.get("view", "albums"),
                 self._library_browser.get("needle", ""))
+            self._do_library_prewarm_all()
 
     def _do_library_scan_done(self, result) -> None:
         self._library_scanning = False
@@ -1235,6 +1251,7 @@ class Api:
         self._do_library_browser(
             self._library_browser.get("view", "albums"),
             self._library_browser.get("needle", ""))
+        self._do_library_prewarm_all()
 
     def _do_library_scan_failed(self, message) -> None:
         self._library_scanning = False
@@ -1244,33 +1261,57 @@ class Api:
         view = (view if view in ("albums", "artists", "genres", "songs")
                 else "albums")
         needle = str(needle or "")
-        self._library_browser_gen += 1
-        gen = self._library_browser_gen
+        key = (view, needle)
+        if key in self._library_browser_pending:
+            return  # this exact query is already running; nothing new
+                     # to start, the one in flight will deliver its
+                     # result normally when it finishes
+        self._library_browser_pending[key] = True
+        gen = self._library_browser_gen.get(view, 0) + 1
+        self._library_browser_gen[view] = gen
 
         def work():
-            # Filtering happens here rather than in the frontend, which can
-            # only match what it has already been sent: a song title is not
-            # in the album list, so searching for one found nothing.
             try:
-                if view == "artists":
-                    items = self._library.artists(needle)
-                elif view == "genres":
-                    items = self._library.genres(needle)
-                elif view == "songs":
-                    items = self._library.songs(needle)
-                else:
-                    items = self._library.albums(needle)
-            except Exception:
-                log.exception("library browser query failed")
-                items = []
-            if gen != self._library_browser_gen:
-                return  # a newer request has since been made; this result
-                        # is not wrong, just late, and showing it now would
-                        # silently undo whatever the newer one produced
-            self._post("library_browser_ready", view, items, needle)
+                # Filtering happens here rather than in the frontend,
+                # which can only match what it has already been sent: a
+                # song title is not in the album list, so searching for
+                # one found nothing.
+                try:
+                    if view == "artists":
+                        items = self._library.artists(needle)
+                    elif view == "genres":
+                        items = self._library.genres(needle)
+                    elif view == "songs":
+                        items = self._library.songs(needle)
+                    else:
+                        items = self._library.albums(needle)
+                except Exception:
+                    log.exception("library browser query failed")
+                    items = []
+                if gen != self._library_browser_gen.get(view):
+                    return  # a newer request for this same view has
+                            # since been made; this result is not wrong,
+                            # just late, and showing it now would
+                            # silently undo whatever the newer one
+                            # produced
+                self._post("library_browser_ready", view, items, needle)
+            finally:
+                self._library_browser_pending.pop(key, None)
 
         threading.Thread(target=work, name="elysian-lib-browse",
                          daemon=True).start()
+
+    def _do_library_prewarm_all(self) -> None:
+        """Start (or refresh) all four views' unfiltered listings.
+
+        Fired at startup and again on every library-changing event
+        (scan progress/done, a tag save, a root removed), the same
+        moments the currently-viewed tab already refreshes itself -
+        this just means the other three, not currently on screen,
+        never go stale waiting for someone to click into them.
+        """
+        for view in ("albums", "artists", "genres", "songs"):
+            self._do_library_browser(view, "")
 
     def _do_library_browser_ready(self, view, items, needle="") -> None:
         if view == "albums" and not needle:
@@ -1280,6 +1321,12 @@ class Api:
             self._do_library_fill_art(
                 [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
                  for i in (items or [])])
+        if not needle:
+            # Kept independent of which tab is "current" below, so a tab
+            # nobody is looking at right now still has something ready
+            # the moment it's opened.
+            self._library_browser_cache[view] = {"items": items,
+                                                 "needle": needle}
         self._library_browser_revision += 1
         self._library_browser = {"view": view, "items": items,
                                  "needle": needle,
@@ -1730,6 +1777,7 @@ class Api:
             self._refresh_library_summary()
             self._do_library_browser(self._library_browser.get("view", "albums"),
                                      self._library_browser.get("needle", ""))
+            self._do_library_prewarm_all()
             if self._library_detail.get("kind"):
                 d = self._library_detail
                 self._do_library_detail(d.get("kind", ""), d.get("key", ""),
@@ -1855,6 +1903,10 @@ class Api:
 
     def library_get_browser(self) -> dict:
         return dict(self._library_browser)
+
+    def library_get_prewarmed(self, view) -> dict:
+        entry = self._library_browser_cache.get(str(view or ""))
+        return dict(entry) if entry is not None else {}
 
     def library_get_detail(self) -> dict:
         return dict(self._library_detail)
@@ -2284,21 +2336,21 @@ class Api:
                             exc_info=True)
         self._refresh_library_summary()
 
-        # Prime the background cover fill unconditionally, not only once the
-        # user visits the Library tab. This is the exact same path a Library
-        # visit already triggers (_do_library_browser -> ...browser_ready ->
-        # _do_library_fill_art), just fired here too so the 4 art workers
-        # have something to chew on from the moment the app opens, whether
-        # or not Library is ever opened this session. Reads the local
-        # SQLite index only - no network I/O, no folder walk - so this is
-        # safe even with a multi-thousand-track library on a slow share.
-        # _do_library_browser_ready only feeds the fill queue for the
-        # unfiltered "albums" view, which is what this asks for; it also
-        # updates self._library_browser and bumps library_browser_revision,
-        # but the frontend ignores that bump until libOpened is true (set
-        # only once the user actually switches to the Library tab), so this
-        # has no visible effect until then.
-        self._do_library_browser("albums", "")
+        # Prime all four library views unconditionally at startup, not
+        # only once the user visits the Library tab, and not only the
+        # Albums view - whichever tab is clicked first, its listing has
+        # already been computing since the app launched. This also
+        # feeds the background cover fill (_do_library_browser_ready's
+        # side effect for the unfiltered Albums view specifically), so
+        # the 4 art workers have something to chew on from the moment
+        # the app opens too. Reads the local SQLite index only - no
+        # network I/O, no folder walk - so this is safe even with a
+        # multi-thousand-track library on a slow share. Each view's
+        # result is cached independently (self._library_browser_cache)
+        # and can be read instantly via library_get_prewarmed(view) the
+        # moment a tab is actually opened, whether or not that query has
+        # finished yet.
+        self._do_library_prewarm_all()
 
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
@@ -2398,7 +2450,7 @@ class Api:
         "library_add_folder", "library_remove_root", "library_rescan",
         "library_cancel_scan", "library_request_browser",
         "library_request_detail", "library_get_state",
-        "library_get_browser", "library_get_detail",
+        "library_get_browser", "library_get_prewarmed", "library_get_detail",
         "library_enqueue", "library_play_context",
         "library_request_art", "library_visible_art", "library_get_art",
         "library_open_editor", "library_close_editor",

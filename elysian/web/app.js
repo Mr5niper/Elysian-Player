@@ -1548,8 +1548,39 @@ function libraryOpened() {
       libAnchor = null;
       renderLibrary();
       libPending++;
-      a.library_request_browser(libView, libDesiredNeedle);
-      schedule();
+      // Every view has been kept warm since app startup, not just since
+      // Library was first opened, and not only Albums (see the startup
+      // prewarm). If this open wants the plain unfiltered version of
+      // whatever tab was last open, use whatever has already finished
+      // directly. request_browser is still safe to fall through to
+      // otherwise: the backend now recognizes an identical query already
+      // in flight and does not start a second one for it - this only
+      // ever waits on that same work, never repeats it.
+      if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
+        a.library_get_prewarmed(view).then((b) => {
+          const stillWanted = view === libView && libDesiredNeedle === "";
+          if (stillWanted && b && Array.isArray(b.items)
+              && (b.needle || "") === "") {
+            libPending--;
+            libLoading = false;
+            libItems = b.items;
+            renderLibrary();
+            libTabState[libView] = captureCurrentLibTabState();
+            libTabState[libView].stale = false;
+          } else if (stillWanted) {
+            a.library_request_browser(libView, libDesiredNeedle);
+          } else {
+            libPending--;
+          }
+          schedule();
+        }).catch(() => {
+          a.library_request_browser(libView, libDesiredNeedle);
+          schedule();
+        });
+      } else {
+        a.library_request_browser(libView, libDesiredNeedle);
+        schedule();
+      }
     };
     if (typeof a.library_get_state === "function") {
       a.library_get_state()
