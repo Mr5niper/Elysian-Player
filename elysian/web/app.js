@@ -60,23 +60,26 @@ function setView(name) {
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") {
     prev.waveW = 0; prev.waveSig = null; drawWave();
-    // Resumes whichever visualizer (if any) was active before leaving,
-    // using vizMode and all its mode-specific state (tunnelPhase,
-    // beltYaw, meltInited, etc.) exactly as they were left - none of it
-    // gets touched by leaving the view, only the polling loop itself
-    // stops (see the else branch below). A no-op if vizMode is already
-    // 0 or nothing was playing, since vizPoll() already guards for that.
+    // vizMode itself was left untouched by navigating away (see the else
+    // branch below), so this resumes on the same mode - but nothing to
+    // reset here: the mode's own state was already cleared out the
+    // moment we left (below), not held onto in memory in the meantime.
+    // Resuming just means letting vizPoll() start pulling frames again.
     vizPoll();
   } else {
-    // Only stop the polling loop while this view isn't visible - do NOT
-    // reset vizMode or clear any mode's state. Previously this called
-    // stopVisualizer(), which reset everything back to the plain album-
-    // cover view - meaning switching to Library or Playlist and back
-    // always lost whatever visualizer had been active, rather than
-    // resuming it. #view-now itself is already hidden via the toggle
-    // above, so there's nothing extra to hide here - just stop the
-    // wasted work of polling/drawing a view nobody can see.
+    // Clears every mode's own state immediately on leaving - nothing
+    // sits frozen in memory for the entire time this view isn't visible.
+    // vizMode itself is left alone, so coming back to "now" still lands
+    // on the same mode; it just starts that mode fresh (the normal
+    // "not inited yet" path each mode already has) rather than picking
+    // back up from state that had been held onto the whole time away.
+    resetVisualizerModeState();
     clearTimeout(vizTimer);
+    if (vizMode !== 0) {
+      const c = $("visualizer");
+      const ctx = c.getContext("2d");
+      ctx.clearRect(0, 0, c.width, c.height);
+    }
   }
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
@@ -2702,9 +2705,14 @@ let beltPrevBass = 0;         // last frame's bass level, used to detect a
                                // rising edge ("a beat just hit") for the
                                // particles' own random direction changes
 
-function stopVisualizer() {
-  if (vizMode === 0) return;
-  vizMode = 0;
+// Resets every visualizer mode's own internal state - camera orbit,
+// scheduler clocks, particle/star arrays, everything - without touching
+// vizMode itself. Shared by stopVisualizer (which also resets vizMode to
+// 0), cycleVisualizer's mode-0 branch (same), and setView's "now" branch
+// (which does NOT touch vizMode - the whole point there is to land back
+// on the same mode that was active before navigating away, just running
+// fresh rather than resuming wherever it was left frozen).
+function resetVisualizerModeState() {
   tunnelPhase = 0;
   tunnelBlobs = null;
   beltYaw = 0;
@@ -2723,6 +2731,12 @@ function stopVisualizer() {
   meltWaveformStateB = null;
   meltParticleStateA = null;
   meltParticleStateB = null;
+}
+
+function stopVisualizer() {
+  if (vizMode === 0) return;
+  vizMode = 0;
+  resetVisualizerModeState();
   clearTimeout(vizTimer);
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
@@ -2732,24 +2746,7 @@ function stopVisualizer() {
 function cycleVisualizer() {
   vizMode = (vizMode + 1) % 6;
   if (vizMode === 0) {
-    tunnelPhase = 0;
-    tunnelBlobs = null;
-    beltYaw = 0;
-    beltStars = null;
-    beltParticles = null;
-    beltPitch = 0.55;
-    beltPitchTarget = 0.55;
-    beltRoll = 0;
-    beltRollTarget = 0;
-    beltQuietRun = 0;
-    beltEnergyAvg = 0.3;
-    beltFramesSinceAxisChange = 0;
-    beltPrevBass = 0;
-    meltInited = false;
-    meltWaveformStateA = null;
-    meltWaveformStateB = null;
-    meltParticleStateA = null;
-    meltParticleStateB = null;
+    resetVisualizerModeState();
     clearTimeout(vizTimer);
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
