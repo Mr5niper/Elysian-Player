@@ -58,8 +58,26 @@ function setView(name) {
     name === "now" ? "Now playing" : (name === "library" ? "Library" : "Playlist");
   document.querySelectorAll(".navitem").forEach((n) =>
     n.classList.toggle("active", n.dataset.view === name));
-  if (name === "now") { prev.waveW = 0; prev.waveSig = null; drawWave(); }
-  else stopVisualizer();
+  if (name === "now") {
+    prev.waveW = 0; prev.waveSig = null; drawWave();
+    // Resumes whichever visualizer (if any) was active before leaving,
+    // using vizMode and all its mode-specific state (tunnelPhase,
+    // beltYaw, meltInited, etc.) exactly as they were left - none of it
+    // gets touched by leaving the view, only the polling loop itself
+    // stops (see the else branch below). A no-op if vizMode is already
+    // 0 or nothing was playing, since vizPoll() already guards for that.
+    vizPoll();
+  } else {
+    // Only stop the polling loop while this view isn't visible - do NOT
+    // reset vizMode or clear any mode's state. Previously this called
+    // stopVisualizer(), which reset everything back to the plain album-
+    // cover view - meaning switching to Library or Playlist and back
+    // always lost whatever visualizer had been active, rather than
+    // resuming it. #view-now itself is already hidden via the toggle
+    // above, so there's nothing extra to hide here - just stop the
+    // wasted work of polling/drawing a view nobody can see.
+    clearTimeout(vizTimer);
+  }
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
   // covering a window resized while the Now Playing view was up.
