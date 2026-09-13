@@ -3394,20 +3394,6 @@ let meltClock = 0;          // seconds, advances once per drawMelt() call -
                              // frame-driven rather than wall-clock, so it
                              // naturally stops advancing whenever this mode
                              // isn't actually being polled/drawn
-// All three movemaps scale radius by some multiplier and rotate theta -
-// every point on that kind of transform has an exact fixed point at
-// radius=0 (any multiplier times zero is still zero), so the dead-centre
-// pixel never actually moved, frame after frame, no matter which
-// movemap or blend was active - and even close to but not exactly at
-// the centre, displacement stays tiny, since it's proportional to
-// distance from that same fixed point. Content drawn anywhere near the
-// middle of the buffer visibly sat still for a long time as a result,
-// only refreshing once something else happened to be drawn directly on
-// top of it. A small shared translational jitter (recomputed once per
-// frame, applied identically inside every movemap) breaks that fixed
-// point entirely: nothing, including dead centre, ever maps back onto
-// itself exactly.
-let _meltJitterX = 0, _meltJitterY = 0;
 
 /* ---------- Independent hold/fade scheduler (part 5) ----------
    Each of the four preset categories (movemap, colormap, waveform,
@@ -3538,23 +3524,32 @@ const MELT_MOVEMAPS = [
   function spiralIn(x, y, radius, theta, out) {
     const srcRadius = radius * 0.87;
     const srcTheta = theta - 0.075;
-    out.x = Math.cos(srcTheta) * srcRadius + _meltJitterX;
-    out.y = Math.sin(srcTheta) * srcRadius + _meltJitterY;
+    out.x = Math.cos(srcTheta) * srcRadius;
+    out.y = Math.sin(srcTheta) * srcRadius;
   },
   // Slow spiral outward with a gentle ripple layered on the radius.
+  // Rotation raised 0.015 -> 0.03 (a first attempt raised this to 0.05,
+  // matching/exceeding spiralIn - too aggressive: reported as choppy and
+  // distorting freshly-drawn content like the cube/sphere particles too
+  // quickly to read clearly). This still gives a real floor at radii
+  // where the ripple term cancels toward zero, without overshooting.
   function rippleOut(x, y, radius, theta, out) {
     const srcRadius = radius + 0.04 * Math.sin(6.2831853 * radius);
-    const srcTheta = theta + 0.015;
-    out.x = Math.cos(srcTheta) * srcRadius + _meltJitterX;
-    out.y = Math.sin(srcTheta) * srcRadius + _meltJitterY;
+    const srcTheta = theta + 0.03;
+    out.x = Math.cos(srcTheta) * srcRadius;
+    out.y = Math.sin(srcTheta) * srcRadius;
   },
   // A gentle two-lobed pinch: radius pulled in harder along two opposing
   // axes than the other two, so a plain circle warps into a soft square-ish
-  // pulse instead of staying uniform.
+  // pulse instead of staying uniform. Base shrink brought from 0.92-0.98
+  // to 0.86-0.94 (a first attempt used 0.80-0.90, matching/exceeding
+  // spiralIn - same overshoot problem as rippleOut above). Meaningfully
+  // stronger than the original without being as aggressive as spiralIn
+  // itself.
   function pinch(x, y, radius, theta, out) {
-    const srcRadius = radius * (0.92 + 0.03 * (1 + Math.sin(6 * theta)));
-    out.x = Math.cos(theta) * srcRadius + _meltJitterX;
-    out.y = Math.sin(theta) * srcRadius + _meltJitterY;
+    const srcRadius = radius * (0.86 + 0.04 * (1 + Math.sin(6 * theta)));
+    out.x = Math.cos(theta) * srcRadius;
+    out.y = Math.sin(theta) * srcRadius;
   },
 ];
 
@@ -3736,13 +3731,6 @@ function meltWarpFrame() {
   const fnB = sched.b !== -1 ? MELT_MOVEMAPS[sched.b] : null;
   const blend = sched.blend;
   const outA = _meltOutA, outB = _meltOutB;
-  // Small and slow relative to the existing motion at the buffer's own
-  // edges (~0.02 max, versus radius 1 reaching the edges) - just enough
-  // to keep dead-centre content (and anything near it) actively
-  // refreshing instead of sitting frozen, without visibly altering the
-  // established spiral/ripple/pinch character everywhere else.
-  _meltJitterX = Math.sin(meltClock * 1.3) * 0.02;
-  _meltJitterY = Math.cos(meltClock * 1.7) * 0.02;
   for (let py = 0; py < h; py++) {
     const ny = MELT_NY[py];
     const rowOffset = py * w;
