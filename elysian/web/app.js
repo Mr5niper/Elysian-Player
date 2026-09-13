@@ -3528,17 +3528,26 @@ const MELT_MOVEMAPS = [
     out.y = Math.sin(srcTheta) * srcRadius;
   },
   // Slow spiral outward with a gentle ripple layered on the radius.
+  // Rotation raised 0.015 -> 0.03 (a first attempt raised this to 0.05,
+  // matching/exceeding spiralIn - too aggressive: reported as choppy and
+  // distorting freshly-drawn content like the cube/sphere particles too
+  // quickly to read clearly). This still gives a real floor at radii
+  // where the ripple term cancels toward zero, without overshooting.
   function rippleOut(x, y, radius, theta, out) {
     const srcRadius = radius + 0.04 * Math.sin(6.2831853 * radius);
-    const srcTheta = theta + 0.015;
+    const srcTheta = theta + 0.03;
     out.x = Math.cos(srcTheta) * srcRadius;
     out.y = Math.sin(srcTheta) * srcRadius;
   },
   // A gentle two-lobed pinch: radius pulled in harder along two opposing
   // axes than the other two, so a plain circle warps into a soft square-ish
-  // pulse instead of staying uniform.
+  // pulse instead of staying uniform. Base shrink brought from 0.92-0.98
+  // to 0.86-0.94 (a first attempt used 0.80-0.90, matching/exceeding
+  // spiralIn - same overshoot problem as rippleOut above). Meaningfully
+  // stronger than the original without being as aggressive as spiralIn
+  // itself.
   function pinch(x, y, radius, theta, out) {
-    const srcRadius = radius * (0.92 + 0.03 * (1 + Math.sin(6 * theta)));
+    const srcRadius = radius * (0.86 + 0.04 * (1 + Math.sin(6 * theta)));
     out.x = Math.cos(theta) * srcRadius;
     out.y = Math.sin(theta) * srcRadius;
   },
@@ -3985,6 +3994,46 @@ const MELT_PARTICLES = [
           const t = d / dots;
           points.push(corners[a].map((v, k) => v + (corners[b][k] - v) * t));
         }
+      }
+      return {
+        count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
+        yawSpeed: 0.006 + Math.random() * 0.01,
+        pitchSpeed: 0.004 + Math.random() * 0.008,
+        out: { x: 0, y: 0, xEnd: 0, yEnd: 0, size: 0.012, style: 1, fade: 0 },
+      };
+    },
+    newframe(state, wave, bars) {
+      const mid = _bandAvg(bars, 6, 20);
+      state.yaw += state.yawSpeed;
+      state.pitch += state.pitchSpeed;
+      state.scale = 0.28 + mid * 0.15;
+    },
+    particle(state, i) {
+      const [x, y, z] = state.points[i];
+      const proj = _melt3DProject(x, y, z, state.yaw, state.pitch);
+      const o = state.out;
+      o.x = proj.x * state.scale; o.y = proj.y * state.scale;
+      o.fade = Math.max(0, 1 - proj.p * 0.7);
+      return o;
+    },
+  },
+  // A rotating dotted sphere - same rotation/projection machinery as the
+  // cube above (same state shape, same _melt3DProject call), just with
+  // points distributed evenly across a sphere's surface instead of along
+  // a cube's edges. Uses the golden-angle (a "Fibonacci sphere") method
+  // to spread points with roughly equal spacing and no pole clustering,
+  // rather than a naive latitude/longitude grid which bunches points
+  // tightly near the top and bottom.
+  {
+    init() {
+      const count = 60;
+      const golden = Math.PI * (3 - Math.sqrt(5));
+      const points = [];
+      for (let i = 0; i < count; i++) {
+        const yv = 1 - (i / (count - 1)) * 2;               // 1 down to -1
+        const radiusAtY = Math.sqrt(Math.max(0, 1 - yv * yv));
+        const theta = golden * i;
+        points.push([Math.cos(theta) * radiusAtY, yv, Math.sin(theta) * radiusAtY]);
       }
       return {
         count: points.length, points, yaw: 0, pitch: 0, scale: 0.3,
