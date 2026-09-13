@@ -1257,7 +1257,7 @@ class Api:
         self._library_scanning = False
         self._set_status(f"Library scan failed: {message}")
 
-    def _do_library_browser(self, view, needle="") -> None:
+    def _do_library_browser(self, view, needle="", remember=True) -> None:
         view = (view if view in ("albums", "artists", "genres", "songs")
                 else "albums")
         needle = str(needle or "")
@@ -1294,7 +1294,8 @@ class Api:
                             # just late, and showing it now would
                             # silently undo whatever the newer one
                             # produced
-                self._post("library_browser_ready", view, items, needle)
+                self._post("library_browser_ready", view, items, needle,
+                           remember)
             finally:
                 self._library_browser_pending.pop(key, None)
 
@@ -1311,9 +1312,10 @@ class Api:
         never go stale waiting for someone to click into them.
         """
         for view in ("albums", "artists", "genres", "songs"):
-            self._do_library_browser(view, "")
+            self._do_library_browser(view, "", remember=False)
 
-    def _do_library_browser_ready(self, view, items, needle="") -> None:
+    def _do_library_browser_ready(self, view, items, needle="",
+                                  remember=True) -> None:
         if view == "albums" and not needle:
             # Fill in the whole library in the background. Anything already
             # cached or queued is skipped, so a refresh during a scan does
@@ -1331,8 +1333,9 @@ class Api:
         self._library_browser = {"view": view, "items": items,
                                  "needle": needle,
                                  "revision": self._library_browser_revision}
-        self._settings["library_view"] = view
-        settings_store.save(self._settings)
+        if remember:
+            self._settings["library_view"] = view
+            settings_store.save(self._settings)
 
     def _do_library_detail(self, kind, key, key2="") -> None:
         self._library_detail_gen += 1

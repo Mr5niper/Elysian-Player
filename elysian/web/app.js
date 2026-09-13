@@ -2522,10 +2522,40 @@ function setLibView(name) {
   renderLibrary();
 
   const a = api();
-  if (a) {
-    libDesiredNeedle = activeNeedle;
-    libLoading = true;
-    libPending++;
+  if (!a) return;
+  libDesiredNeedle = activeNeedle;
+  libLoading = true;
+  libPending++;
+  // The backend has kept every view's unfiltered listing warm since
+  // startup (and refreshed on every library-changing event since), not
+  // just whichever tab happened to be open. If this switch wants that
+  // exact thing (no active filter), use whatever has already finished
+  // directly instead of firing a live query that repeats work already
+  // done. request_browser is still safe to fall through to otherwise -
+  // the backend recognizes an identical query already in flight and
+  // waits on it rather than starting a second one.
+  if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
+    a.library_get_prewarmed(name).then((b) => {
+      const stillWanted = name === libView && libDesiredNeedle === "";
+      if (stillWanted && b && Array.isArray(b.items)
+          && (b.needle || "") === "") {
+        libPending--;
+        libLoading = false;
+        libItems = b.items;
+        renderLibrary();
+        libTabState[libView] = captureCurrentLibTabState();
+        libTabState[libView].stale = false;
+      } else if (stillWanted) {
+        a.library_request_browser(name, activeNeedle);
+      } else {
+        libPending--;
+      }
+      schedule();
+    }).catch(() => {
+      a.library_request_browser(name, activeNeedle);
+      schedule();
+    });
+  } else {
     a.library_request_browser(name, activeNeedle);
     schedule();
   }
@@ -2590,8 +2620,31 @@ $("libfilter").addEventListener("input", () => {
     const a = api();
     if (!a) return;
     libPending++;
-    a.library_request_browser(libView, needle);
-    schedule();
+    if (!needle && typeof a.library_get_prewarmed === "function") {
+      a.library_get_prewarmed(libView).then((b) => {
+        const stillWanted = libDesiredNeedle === needle;
+        if (stillWanted && b && Array.isArray(b.items)
+            && (b.needle || "") === "") {
+          libPending--;
+          libLoading = false;
+          libItems = b.items;
+          renderLibrary();
+          libTabState[libView] = captureCurrentLibTabState();
+          libTabState[libView].stale = false;
+        } else if (stillWanted) {
+          a.library_request_browser(libView, needle);
+        } else {
+          libPending--;
+        }
+        schedule();
+      }).catch(() => {
+        a.library_request_browser(libView, needle);
+        schedule();
+      });
+    } else {
+      a.library_request_browser(libView, needle);
+      schedule();
+    }
   }, 120);
 });
 
@@ -2901,8 +2954,34 @@ function applyLibraryTick(tick) {
           libDesiredNeedle = $("libfilter").value.trim();
           libLoading = true;
           libPending++;
-          a.library_request_browser(libView, libDesiredNeedle);
-          schedule();
+          const thisView = libView;
+          const thisNeedle = libDesiredNeedle;
+          if (!thisNeedle && typeof a.library_get_prewarmed === "function") {
+            a.library_get_prewarmed(thisView).then((b) => {
+              const stillWanted = thisView === libView
+                                 && libDesiredNeedle === thisNeedle;
+              if (stillWanted && b && Array.isArray(b.items)
+                  && (b.needle || "") === "") {
+                libPending--;
+                libLoading = false;
+                libItems = b.items;
+                renderLibrary();
+                libTabState[libView] = captureCurrentLibTabState();
+                libTabState[libView].stale = false;
+              } else if (stillWanted) {
+                a.library_request_browser(thisView, thisNeedle);
+              } else {
+                libPending--;
+              }
+              schedule();
+            }).catch(() => {
+              a.library_request_browser(thisView, thisNeedle);
+              schedule();
+            });
+          } else {
+            a.library_request_browser(thisView, thisNeedle);
+            schedule();
+          }
         }
       }
     }).catch(() => {});
