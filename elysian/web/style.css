@@ -464,6 +464,15 @@ html, body {
 #tagmodal-buttons .tbtn { min-width: 72px; }
 #tagmodal-buttons .tbtn:disabled { opacity: 0.5; }
 .tbtn:disabled { opacity: 0.5; cursor: default; }
+#tag-save.saving::before {
+  content: ""; display: inline-block; width: 10px; height: 10px;
+  margin-right: 6px; vertical-align: -1px;
+  border: 2px solid rgba(255,255,255,0.35);
+  border-top-color: var(--text);
+  border-radius: 50%;
+  animation: tagsave-spin 0.7s linear infinite;
+}
+@keyframes tagsave-spin { to { transform: rotate(360deg); } }
 
 #tagmodal-tabs {
   display: flex; gap: 4px; margin-bottom: 12px;
@@ -477,7 +486,11 @@ html, body {
 }
 .tagtab:hover { color: var(--text); }
 .tagtab.active { color: var(--text); border-bottom-color: var(--accent); }
-#tagmodal-body.tagpane-hidden, #tagmodal-art-body.tagpane-hidden { display: none; }
+#tagmodal-panes { display: grid; }
+#tagmodal-body, #tagmodal-art-body { grid-area: 1 / 1; }
+#tagmodal-body.tagpane-hidden, #tagmodal-art-body.tagpane-hidden {
+  visibility: hidden; pointer-events: none;
+}
 
 #tagmodal-art-body {
   display: flex; flex-direction: column; align-items: center; gap: 14px;

@@ -1229,7 +1229,10 @@ function renderTagEditor() {
     errs.classList.add("hidden");
   }
 
-  $("tag-save").disabled = libEditor.saving || libEditor.loading;
+  const saveBtn = $("tag-save");
+  saveBtn.disabled = libEditor.saving || libEditor.loading;
+  saveBtn.classList.toggle("saving", libEditor.saving);
+  saveBtn.textContent = libEditor.saving ? "Saving\u2026" : "Save";
   $("tag-cancel").disabled = libEditor.saving;
 }
 
