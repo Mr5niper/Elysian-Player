@@ -55,6 +55,11 @@ class Api:
         # open for the track it's currently playing or paused on; consumed
         # once that save finishes, whichever way, to put playback back.
         self._tag_save_resume = None
+        # Album/artist keys whose cached cover a tag save in flight might
+        # invalidate - the album(s) the edited files belonged to just
+        # before the write. Set in _do_library_save_editor, consumed in
+        # _do_library_save_done.
+        self._tag_save_old_art_keys: set = set()
         self._shuffle = bool(self._settings["shuffle"])
         self._repeat = self._settings["repeat"]
         self._engine.set_volume(self._settings.get("volume", 0.8))
@@ -1571,6 +1576,18 @@ class Api:
         if not clean or not changes:
             self._do_library_close_editor()
             return
+        # Album/artist grouping for each file *before* the write, so a
+        # save that changes the album tag itself invalidates the album
+        # it left as well as whichever one it landed on - both may have
+        # a persistent cover cached that a save no longer reflects.
+        self._tag_save_old_art_keys = set()
+        for p in clean:
+            try:
+                info = self._library.album_key_for_path(p)
+            except Exception:
+                info = None
+            if info:
+                self._tag_save_old_art_keys.add(f"{info[1]}\u0000{info[0]}")
         self._library_editor["saving"] = True
         self._bump_library_editor()
 
@@ -1625,6 +1642,36 @@ class Api:
                 d = self._library_detail
                 self._do_library_detail(d.get("kind", ""), d.get("key", ""),
                                         d.get("key2", ""))
+            # A save can change an embedded cover, or change which album a
+            # file belongs to - either way, whatever this session already
+            # has cached for the affected album(s) may no longer be
+            # right. The persistent on-disk cache already self-corrects
+            # on its own next lookup (the edit changed the file's mtime),
+            # but this session's in-memory shortcut does not know that
+            # yet, so it gets dropped here and the album is immediately
+            # re-requested rather than waiting for something else to ask
+            # for it.
+            affected = set(self._tag_save_old_art_keys)
+            for p in written:
+                try:
+                    info = self._library.album_key_for_path(p)
+                except Exception:
+                    info = None
+                if info:
+                    affected.add(f"{info[1]}\u0000{info[0]}")
+            for p in written:
+                self._art_cache.pop(p, None)
+            changed = False
+            for key in affected:
+                if key not in self._library_art:
+                    continue
+                self._library_art.pop(key, None)
+                artist, _, album = key.partition("\u0000")
+                self._do_library_art(album, artist)
+                changed = True
+            if changed:
+                self._library_art_revision += 1
+        self._tag_save_old_art_keys = set()
         self._resume_after_tag_save()
         if failed:
             # Keep the editor open so the failures are visible, rather than
