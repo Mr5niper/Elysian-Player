@@ -1329,11 +1329,20 @@ class Api:
             # the moment it's opened.
             self._library_browser_cache[view] = {"items": items,
                                                  "needle": needle}
-        self._library_browser_revision += 1
-        self._library_browser = {"view": view, "items": items,
-                                 "needle": needle,
-                                 "revision": self._library_browser_revision}
         if remember:
+            # Only an actual navigation updates which view is "current" -
+            # a background prewarm completing must never touch this, or
+            # whichever of the four prewarm queries finished last (almost
+            # always Songs, being by far the biggest) would silently
+            # become "the current view" internally, and the next
+            # unrelated refresh trigger (a scan tick, a tag save) would
+            # then re-browse and persist that contaminated value with
+            # its own default remember=True - exactly what was
+            # intermittently overwriting the real last-used tab.
+            self._library_browser_revision += 1
+            self._library_browser = {"view": view, "items": items,
+                                     "needle": needle,
+                                     "revision": self._library_browser_revision}
             self._settings["library_view"] = view
             settings_store.save(self._settings)
 
