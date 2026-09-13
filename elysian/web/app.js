@@ -1153,12 +1153,25 @@ const TAG_FIELD_INPUTS = {
   year: "tag-year",
 };
 
+let tagEditorTab = "fields";
+
+function setTagTab(name) {
+  tagEditorTab = name;
+  $("tagtab-fields").classList.toggle("active", name === "fields");
+  $("tagtab-art").classList.toggle("active", name === "art");
+  $("tagmodal-body").classList.toggle("tagpane-hidden", name !== "fields");
+  $("tagmodal-art-body").classList.toggle("tagpane-hidden", name !== "art");
+}
+$("tagtab-fields").addEventListener("click", () => setTagTab("fields"));
+$("tagtab-art").addEventListener("click", () => setTagTab("art"));
+
 function openTagEditor(paths) {
   const a = api();
   if (!a || !paths.length) return;
   libEditorTouched.clear();
   pendingArtDataUrl = null;
   $("tag-art-whole-album").checked = false;
+  setTagTab("fields");
   a.library_open_editor(paths);
 }
 
@@ -1169,6 +1182,7 @@ function closeTagEditor() {
   libEditorTouched.clear();
   pendingArtDataUrl = null;
   $("tag-art-whole-album").checked = false;
+  setTagTab("fields");
 }
 
 function renderTagEditor() {
@@ -1198,7 +1212,7 @@ function renderTagEditor() {
   }
 
   const artUrl = pendingArtDataUrl || libEditor.data.art || null;
-  const artBox = $("tag-art-preview");
+  const artBox = $("tag-art-preview-large");
   artBox.classList.toggle("tag-art-empty", !artUrl);
   artBox.style.backgroundImage = artUrl ? `url("${artUrl}")` : "none";
 
@@ -1394,6 +1408,25 @@ $("tag-art-paste").addEventListener("click", async () => {
     const img = await loadImageFromDataUrl(dataUrl);
     openArtCropModal(img);
   } catch { /* not a decodable image; nothing to do */ }
+});
+
+// Click the large preview to reposition/re-crop whatever is currently
+// showing - the saved cover, or an image already picked/pasted this
+// session - rather than only being able to crop a brand-new image.
+$("tag-art-preview-large").addEventListener("click", async () => {
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  if (!artUrl) return;
+  try {
+    const img = await loadImageFromDataUrl(artUrl);
+    openArtCropModal(img);
+  } catch { /* not a decodable image; nothing to do */ }
+});
+
+$("tag-art-copy").addEventListener("click", async () => {
+  const a = api();
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  if (!a || !artUrl) return;
+  await a.copy_image_to_clipboard(artUrl);
 });
 
 /* Windows paths are case-insensitive, and the path for whatever is

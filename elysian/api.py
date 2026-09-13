@@ -8,6 +8,7 @@ import base64
 import os
 import queue
 import random
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -1936,6 +1937,78 @@ class Api:
             log.warning("clipboard image paste failed", exc_info=True)
             return None
 
+    def copy_image_to_clipboard(self, data_url) -> bool:
+        """Push an image (as a data URL) onto the system clipboard.
+
+        Writes both CF_DIB (older apps, classic Paint) and a registered
+        "PNG" format (modern apps that want alpha), the same two formats
+        the Pyicon Editor's own clipboard copy uses - this is that same
+        approach, just working from a data URL already sitting in the
+        frontend rather than a live canvas. Windows-only; returns False
+        anywhere else.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from io import BytesIO
+
+            from PIL import Image
+
+            _header, _, b64data = str(data_url or "").partition(",")
+            if not b64data:
+                return False
+            img = Image.open(BytesIO(base64.b64decode(b64data)))
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            user32.OpenClipboard.argtypes = [wintypes.HWND]
+            user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+            user32.SetClipboardData.restype = wintypes.HANDLE
+            kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+            kernel32.GlobalAlloc.restype = wintypes.HANDLE
+            kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+            kernel32.GlobalLock.restype = wintypes.LPVOID
+            kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+            user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+            user32.RegisterClipboardFormatW.restype = wintypes.UINT
+
+            user32.OpenClipboard(0)
+            try:
+                user32.EmptyClipboard()
+
+                out_dib = BytesIO()
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode in ("RGBA", "LA") or (
+                        img.mode == "P" and "transparency" in img.info):
+                    bg.paste(img, mask=img.convert("RGBA").split()[3])
+                else:
+                    bg.paste(img.convert("RGB"))
+                bg.save(out_dib, "DIB")
+                data_dib = out_dib.getvalue()
+                h_dib = kernel32.GlobalAlloc(0x0002, len(data_dib))
+                p_dib = kernel32.GlobalLock(h_dib)
+                ctypes.memmove(p_dib, data_dib, len(data_dib))
+                kernel32.GlobalUnlock(h_dib)
+                user32.SetClipboardData(8, h_dib)  # CF_DIB
+
+                png_format = user32.RegisterClipboardFormatW("PNG")
+                out_png = BytesIO()
+                img.save(out_png, "PNG")
+                data_png = out_png.getvalue()
+                h_png = kernel32.GlobalAlloc(0x0002, len(data_png))
+                p_png = kernel32.GlobalLock(h_png)
+                ctypes.memmove(p_png, data_png, len(data_png))
+                kernel32.GlobalUnlock(h_png)
+                user32.SetClipboardData(png_format, h_png)
+            finally:
+                user32.CloseClipboard()
+            return True
+        except Exception:
+            log.warning("clipboard image copy failed", exc_info=True)
+            return False
+
     def library_get_editor_state(self) -> dict:
         src = self._library_editor
         return {
@@ -2331,7 +2404,7 @@ class Api:
         "library_request_art", "library_visible_art", "library_get_art",
         "library_open_editor", "library_close_editor",
         "library_save_editor", "library_get_editor_state",
-        "paste_image_from_clipboard",
+        "paste_image_from_clipboard", "copy_image_to_clipboard",
     })
 
     #: Public for the host process only, never called from JavaScript, but

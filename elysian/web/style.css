@@ -465,26 +465,40 @@ html, body {
 #tagmodal-buttons .tbtn:disabled { opacity: 0.5; }
 .tbtn:disabled { opacity: 0.5; cursor: default; }
 
-#tag-art-section {
-  display: flex; gap: 12px; align-items: flex-start; margin-bottom: 2px;
+#tagmodal-tabs {
+  display: flex; gap: 4px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--line);
 }
-#tag-art-preview {
-  width: 72px; height: 72px; border-radius: 8px; flex: none;
+.tagtab {
+  background: none; border: none; cursor: pointer;
+  color: var(--muted); font-size: 12px; font-family: inherit;
+  padding: 6px 12px; border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.tagtab:hover { color: var(--text); }
+.tagtab.active { color: var(--text); border-bottom-color: var(--accent); }
+#tagmodal-body.tagpane-hidden, #tagmodal-art-body.tagpane-hidden { display: none; }
+
+#tagmodal-art-body {
+  display: flex; flex-direction: column; align-items: center; gap: 14px;
+}
+#tag-art-preview-large {
+  width: 200px; height: 200px; border-radius: 10px;
   background-size: cover; background-position: center;
-  border: 1px solid var(--line);
+  border: 1px solid var(--line); cursor: pointer;
 }
-#tag-art-preview.tag-art-empty {
+#tag-art-preview-large.tag-art-empty {
   background-color: rgba(0,0,0,0.28);
   background-image: none;
   border-style: dashed;
+  cursor: default;
 }
 #tag-art-controls {
-  display: flex; flex-direction: column; gap: 7px; padding-top: 2px;
+  display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;
 }
-#tag-art-controls .tbtn {
-  align-self: flex-start; min-width: 96px; padding: 5px 10px; font-size: 11.5px;
-}
+#tag-art-controls .tbtn { min-width: 76px; padding: 6px 10px; font-size: 11.5px; }
 #tag-art-file.hidden { display: none; }
+#tag-art-whole-album-row { align-self: flex-start; }
 
 #artcropmodal {
   position: fixed; inset: 0;
