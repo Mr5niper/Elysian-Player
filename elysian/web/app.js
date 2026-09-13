@@ -60,12 +60,14 @@ function setView(name) {
     n.classList.toggle("active", n.dataset.view === name));
   if (name === "now") {
     prev.waveW = 0; prev.waveSig = null; drawWave();
-    // vizMode itself was left untouched by navigating away (see the else
-    // branch below), so this resumes on the same mode - but nothing to
-    // reset here: the mode's own state was already cleared out the
-    // moment we left (below), not held onto in memory in the meantime.
-    // Resuming just means letting vizPoll() start pulling frames again.
-    vizPoll();
+    // Runs the exact same "enter this mode" sequence cycleVisualizer
+    // uses when double-clicking lands on a mode - not separate,
+    // only-supposedly-equivalent logic. vizMode itself was left
+    // untouched by navigating away (see the else branch below), and its
+    // state was already cleared out the moment we left, not held onto
+    // in memory in the meantime - so this now behaves identically to
+    // double-clicking back to the same mode from the album-cover view.
+    if (vizMode !== 0) enterVisualizerMode();
   } else {
     // Clears every mode's own state immediately on leaving - nothing
     // sits frozen in memory for the entire time this view isn't visible.
@@ -75,11 +77,6 @@ function setView(name) {
     // back up from state that had been held onto the whole time away.
     resetVisualizerModeState();
     clearTimeout(vizTimer);
-    if (vizMode !== 0) {
-      const c = $("visualizer");
-      const ctx = c.getContext("2d");
-      ctx.clearRect(0, 0, c.width, c.height);
-    }
   }
   // While hidden the list has no height, so its row window was computed
   // against a fallback. Recompute against the real height now that it shows,
@@ -2743,6 +2740,28 @@ function stopVisualizer() {
   $("wave").classList.remove("hidden");
 }
 
+// The exact sequence for entering a non-zero visualizer mode - shown
+// canvas, hidden artwork/waveform, cleared rect, resumed polling. Shared
+// by cycleVisualizer (the proven-working double-click path) and setView
+// (returning to Now Playing), so returning behaves identically to
+// double-clicking back to the same mode instead of running separate,
+// only-supposedly-equivalent logic.
+function enterVisualizerMode() {
+  $("visualizer").classList.remove("hidden");
+  $("artwrap").classList.add("hidden");
+  $("wave").classList.add("hidden");
+  // Cleared here, synchronously, regardless of which mode is being
+  // entered - not just 3/4/5. Making the canvas visible happens
+  // immediately, but the first real draw for the new mode only arrives
+  // asynchronously (after the next visualizer_frame() round trip), and
+  // in between, whatever this canvas last held would otherwise flash on
+  // screen for that gap.
+  const c = $("visualizer");
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, c.width, c.height);
+  vizPoll();
+}
+
 function cycleVisualizer() {
   vizMode = (vizMode + 1) % 6;
   if (vizMode === 0) {
@@ -2753,22 +2772,7 @@ function cycleVisualizer() {
     $("wave").classList.remove("hidden");
     return;
   }
-  $("visualizer").classList.remove("hidden");
-  $("artwrap").classList.add("hidden");
-  $("wave").classList.add("hidden");
-  // Cleared here, synchronously, regardless of which mode is being
-  // entered - not just 3/4/5. Making the canvas visible happens
-  // immediately, but the first real draw for the new mode only arrives
-  // asynchronously (after the next visualizer_frame() round trip), and
-  // in between, whatever this canvas last held (most visibly, a melt
-  // frame - going back to mode 0 only hides the canvas, it never clears
-  // the pixels underneath) would otherwise flash on screen for that gap.
-  {
-    const c = $("visualizer");
-    const ctx = c.getContext("2d");
-    ctx.clearRect(0, 0, c.width, c.height);
-  }
-  vizPoll();
+  enterVisualizerMode();
 }
 
 function vizPoll() {
@@ -3405,10 +3409,29 @@ let meltCtx = null;
 let meltPixels = null;      // ImageData: current frame, about to be read from
 let meltScratch = null;     // ImageData: next frame, being built
 let meltInited = false;
-let meltClock = 0;          // seconds, advances once per drawMelt() call -
-                             // frame-driven rather than wall-clock, so it
-                             // naturally stops advancing whenever this mode
-                             // isn't actually being polled/drawn
+let meltClock = 0;          // seconds - tracks actual elapsed wall-clock
+                             // time (see meltLastFrameTime below), so it
+                             // stays accurate regardless of whether real
+                             // frame delivery is perfectly steady. Still
+                             // naturally stops advancing whenever this
+                             // mode isn't actually being polled/drawn,
+                             // since nothing updates it unless drawMelt()
+                             // itself runs.
+let meltLastFrameTime = 0;  // performance.now() at the last drawMelt()
+                             // call - used to compute the real elapsed
+                             // time each frame represents, rather than
+                             // assuming every call represents a fixed
+                             // 1/30s. That fixed assumption was the
+                             // actual bug behind melt seeming to
+                             // transition much slower after returning
+                             // from another view than after cycling
+                             // through modes without ever leaving "now":
+                             // if real frame delivery is ever irregular
+                             // for any reason (a view switch doing DOM/
+                             // layout work being an obvious candidate),
+                             // meltClock drifted from real time
+                             // regardless, since it had no way to know
+                             // frames weren't landing on schedule.
 
 /* ---------- Independent hold/fade scheduler (part 5) ----------
    Each of the four preset categories (movemap, colormap, waveform,
@@ -3442,7 +3465,17 @@ function meltMakeScheduler(count, holdBase, fadeBase) {
     a: Math.floor(Math.random() * count),
     b: -1,
     blend: 0,               // 0 = fully on `a`, 1 = fully on `b`
-    holdUntil: meltClock + meltJitter(holdBase),
+    // The very first hold, right after a fresh start, is capped short
+    // (a few seconds) instead of the full jittered holdBase range.
+    // meltJitter(holdBase) can roll up to 1.5x holdBase (up to ~21s for
+    // the slowest category), and with four independent schedulers all
+    // rolling fresh every time this mode starts, it's entirely possible
+    // for all four to land on a long first hold at once - showing no
+    // visible transition for a long stretch right when it starts.
+    // meltTickScheduler computes every hold AFTER this first one from
+    // sched.holdBase directly, unaffected by this - only the initial
+    // wait is shortened, steady-state cycling pace is untouched.
+    holdUntil: meltClock + meltJitter(Math.min(holdBase, 4)),
     fadeUntil: -1,
     fadeDuration: fadeBase,
   };
@@ -3707,6 +3740,7 @@ function meltInit() {
   meltPixels = meltCtx.getImageData(0, 0, MELT_W, MELT_H);
   meltScratch = meltCtx.createImageData(MELT_W, MELT_H);
   meltClock = 0;
+  meltLastFrameTime = performance.now();
 
   meltMovemapSched = meltMakeScheduler(
     MELT_MOVEMAPS.length, MELT_HOLD_FADE.movemap.hold, MELT_HOLD_FADE.movemap.fade);
@@ -4145,7 +4179,23 @@ function drawMelt(ctx, w, h, bars, wave) {
   // replaces parts 1-4's fixed preset picks with the real vis.ini-style
   // behavior: each category holding, then crossfading to a new random
   // pick, entirely on its own randomized timer.
-  meltClock += 1 / 30;
+  //
+  // Advances by actual measured elapsed time, not a fixed 1/30s
+  // assumption - the fixed assumption was the real bug behind
+  // transitions seeming much slower after returning from another view
+  // than after cycling through modes without ever leaving "now": if
+  // real frame delivery is ever irregular (a view switch doing DOM/
+  // layout work is an obvious candidate), meltClock drifted from real
+  // time regardless, since it had no way to know frames weren't landing
+  // on schedule - a fixed assumption always claims "1/30s passed" even
+  // when the actual gap was much larger. Clamped to 0.1s so a genuinely
+  // long gap (the tab backgrounded, a very slow frame) doesn't cause
+  // meltClock to leap forward and skip past transitions instead of just
+  // running them at the normal pace once frames resume.
+  const _meltNow = performance.now();
+  const _meltDt = Math.min(0.1, Math.max(0, (_meltNow - meltLastFrameTime) / 1000));
+  meltLastFrameTime = _meltNow;
+  meltClock += _meltDt;
   meltTickAllSchedulers();
 
   // 1. Warp: resample the buffer we ended last frame with through the
