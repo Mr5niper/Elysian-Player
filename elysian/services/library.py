@@ -225,6 +225,30 @@ class LibraryService:
                 # skipped, so an index naming a newly added column would fail
                 # and abort the whole script before the migration ran.
                 con.execute("CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir)")
+                # art_cache predates source_key. Backfilled in Python since
+                # pathutil.key() (normcase + abspath) isn't expressible in
+                # SQL, and there are only ever as many rows as albums, not
+                # tracks.
+                have_art = {r["name"] for r in
+                            con.execute("PRAGMA table_info(art_cache)")}
+                if "source_key" not in have_art:
+                    con.execute(
+                        "ALTER TABLE art_cache ADD COLUMN source_key "
+                        "TEXT DEFAULT ''")
+                    rows = list(con.execute(
+                        "SELECT key, source_path FROM art_cache"))
+                    for row in rows:
+                        try:
+                            skey = pathutil.key(row["source_path"])
+                        except Exception:
+                            skey = ""
+                        con.execute(
+                            "UPDATE art_cache SET source_key = ? "
+                            "WHERE key = ?", (skey, row["key"]))
+                    log.info("art cache upgraded; backfilled source_key "
+                             "for %d existing entries", len(rows))
+                con.execute("CREATE INDEX IF NOT EXISTS idx_art_cache_source_key "
+                            "ON art_cache(source_key)")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
@@ -268,6 +292,28 @@ class LibraryService:
                 cur = con.execute(
                     "DELETE FROM tracks WHERE key LIKE ? ESCAPE '\\'",
                     (_like_prefix(folder),))
+                # Cached covers whose source file lived under this root
+                # are now pointing at nothing this library still indexes.
+                # Best-effort: a thumbnail file that fails to delete just
+                # becomes an orphan on disk, which is harmless, so this
+                # never blocks the root/track removal that must succeed.
+                try:
+                    pattern = _like_prefix(folder)
+                    stale = con.execute(
+                        "SELECT thumb_file FROM art_cache "
+                        "WHERE source_key LIKE ? ESCAPE '\\'",
+                        (pattern,)).fetchall()
+                    con.execute(
+                        "DELETE FROM art_cache WHERE source_key LIKE ? "
+                        "ESCAPE '\\'", (pattern,))
+                    for row in stale:
+                        try:
+                            (config.ART_CACHE_DIR / row["thumb_file"]).unlink()
+                        except OSError:
+                            pass
+                except Exception:
+                    log.exception("could not purge cached art for root %s",
+                                  folder)
                 con.commit()
                 return cur.rowcount or 0
             except Exception:
@@ -665,12 +711,15 @@ class LibraryService:
                 try:
                     con.execute(
                         "INSERT INTO art_cache (key, source_path, "
-                        "source_mtime, thumb_file) VALUES (?, ?, ?, ?) "
+                        "source_mtime, thumb_file, source_key) "
+                        "VALUES (?, ?, ?, ?, ?) "
                         "ON CONFLICT(key) DO UPDATE SET "
                         "source_path=excluded.source_path, "
                         "source_mtime=excluded.source_mtime, "
-                        "thumb_file=excluded.thumb_file",
-                        (key, source_path, source_mtime, thumb_file))
+                        "thumb_file=excluded.thumb_file, "
+                        "source_key=excluded.source_key",
+                        (key, source_path, source_mtime, thumb_file,
+                         pathutil.key(source_path)))
                     con.commit()
                 finally:
                     con.close()
