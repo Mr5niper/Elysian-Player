@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.5.2.0
+- **Version**: 2.6.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -20,7 +20,17 @@ megabytes. Audio runs on miniaudio.
   files fall back to their filename.
 * Shows embedded album art. If a track has none, the folder it lives in is
   checked for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png`
-  or `folder.png`.
+  or `folder.png`. Once resolved, a cover is cached to local disk keyed by its
+  album and artist tag, so it only ever needs decoding once, ever - not once
+  per launch. A cover can also be replaced directly from the tag editor: pick
+  a file, paste one from the clipboard, or copy the current cover out to
+  paste into another program, with a zoom/pan crop tool in between. See
+  [Album Art Editing](#album-art-editing) below.
+* Pick the app's accent color from a built-in color picker (a
+  saturation/value square, a hue strip, and hex/RGB fields - no OS dialog
+  involved). Every accent shade, background surface, and the waveform and
+  other visualizers all re-derive from whatever is picked, and the choice is
+  remembered across restarts. See [Appearance](#appearance) below.
 * Draws a waveform of the current track.
 * Double-click the cover or the waveform to swap in a live visualizer over
   the whole row instead: spectrum bars, then an oscilloscope trace, then
@@ -96,11 +106,12 @@ unreachable.
   Artists, Genres and Songs is a visit, not a reset.
 * **Edit tags directly on the files.** Select one or more tracks, or open an
   album, and Edit Tags lets you change title, artist, album, album artist,
-  genre, track and disc number, year, and compilation. A field left alone
-  across a mixed selection is shown blank rather than guessed at, and only
-  the fields you actually touch get written. Editing the track that's
-  currently playing pauses it just long enough to save, then picks back up
-  right where it left off.
+  genre, track and disc number, year, and compilation, on their own tab. A
+  field left alone across a mixed selection is shown blank rather than
+  guessed at, and only the fields you actually touch get written. Editing
+  the track that's currently playing pauses it just long enough to save,
+  then picks back up right where it left off. A separate Album Art tab
+  handles the cover - see [Album Art Editing](#album-art-editing) below.
 * **Queue tracks straight from an open album, artist or genre.** Add to
   playlist queues whatever's selected, or everything shown if nothing is.
   Add all to playlist always queues everything regardless of selection, so
@@ -110,8 +121,13 @@ unreachable.
   track count and total time underneath. The cover comes from the first
   track in the album that actually carries one, so a compilation whose
   opening file happens to be untagged still gets its artwork from wherever it
-  actually lives. Covers for whatever you are looking at are fetched first;
-  everything else in the library fills in quietly in the background.
+  actually lives. All four tabs, and the background cover fill, start
+  populating the moment the app launches - not on first visit to Library -
+  and stay warm across everything that can change them (a rescan, a folder
+  removed, a tag edit). Whatever is actually on screen is still resolved
+  first if it hasn't been already; everything else fills in behind it.
+
+  <!-- SCREENSHOT PLACEHOLDER: library album grid -->
 * **Scanning a folder works one subfolder at a time**, and each one is
   written and made browsable the moment it finishes rather than all at once
   at the end. A rescan only re-reads a file if its modification time
@@ -129,6 +145,47 @@ unreachable.
   already seen needs no file opened at all to show its title and artist,
   which is what makes browsing a large collection on a network share feel
   normal instead of slow.
+
+### Album Art Editing
+
+<!-- SCREENSHOT PLACEHOLDER: tag editor, Album Art tab -->
+
+A separate tab in the tag editor, next to the text fields, so it can never
+be confused with an apply-to-everything checkbox.
+
+* **Choose a file, paste one from the clipboard, or copy the current cover**
+  to paste into another program. All three work on the true original image,
+  not a small downsized copy kept for the app's own display.
+* **A built-in crop tool** positions and zooms whatever you picked or pasted
+  in a square viewport before it's saved. Leave it alone and the whole
+  original image is used, resized so its longer side is 500px, keeping its
+  natural aspect ratio - a tall cover stays tall, a wide one stays wide.
+  Zooming in crops it to a square instead. Nothing about a cover is ever
+  forced to square unless you actually zoom in to make it one.
+
+  <!-- SCREENSHOT PLACEHOLDER: crop tool, zoom + drag -->
+* **Applies to whichever files are open in the editor**, the same as every
+  other field - one track, or a whole album if that's what's selected. A
+  checkbox lets it apply to every track on the album instead, regardless of
+  the current selection; every other field's scope is unaffected either way.
+* **Written with mutagen directly**, no external tools: ID3 APIC for MP3 and
+  WAV, FLAC's native picture block for FLAC, and the standard base64
+  `METADATA_BLOCK_PICTURE` convention for OGG and Opus.
+
+### Appearance
+
+<!-- SCREENSHOT PLACEHOLDER: theme color picker -->
+
+A small color-wheel button next to the mute icon opens a built-in color
+picker - a saturation/value square, a hue strip, and hex/R/G/B fields, kept
+in sync with each other. No OS dialog is involved anywhere in it.
+
+Whatever color is picked becomes the app's accent color, and every other
+shade - buttons, panels, borders, the waveform, and every other visualizer
+except Melt, which keeps its own independent palette - re-derives from it
+using the same relative shading the built-in red theme already has. Default
+resets to that original red; Cancel reverts to whatever was active before
+the picker opened; OK saves the choice, which is remembered across restarts.
 
 ## Controls
 
@@ -176,8 +233,12 @@ until it has to:
   enumerated. Indexing a folder into the Library works the same way, one
   subfolder at a time, described above.
 * Album art for the playlist is fetched only for the track that is playing.
-  Library cover art is fetched for whatever is on screen first and fills in
-  the rest afterward, also described above.
+  Library covers are cached to local disk the first time they're resolved,
+  keyed by album and artist tag - every launch after that reads the small
+  cached file instead of decoding the original again, so a large library
+  over a slow share only ever pays that cost once, not on every startup. All
+  four library tabs, and the cover fill, start populating the moment the app
+  launches rather than waiting for a first visit to Library.
 * Startup does not check that every saved path still exists.
 * Every operation that can block runs on a worker thread. The interface only
   ever reads a precomputed snapshot, so a slow share cannot stall a button.
@@ -199,6 +260,11 @@ The library index is a SQLite database at `.elysian_library.db`, also in your
 home folder. It holds the tags and file paths it has seen, never the audio
 itself. Deleting it loses nothing but the index: the folders are remembered in
 the settings file and a rescan rebuilds it.
+
+Resolved album covers are cached as small JPEGs in `.elysian_art_cache`,
+also in your home folder, indexed by the same database above. Deleting that
+folder loses nothing but the cache: covers just get decoded again the next
+time each one is needed.
 
 If you are updating from a version older than 2.4.0.0 and already have folders
 indexed, the next scan will take longer than usual, since a couple of columns
