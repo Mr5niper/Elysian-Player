@@ -2992,6 +2992,414 @@ function applyLibraryTick(tick) {
   }
 }
 
+/* ---------- theme color ---------- */
+
+function hexToHsl(hex) {
+  hex = hex.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16) / 255;
+  const g = parseInt(hex.slice(2, 4), 16) / 255;
+  const b = parseInt(hex.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s;
+  const l = (max + min) / 2;
+  if (max === min) {
+    h = s = 0;
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return { h: h * 360, s: s * 100, l: l * 100 };
+}
+
+function hslToHex(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  s = Math.max(0, Math.min(100, s)) / 100;
+  l = Math.max(0, Math.min(100, l)) / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToRgbTriplet(hex) {
+  hex = hex.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `${r},${g},${b}`;
+}
+
+/* Ratios of each shade's saturation/lightness to the base's own, taken
+   directly from the original red palette (--accent-hi #e04b3c as base):
+     accent      S x0.836  L x0.842
+     accent-dim  S x0.821  L x0.627
+     accent-wash S x0.671  L x0.275
+   Same hue throughout - only saturation and lightness scale - so picking
+   any base color reproduces the same relative shading the red theme
+   already has, rather than a fixed offset that would land wrong for a
+   very different starting saturation/lightness. */
+// panel/panel-2/line/etc were hand-tuned with their own warm reddish
+// undertone in the original red theme, at a lower saturation than the
+// accent itself. These now share the accent's exact hue (no offset -
+// an earlier version preserved each one's original hue OFFSET from the
+// accent, which kept things in the same color family for red, but the
+// same fixed rotation pushed a very different base hue like teal or
+// yellow into a completely different perceived color - confirmed by
+// sampling actual rendered pixels showing the panel's hue drifting by
+// the same ~35deg the offset applied, regardless of direction). --bg
+// is deliberately left alone: unlike the others, it was independently
+// blue-toned to begin with, not on the same warm-tint family at all.
+const ORIGINAL_BASE_S = 72.6;  // saturation of the original --accent-hi
+// sRatio: this neutral's original saturation as a fraction of the
+// original base's saturation - scaling by the CURRENT base's own
+// saturation means a desaturated pick (gray/black/white) correctly
+// produces a desaturated (truly neutral) result. A fixed absolute
+// saturation here (the previous version) applied the same tint no
+// matter what was picked, including pure black or white - verified
+// directly: black, white, and gray all produced the identical
+// #1c1419 before this fix.
+const NEUTRAL_ORIGINALS = {
+  panel: { sRatio: 16.7 / ORIGINAL_BASE_S, l: 9.4 },
+  panel2: { sRatio: 10.8 / ORIGINAL_BASE_S, l: 12.7 },
+  line: { sRatio: 10.5 / ORIGINAL_BASE_S, l: 14.9 },
+  sliderTrack: { sRatio: 12.2 / ORIGINAL_BASE_S, l: 16.1 },
+  tctlHover: { sRatio: 11.1 / ORIGINAL_BASE_S, l: 17.6 },
+  scrollbarThumb: { sRatio: 10.9 / ORIGINAL_BASE_S, l: 18.0 },
+  tctlActive: { sRatio: 11.9 / ORIGINAL_BASE_S, l: 21.4 },
+  scrollbarThumbHover: { sRatio: 12.1 / ORIGINAL_BASE_S, l: 25.9 },
+};
+
+function deriveNeutrals(baseHex) {
+  const { h, s } = hexToHsl(baseHex);
+  const out = {};
+  for (const k in NEUTRAL_ORIGINALS) {
+    const o = NEUTRAL_ORIGINALS[k];
+    out[k] = hslToHex(h, s * o.sRatio, o.l);
+  }
+  return out;
+}
+
+function deriveTheme(baseHex) {
+  const { h, s, l } = hexToHsl(baseHex);
+  return {
+    hi: baseHex,
+    accent: hslToHex(h, s * 0.836, l * 0.842),
+    dim: hslToHex(h, s * 0.821, l * 0.627),
+    wash: hslToHex(h, s * 0.671, l * 0.275),
+  };
+}
+
+// Canvas fillStyle/strokeStyle cannot read CSS custom properties, so the
+// waveform/spectrum/oscilloscope/tunnel/belt drawing code below reads
+// these plain JS variables instead - kept in sync with the CSS variables
+// by applyTheme(). Melt (vizMode 5) uses its own independent palette
+// system entirely and never reads these.
+let themeHi = "#e04b3c";
+let themeDim = "#8e2b24";
+let themeHiRgb = "224,75,60";
+
+// The canvas-drawn colors animate smoothly toward these targets instead
+// of jumping instantly - see startColorAnimation below. themeHi/themeDim/
+// themeHiRgb above stay as the immediate target (read by the picker's
+// own logic); animHiRgb/animDimRgb below are what the drawing code
+// actually paints with, each frame, while catching up to that target.
+let animHiRgb = { r: 224, g: 75, b: 60 };
+let animDimRgb = { r: 142, g: 43, b: 36 };
+let colorAnimFromHi = null, colorAnimFromDim = null;
+let colorAnimTargetHi = null, colorAnimTargetDim = null;
+let colorAnimStart = 0, colorAnimHandle = null;
+const COLOR_ANIM_MS = 220;
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+function startColorAnimation(targetHi, targetDim) {
+  colorAnimFromHi = { ...animHiRgb };
+  colorAnimFromDim = { ...animDimRgb };
+  colorAnimTargetHi = targetHi;
+  colorAnimTargetDim = targetDim;
+  colorAnimStart = performance.now();
+  if (colorAnimHandle) return; // already animating; the new target above
+                                // is picked up by the in-flight loop
+  const step = () => {
+    const t = Math.min(1, (performance.now() - colorAnimStart) / COLOR_ANIM_MS);
+    animHiRgb = {
+      r: lerp(colorAnimFromHi.r, colorAnimTargetHi.r, t),
+      g: lerp(colorAnimFromHi.g, colorAnimTargetHi.g, t),
+      b: lerp(colorAnimFromHi.b, colorAnimTargetHi.b, t),
+    };
+    animDimRgb = {
+      r: lerp(colorAnimFromDim.r, colorAnimTargetDim.r, t),
+      g: lerp(colorAnimFromDim.g, colorAnimTargetDim.g, t),
+      b: lerp(colorAnimFromDim.b, colorAnimTargetDim.b, t),
+    };
+    // Only the waveform needs an explicit nudge to redraw - it skips
+    // redrawing when nothing about position/size/peaks changed since
+    // the last paint. The other canvas visualizers already redraw every
+    // frame on their own as part of reacting to the music, so they pick
+    // up the animated color on their next frame regardless.
+    prev.waveSig = null;
+    if (t < 1) {
+      colorAnimHandle = requestAnimationFrame(step);
+    } else {
+      colorAnimHandle = null;
+    }
+  };
+  colorAnimHandle = requestAnimationFrame(step);
+}
+
+function animHiCss() {
+  return `rgb(${Math.round(animHiRgb.r)},${Math.round(animHiRgb.g)},${Math.round(animHiRgb.b)})`;
+}
+function animDimCss() {
+  return `rgb(${Math.round(animDimRgb.r)},${Math.round(animDimRgb.g)},${Math.round(animDimRgb.b)})`;
+}
+function animHiTriplet() {
+  return `${Math.round(animHiRgb.r)},${Math.round(animHiRgb.g)},${Math.round(animHiRgb.b)}`;
+}
+
+function applyTheme(baseHex) {
+  if (!/^#[0-9a-fA-F]{6}$/.test(baseHex || "")) return;
+  const shades = deriveTheme(baseHex);
+  const neutrals = deriveNeutrals(baseHex);
+  const root = document.documentElement.style;
+  root.setProperty("--accent-hi", shades.hi);
+  root.setProperty("--accent", shades.accent);
+  root.setProperty("--accent-rgb", hexToRgbTriplet(shades.accent).replace(/,/g, " "));
+  root.setProperty("--accent-dim", shades.dim);
+  root.setProperty("--accent-wash", shades.wash);
+  root.setProperty("--panel", neutrals.panel);
+  root.setProperty("--panel-rgb", hexToRgbTriplet(neutrals.panel).replace(/,/g, " "));
+  root.setProperty("--panel-2", neutrals.panel2);
+  root.setProperty("--line", neutrals.line);
+  root.setProperty("--slider-track", neutrals.sliderTrack);
+  root.setProperty("--tctl-hover", neutrals.tctlHover);
+  root.setProperty("--scrollbar-thumb", neutrals.scrollbarThumb);
+  root.setProperty("--tctl-active", neutrals.tctlActive);
+  root.setProperty("--scrollbar-thumb-hover", neutrals.scrollbarThumbHover);
+  themeHi = shades.hi;
+  themeDim = shades.dim;
+  themeHiRgb = hexToRgbTriplet(shades.hi);
+  startColorAnimation(hexToRgb(shades.hi), hexToRgb(shades.dim));
+}
+
+// ---- custom HSV picker: RGB<->HSV, independent from the HSL helpers
+// above (those serve deriveTheme/deriveNeutrals specifically) ----
+function hexToRgb(hex) {
+  hex = hex.replace("#", "");
+  return {
+    r: parseInt(hex.slice(0, 2), 16),
+    g: parseInt(hex.slice(2, 4), 16),
+    b: parseInt(hex.slice(4, 6), 16),
+  };
+}
+function rgbToHex(r, g, b) {
+  const toHex = (v) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+function rgbToHsv(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h;
+  if (d === 0) h = 0;
+  else if (max === r) h = ((g - b) / d) % 6;
+  else if (max === g) h = (b - r) / d + 2;
+  else h = (r - g) / d + 4;
+  h *= 60;
+  if (h < 0) h += 360;
+  return { h, s: max === 0 ? 0 : (d / max) * 100, v: max * 100 };
+}
+function hsvToRgb(h, s, v) {
+  s /= 100; v /= 100;
+  const c = v * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = v - c;
+  let r, g, b;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  return { r: (r + m) * 255, g: (g + m) * 255, b: (b + m) * 255 };
+}
+
+const SV_W = 200, SV_H = 160, HUE_W = 20, HUE_H = 160;
+let pickerH = 5.5, pickerS = 72.6, pickerV = 87.8;
+
+function drawSVSquare(hue) {
+  const ctx = $("themecolor-sv").getContext("2d");
+  const hueRgb = hsvToRgb(hue, 100, 100);
+  ctx.fillStyle = `rgb(${Math.round(hueRgb.r)},${Math.round(hueRgb.g)},${Math.round(hueRgb.b)})`;
+  ctx.fillRect(0, 0, SV_W, SV_H);
+  // White -> transparent left to right adds the saturation falloff;
+  // transparent -> black top to bottom adds the value falloff - the
+  // standard two-gradient technique for rendering an HSV square over a
+  // solid hue fill.
+  const satGrad = ctx.createLinearGradient(0, 0, SV_W, 0);
+  satGrad.addColorStop(0, "rgba(255,255,255,1)");
+  satGrad.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = satGrad;
+  ctx.fillRect(0, 0, SV_W, SV_H);
+  const valGrad = ctx.createLinearGradient(0, 0, 0, SV_H);
+  valGrad.addColorStop(0, "rgba(0,0,0,0)");
+  valGrad.addColorStop(1, "rgba(0,0,0,1)");
+  ctx.fillStyle = valGrad;
+  ctx.fillRect(0, 0, SV_W, SV_H);
+}
+
+function drawHueStrip() {
+  const ctx = $("themecolor-hue").getContext("2d");
+  const grad = ctx.createLinearGradient(0, 0, 0, HUE_H);
+  for (const deg of [0, 60, 120, 180, 240, 300, 360]) {
+    const rgb = hsvToRgb(deg, 100, 100);
+    grad.addColorStop(deg / 360, `rgb(${Math.round(rgb.r)},${Math.round(rgb.g)},${Math.round(rgb.b)})`);
+  }
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, HUE_W, HUE_H);
+}
+
+function initThemeColorCanvases() {
+  const dpr = window.devicePixelRatio || 1;
+  for (const [id, w, h] of [["themecolor-sv", SV_W, SV_H], ["themecolor-hue", HUE_W, HUE_H]]) {
+    const c = $(id);
+    c.width = w * dpr; c.height = h * dpr;
+    c.style.width = w + "px"; c.style.height = h + "px";
+    c.getContext("2d").scale(dpr, dpr);
+  }
+  drawHueStrip(); // static - never depends on picker state
+}
+
+function pickerHexNow() {
+  const rgb = hsvToRgb(pickerH, pickerS, pickerV);
+  return rgbToHex(rgb.r, rgb.g, rgb.b);
+}
+
+function renderPickerUI() {
+  const hex = pickerHexNow();
+  $("themecolor-sv-cursor").style.left = (pickerS / 100 * SV_W) + "px";
+  $("themecolor-sv-cursor").style.top = ((1 - pickerV / 100) * SV_H) + "px";
+  $("themecolor-hue-cursor").style.top = (pickerH / 360 * HUE_H) + "px";
+  $("themecolor-preview").style.background = hex;
+  $("themecolor-hex").value = hex;
+  const rgb = hsvToRgb(pickerH, pickerS, pickerV);
+  $("themecolor-r").value = Math.round(rgb.r);
+  $("themecolor-g").value = Math.round(rgb.g);
+  $("themecolor-b").value = Math.round(rgb.b);
+  // Live preview across the whole app as the picker is adjusted, but not
+  // persisted yet - only OK actually commits this.
+  applyTheme(hex);
+}
+
+function setPickerFromHex(hex) {
+  const rgb = hexToRgb(hex);
+  const hsv = rgbToHsv(rgb.r, rgb.g, rgb.b);
+  pickerH = hsv.h; pickerS = hsv.s; pickerV = hsv.v;
+  drawSVSquare(pickerH);
+  renderPickerUI();
+}
+
+initThemeColorCanvases();
+
+const svWrap = $("themecolor-sv-wrap");
+let svDragging = false;
+function svFromPointer(e) {
+  const rect = $("themecolor-sv").getBoundingClientRect();
+  const s = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width)) * 100;
+  const v = (1 - Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height))) * 100;
+  pickerS = s; pickerV = v;
+  renderPickerUI();
+}
+svWrap.addEventListener("pointerdown", (e) => {
+  svDragging = true;
+  svWrap.setPointerCapture(e.pointerId);
+  svFromPointer(e);
+});
+svWrap.addEventListener("pointermove", (e) => { if (svDragging) svFromPointer(e); });
+function svEndDrag() { svDragging = false; }
+svWrap.addEventListener("pointerup", svEndDrag);
+svWrap.addEventListener("pointercancel", svEndDrag);
+
+const hueWrap = $("themecolor-hue-wrap");
+let hueDragging = false;
+function hueFromPointer(e) {
+  const rect = $("themecolor-hue").getBoundingClientRect();
+  pickerH = Math.max(0, Math.min(1, (e.clientY - rect.top) / rect.height)) * 360;
+  drawSVSquare(pickerH);
+  renderPickerUI();
+}
+hueWrap.addEventListener("pointerdown", (e) => {
+  hueDragging = true;
+  hueWrap.setPointerCapture(e.pointerId);
+  hueFromPointer(e);
+});
+hueWrap.addEventListener("pointermove", (e) => { if (hueDragging) hueFromPointer(e); });
+function hueEndDrag() { hueDragging = false; }
+hueWrap.addEventListener("pointerup", hueEndDrag);
+hueWrap.addEventListener("pointercancel", hueEndDrag);
+
+$("themecolor-hex").addEventListener("input", () => {
+  let v = $("themecolor-hex").value.trim();
+  if (v && !v.startsWith("#")) v = "#" + v;
+  if (/^#[0-9a-fA-F]{6}$/.test(v)) setPickerFromHex(v);
+});
+function onRgbFieldChange() {
+  const clamp = (v) => Math.max(0, Math.min(255, parseInt(v, 10) || 0));
+  const r = clamp($("themecolor-r").value);
+  const g = clamp($("themecolor-g").value);
+  const b = clamp($("themecolor-b").value);
+  const hsv = rgbToHsv(r, g, b);
+  pickerH = hsv.h; pickerS = hsv.s; pickerV = hsv.v;
+  drawSVSquare(pickerH);
+  renderPickerUI();
+}
+$("themecolor-r").addEventListener("input", onRgbFieldChange);
+$("themecolor-g").addEventListener("input", onRgbFieldChange);
+$("themecolor-b").addEventListener("input", onRgbFieldChange);
+
+// The color last actually committed (persisted), captured the moment the
+// modal opens so Cancel can revert to it - applyTheme() above overwrites
+// themeHi with whatever is being live-previewed, so this has to be
+// captured separately, before any preview interaction happens.
+let themeModalPrevColor = "#e04b3c";
+
+function openThemeColorModal() {
+  themeModalPrevColor = themeHi;
+  setPickerFromHex(themeHi);
+  $("themecolormodal").classList.add("show");
+}
+function closeThemeColorModal() {
+  $("themecolormodal").classList.remove("show");
+}
+
+wire("theme-color-btn", openThemeColorModal);
+
+wire("themecolor-default", () => setPickerFromHex("#e04b3c"));
+
+wire("themecolor-cancel", () => {
+  applyTheme(themeModalPrevColor);
+  closeThemeColorModal();
+});
+
+wire("themecolor-ok", () => {
+  const hex = pickerHexNow();
+  applyTheme(hex);
+  const a = api();
+  if (a) a.set_theme_color(hex);
+  closeThemeColorModal();
+});
+
 /* ---------- waveform ---------- */
 
 function drawWave() {
@@ -3018,7 +3426,7 @@ function drawWave() {
   const n = peaks.length, bw = w / n;
   for (let i = 0; i < n; i++) {
     const bh = Math.max(2 * dpr, peaks[i] * h * 0.88);
-    x.fillStyle = (i / n) <= progress ? "#e04b3c" : "#7d2620";
+    x.fillStyle = (i / n) <= progress ? animHiCss() : animDimCss();
     x.fillRect(i * bw + bw * 0.22, (h - bh) / 2, Math.max(1, bw * 0.56), bh);
   }
 }
@@ -3193,8 +3601,8 @@ function drawSpectrumBars(ctx, w, h, bars) {
     const bh = Math.max(2, bars[i] * h * 0.92);
     const x = i * (bw + gap);
     const grad = ctx.createLinearGradient(0, h - bh, 0, h);
-    grad.addColorStop(0, "#e04b3c");
-    grad.addColorStop(1, "#7d2620");
+    grad.addColorStop(0, animHiCss());
+    grad.addColorStop(1, animDimCss());
     ctx.fillStyle = grad;
     ctx.fillRect(x, h - bh, bw, bh);
   }
@@ -3202,7 +3610,7 @@ function drawSpectrumBars(ctx, w, h, bars) {
 
 function drawOscilloscope(ctx, w, h, wave) {
   if (wave.length < 2) return;
-  ctx.strokeStyle = "#e04b3c";
+  ctx.strokeStyle = animHiCss();
   ctx.lineWidth = Math.max(1.5, w * 0.003);
   ctx.beginPath();
   const stepX = w / (wave.length - 1);
@@ -3297,7 +3705,7 @@ function drawTunnel(ctx, w, h, bars, wave) {
     // Same red as the waveform display (#e04b3c), brightness carried
     // entirely by alpha - no hue shift toward orange/white as it gets
     // brighter or closer, just this one red at varying intensity.
-    ctx.strokeStyle = `rgba(224,75,60,${alpha.toFixed(3)})`;
+    ctx.strokeStyle = `rgba(${animHiTriplet()},${alpha.toFixed(3)})`;
     // Thicker across the board: a thin anti-aliased stroke only covers a
     // sliver of each pixel it crosses, so it reads as lighter than a
     // solid-filled shape (the waveform's bars) even at the same color and
@@ -3328,7 +3736,7 @@ function drawTunnel(ctx, w, h, bars, wave) {
     const alpha = Math.min(1, blob.z * 1.4);
     const grad = ctx.createRadialGradient(x, y, 0, x, y, size * 2);
     grad.addColorStop(0, `rgba(255,190,150,${alpha.toFixed(3)})`);
-    grad.addColorStop(1, "rgba(224,75,60,0)");
+    grad.addColorStop(1, `rgba(${animHiTriplet()},0)`);
     ctx.fillStyle = grad;
     ctx.beginPath();
     ctx.arc(x, y, size * 2, 0, Math.PI * 2);
@@ -3680,8 +4088,8 @@ function drawBelt(ctx, w, h, bars, wave) {
   ctx.beginPath();
   points.forEach((pt, i) => { if (i === 0) ctx.moveTo(pt.x, pt.y); else ctx.lineTo(pt.x, pt.y); });
   ctx.lineWidth = Math.max(2.5, 2.5 + overall * 4 + bass * 3);
-  ctx.strokeStyle = "rgba(224,75,60,1)";
-  ctx.shadowColor = "rgba(224,75,60,0.8)";
+  ctx.strokeStyle = `rgba(${animHiTriplet()},1)`;
+  ctx.shadowColor = `rgba(${animHiTriplet()},0.8)`;
   ctx.shadowBlur = 10 + overall * 14 + bass * 10;
   ctx.stroke();
   ctx.shadowBlur = 0;
@@ -4774,6 +5182,10 @@ function applyTick(s) {
   state.shuffle = shuffle;
   state.repeat = repeat;
   if (!volHeld) state.volume = s.volume;
+  if (s.theme_color && s.theme_color !== prev.themeColor) {
+    prev.themeColor = s.theme_color;
+    applyTheme(s.theme_color);
+  }
 
   // Set an attribute on the existing path rather than replacing the node.
   // Any innerHTML write here destroys the element mid-click, and the browser
@@ -4860,6 +5272,7 @@ function applyFull(f) {
     const art = $("art");
     art.style.backgroundImage = f.art ? `url(${f.art})` : "";
     art.querySelector("svg").style.display = f.art ? "none" : "";
+    art.classList.toggle("no-art", !f.art);
   }
   renderList(false);
 }

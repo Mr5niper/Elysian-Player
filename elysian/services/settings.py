@@ -19,6 +19,7 @@ DEFAULTS = {
     "last_position": 0.0,
     "library_roots": [],
     "library_view": "albums",
+    "theme_color": "#e04b3c",
 }
 
 
