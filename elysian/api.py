@@ -1055,10 +1055,7 @@ class Api:
     def _do_toggle_mute(self) -> None:
         if self._muted:
             self._muted = False
-            # Unmuting to silence reads as a dead button, so a zero premute
-            # volume restores to something audible instead.
-            restore = self._premute_volume if self._premute_volume > 0 else 0.5
-            self._engine.set_volume(restore)
+            self._engine.set_volume(self._premute_volume)
         else:
             self._premute_volume = self._engine.volume
             self._muted = True
