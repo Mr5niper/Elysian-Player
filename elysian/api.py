@@ -4,9 +4,11 @@ Every method here is callable from the frontend. All application state lives on
 the Python side; the frontend polls get_tick()/get_full() and renders whatever
 it is given, so there is exactly one source of truth.
 """
+import base64
 import os
 import queue
 import random
+import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 import time
@@ -20,10 +22,11 @@ from .models.playlist import Playlist
 from .models.track import format_time
 from .playback.engine import PlaybackEngine, PlaybackError
 from .services import settings as settings_store
-from .services.art import ArtProvider
+from .services.art import ArtProvider, prepare_embed_jpeg, read_full_source_bytes
 from .services.library import LibraryService
 from .services.scanner import MetadataScanner, apply_metadata
 from .services.tag_editor import write_many as _write_tags
+from .services.tag_editor import write_art_many as _write_art_tags
 from .services.waveform import peaks_for
 from .services.visualizer import VisualizerProvider, BARS as VIS_BARS, \
     WAVE_POINTS as VIS_WAVE_POINTS
@@ -133,13 +136,27 @@ class Api:
         self._library_art = {}          # key -> [seq, data url or ""]
         self._library_art_seq = 0
         self._library_art_revision = 0
-        # Bumped on every browse or detail request so a query thread that
-        # is still running when a newer one starts can tell it has been
-        # superseded. Without this, a slow query fired first could finish
-        # after a fast one fired later and overwrite it - a filter typed
-        # quickly, a tab switched quickly, or a scan-triggered refresh
-        # landing after a manual request could all show stale results.
-        self._library_browser_gen = 0
+        # Per view, not one shared counter: a query for "artists" must
+        # never be invalidated by a later query for "albums" completing -
+        # which is exactly what a single shared counter would do once all
+        # four views are queried together (see _do_library_prewarm_all).
+        # Within one view, the same protection as before still applies: a
+        # slow query fired first finishing after a faster one fired later
+        # would otherwise overwrite it with something stale.
+        self._library_browser_gen = {}
+        # One entry per view (albums/artists/genres/songs), holding
+        # whichever unfiltered listing has most recently finished for
+        # that view - kept warm from startup and refreshed alongside the
+        # currently-viewed one on every library change, so opening any
+        # tab does not have to wait for a fresh query if one already
+        # finished, whatever tab was last open.
+        self._library_browser_cache = {}
+        # (view, needle) -> True while that exact query is already
+        # running, so a click on a tab whose prewarm hasn't finished yet
+        # never starts a second, duplicate query for the same thing -
+        # the one already in flight is left to finish and deliver its
+        # result normally.
+        self._library_browser_pending = {}
         self._library_detail_gen = 0
         self._library_art_pending = set()
         # The tag editor. Unlike everything else the library owns, opening
@@ -204,6 +221,14 @@ class Api:
         # still running. Consumed and cleared by _do_library_art_ready
         # the moment that key resolves.
         self._art_wait_key: dict[str, str] = {}
+        # True once the startup "prioritize the first screenful" trick has
+        # run. It must fire only this one time: it works by draining the
+        # real on-screen priority queue and replacing it with a guess,
+        # which is correct exactly once at startup (nothing real is in
+        # that queue yet) and actively harmful on every later albums
+        # refresh (a scan tick, a tag save), where it would keep
+        # stomping whatever the user is actually looking at right now.
+        self._art_startup_primed = False
         self._cmd: queue.Queue = queue.Queue()
         self._snap_lock = threading.RLock()
         self._worker = threading.Thread(target=self._run, name="elysian-core",
@@ -1164,6 +1189,7 @@ class Api:
         self._do_library_browser(
             self._library_browser.get("view", "albums"),
             self._library_browser.get("needle", ""))
+        self._do_library_prewarm_all()
 
     def _do_library_scan(self, root=None) -> None:
         if self._library_scanning:
@@ -1213,6 +1239,7 @@ class Api:
             self._do_library_browser(
                 self._library_browser.get("view", "albums"),
                 self._library_browser.get("needle", ""))
+            self._do_library_prewarm_all()
 
     def _do_library_scan_done(self, result) -> None:
         self._library_scanning = False
@@ -1232,57 +1259,127 @@ class Api:
         self._do_library_browser(
             self._library_browser.get("view", "albums"),
             self._library_browser.get("needle", ""))
+        self._do_library_prewarm_all()
 
     def _do_library_scan_failed(self, message) -> None:
         self._library_scanning = False
         self._set_status(f"Library scan failed: {message}")
 
-    def _do_library_browser(self, view, needle="") -> None:
+    def _do_library_browser(self, view, needle="", remember=True) -> None:
         view = (view if view in ("albums", "artists", "genres", "songs")
                 else "albums")
         needle = str(needle or "")
-        self._library_browser_gen += 1
-        gen = self._library_browser_gen
+        key = (view, needle)
+        if key in self._library_browser_pending:
+            return  # this exact query is already running; nothing new
+                     # to start, the one in flight will deliver its
+                     # result normally when it finishes
+        self._library_browser_pending[key] = True
+        gen = self._library_browser_gen.get(view, 0) + 1
+        self._library_browser_gen[view] = gen
 
         def work():
-            # Filtering happens here rather than in the frontend, which can
-            # only match what it has already been sent: a song title is not
-            # in the album list, so searching for one found nothing.
             try:
-                if view == "artists":
-                    items = self._library.artists(needle)
-                elif view == "genres":
-                    items = self._library.genres(needle)
-                elif view == "songs":
-                    items = self._library.songs(needle)
-                else:
-                    items = self._library.albums(needle)
-            except Exception:
-                log.exception("library browser query failed")
-                items = []
-            if gen != self._library_browser_gen:
-                return  # a newer request has since been made; this result
-                        # is not wrong, just late, and showing it now would
-                        # silently undo whatever the newer one produced
-            self._post("library_browser_ready", view, items, needle)
+                # Filtering happens here rather than in the frontend,
+                # which can only match what it has already been sent: a
+                # song title is not in the album list, so searching for
+                # one found nothing.
+                try:
+                    if view == "artists":
+                        items = self._library.artists(needle)
+                    elif view == "genres":
+                        items = self._library.genres(needle)
+                    elif view == "songs":
+                        items = self._library.songs(needle)
+                    else:
+                        items = self._library.albums(needle)
+                except Exception:
+                    log.exception("library browser query failed")
+                    items = []
+                if gen != self._library_browser_gen.get(view):
+                    return  # a newer request for this same view has
+                            # since been made; this result is not wrong,
+                            # just late, and showing it now would
+                            # silently undo whatever the newer one
+                            # produced
+                self._post("library_browser_ready", view, items, needle,
+                           remember)
+            finally:
+                self._library_browser_pending.pop(key, None)
 
         threading.Thread(target=work, name="elysian-lib-browse",
                          daemon=True).start()
 
-    def _do_library_browser_ready(self, view, items, needle="") -> None:
-        if view == "albums" and not needle:
-            # Fill in the whole library in the background. Anything already
-            # cached or queued is skipped, so a refresh during a scan does
-            # not re-queue what is already done.
-            self._do_library_fill_art(
-                [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
-                 for i in (items or [])])
-        self._library_browser_revision += 1
+    def _do_library_prewarm_all(self) -> None:
+        """Start (or refresh) all four views' unfiltered listings.
+
+        Fired at startup and again on every library-changing event
+        (scan progress/done, a tag save, a root removed), the same
+        moments the currently-viewed tab already refreshes itself -
+        this just means the other three, not currently on screen,
+        never go stale waiting for someone to click into them.
+        """
+        for view in ("albums", "artists", "genres", "songs"):
+            self._do_library_browser(view, "", remember=False)
+
+    def _do_library_note_view(self, view, needle="") -> None:
+        view = (view if view in ("albums", "artists", "genres", "songs")
+                else "albums")
+        needle = str(needle or "")
+        cached = self._library_browser_cache.get(view) if not needle else None
+        items = cached["items"] if cached else []
+        # No revision bump here: that counter tells the frontend's poll
+        # loop "a fresh query result exists, go fetch and re-render it" -
+        # this is called only when the frontend already rendered
+        # everything itself, from its own cache hit, so bumping it just
+        # made every fast-path switch trigger a second, redundant
+        # re-fetch and re-render (and a full art-cache resync from
+        # scratch) a moment later, which is exactly what made switching
+        # tabs feel sluggish again despite the fast path working.
         self._library_browser = {"view": view, "items": items,
                                  "needle": needle,
                                  "revision": self._library_browser_revision}
         self._settings["library_view"] = view
         settings_store.save(self._settings)
+
+    def _do_library_browser_ready(self, view, items, needle="",
+                                  remember=True) -> None:
+        if view == "albums" and not needle:
+            keys = [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
+                   for i in (items or [])]
+            if not self._art_startup_primed:
+                self._art_startup_primed = True
+                # Jump the first screenful to the front of the queue
+                # right now, exactly as if the user had already opened
+                # Library and scrolled to them - only ever done this
+                # once, at startup. Doing this again on a later refresh
+                # (a scan tick, a tag save) would drain whatever the user
+                # is actually looking at out of the real priority queue
+                # and replace it with this guess instead.
+                self._do_library_visible_art(keys[:60])
+            self._do_library_fill_art(keys)
+        if not needle:
+            # Kept independent of which tab is "current" below, so a tab
+            # nobody is looking at right now still has something ready
+            # the moment it's opened.
+            self._library_browser_cache[view] = {"items": items,
+                                                 "needle": needle}
+        if remember:
+            # Only an actual navigation updates which view is "current" -
+            # a background prewarm completing must never touch this, or
+            # whichever of the four prewarm queries finished last (almost
+            # always Songs, being by far the biggest) would silently
+            # become "the current view" internally, and the next
+            # unrelated refresh trigger (a scan tick, a tag save) would
+            # then re-browse and persist that contaminated value with
+            # its own default remember=True - exactly what was
+            # intermittently overwriting the real last-used tab.
+            self._library_browser_revision += 1
+            self._library_browser = {"view": view, "items": items,
+                                     "needle": needle,
+                                     "revision": self._library_browser_revision}
+            self._settings["library_view"] = view
+            settings_store.save(self._settings)
 
     def _do_library_detail(self, kind, key, key2="") -> None:
         self._library_detail_gen += 1
@@ -1323,7 +1420,13 @@ class Api:
     def _start_art_workers(self) -> None:
         if self._art_workers:
             return
-        for i in range(4):
+        # Each worker spends almost all of its time blocked - waiting on
+        # a network file read, or waiting on the queue - not on CPU, so
+        # running many more of them in parallel does not compete for a
+        # core the way CPU-bound work would. More of them means the
+        # whole library clears the background queue several times
+        # faster instead of trickling through 4 at a time.
+        for i in range(12):
             t = threading.Thread(target=self._art_worker,
                                  name=f"elysian-lib-art-{i}", daemon=True)
             t.start()
@@ -1539,6 +1642,17 @@ class Api:
             except Exception:
                 log.exception("could not build the tag editor payload")
                 payload = {"count": 0, "paths": [], "data": {}, "mixed": {}}
+            try:
+                raw, mime, _source = read_full_source_bytes([clean[0]])
+                if raw is not None:
+                    art_url = (f"data:{mime};base64," +
+                               base64.b64encode(raw).decode("ascii"))
+                else:
+                    art_url = None
+                payload.setdefault("data", {})["art"] = art_url
+            except Exception:
+                log.warning("could not read current art for %s", clean[0],
+                            exc_info=True)
             self._post("library_editor_ready", payload)
 
         threading.Thread(target=work, name="elysian-lib-editor-open",
@@ -1563,31 +1677,74 @@ class Api:
         }
         self._bump_library_editor()
 
-    def _do_library_save_editor(self, paths, changes) -> None:
-        """Write the edited tags to disk, off the worker, then reindex.
+    def _do_library_save_editor(self, paths, changes, art_whole_album=False) -> None:
+        """Write the edited tags (and optionally new art) to disk, off the
+        worker, then reindex.
 
         The write itself can touch a file on a slow share, which is why it
         runs on its own thread rather than here: the worker also owns
         transport, and a write that took a second would be a second of
         nothing else in this app responding either.
+
+        art_whole_album only changes what the *art* change applies to -
+        every other field in changes always applies only to paths, exactly
+        as it always has. Unchecked (the default), art applies to paths
+        too, same as everything else.
         """
         clean = [str(p) for p in (paths or []) if p]
         changes = dict(changes or {})
-        if not clean or not changes:
+        art_data_url = changes.pop("art", None)
+        if not clean or (not changes and not art_data_url):
             self._do_library_close_editor()
             return
-        # Album/artist grouping for each file *before* the write, so a
-        # save that changes the album tag itself invalidates the album
-        # it left as well as whichever one it landed on - both may have
-        # a persistent cover cached that a save no longer reflects.
+
+        # What the art change actually applies to. Independent of clean:
+        # unchecked, it's the same selection as everything else; checked,
+        # it widens to every track the library knows about on the same
+        # album(s) - which can be more than what's open in the editor.
+        art_paths = []
+        if art_data_url:
+            if art_whole_album:
+                seen = set()
+                for p in clean:
+                    try:
+                        info = self._library.album_key_for_path(p)
+                    except Exception:
+                        info = None
+                    if info:
+                        try:
+                            rows = self._library.album_tracks(*info)
+                        except Exception:
+                            rows = []
+                        for row in rows:
+                            rp = row.get("path")
+                            if rp and rp not in seen:
+                                seen.add(rp)
+                                art_paths.append(rp)
+                    elif p not in seen:
+                        # Not indexed by the library - nothing to expand
+                        # to, so at least still apply it to the file itself.
+                        seen.add(p)
+                        art_paths.append(p)
+            else:
+                art_paths = list(clean)
+
+        # Album/artist grouping for every file this save can touch, before
+        # the write - both text changes (which can move a file to a
+        # different album) and art changes (which can reach past the
+        # current selection) may leave a cached cover pointing at the
+        # wrong thing, for the album a file left as well as the one it
+        # landed on.
+        touched = set(clean) | set(art_paths)
         self._tag_save_old_art_keys = set()
-        for p in clean:
+        for p in touched:
             try:
                 info = self._library.album_key_for_path(p)
             except Exception:
                 info = None
             if info:
                 self._tag_save_old_art_keys.add(f"{info[1]}\u0000{info[0]}")
+
         self._library_editor["saving"] = True
         self._bump_library_editor()
 
@@ -1600,7 +1757,7 @@ class Api:
         # way it goes, is actually done.
         self._tag_save_resume = None
         if self._engine.active and self._engine.path:
-            if pathutil.key(self._engine.path) in pathutil.keys(clean):
+            if pathutil.key(self._engine.path) in pathutil.keys(list(touched)):
                 self._tag_save_resume = {
                     "id": self._current_id,
                     "position": self._engine.position,
@@ -1610,21 +1767,56 @@ class Api:
                 self._bump()
 
         def work():
+            text_result = {"ok": 0, "failed": 0, "results": []}
             try:
-                result = _write_tags(clean, changes)
+                if changes:
+                    text_result = _write_tags(clean, changes)
             except Exception as exc:
                 log.exception("tag save failed outright")
                 self._post("library_save_failed", str(exc))
                 return
-            written = [r["path"] for r in result["results"] if r["ok"]]
-            errors = [r for r in result["results"] if not r["ok"]]
-            reindexed = 0
+
+            art_result = {"ok": 0, "failed": 0, "results": []}
+            if art_data_url and art_paths:
+                try:
+                    _header, _, b64data = art_data_url.partition(",")
+                    jpeg_bytes = prepare_embed_jpeg(base64.b64decode(b64data))
+                    art_result = _write_art_tags(art_paths, jpeg_bytes)
+                except Exception as exc:
+                    log.exception("art save failed outright")
+                    art_result = {
+                        "ok": 0, "failed": len(art_paths),
+                        "results": [{"path": p, "ok": False, "error": str(exc)}
+                                   for p in art_paths],
+                    }
+
+            # A path can appear in both operations' results (edited text
+            # and art together, the common case), so this is folded per
+            # path rather than counted per result - otherwise every
+            # ordinary save would report double the actual track count.
+            ok_flags: dict = {}
+            error_msgs: dict = {}
+            for r in text_result["results"] + art_result["results"]:
+                p = r["path"]
+                ok_flags[p] = ok_flags.get(p, True) and r["ok"]
+                if not r["ok"]:
+                    error_msgs.setdefault(p, []).append(str(r.get("error", "")))
+            all_paths = sorted(ok_flags)
+            combined_results = [
+                {"path": p, "ok": True} if ok_flags[p] else
+                {"path": p, "ok": False, "error": "; ".join(error_msgs[p])}
+                for p in all_paths
+            ]
+            written = [p for p in all_paths if ok_flags[p]]
+            errors = [r for r in combined_results if not r["ok"]]
+            combined = {"ok": len(written), "failed": len(errors),
+                       "results": combined_results}
             if written:
                 try:
-                    reindexed = self._library.refresh_paths(written)
+                    self._library.refresh_paths(written)
                 except Exception:
                     log.exception("could not reindex after saving tags")
-            self._post("library_save_done", result, written, errors)
+            self._post("library_save_done", combined, written, errors)
 
         threading.Thread(target=work, name="elysian-lib-editor-save",
                          daemon=True).start()
@@ -1638,6 +1830,7 @@ class Api:
             self._refresh_library_summary()
             self._do_library_browser(self._library_browser.get("view", "albums"),
                                      self._library_browser.get("needle", ""))
+            self._do_library_prewarm_all()
             if self._library_detail.get("kind"):
                 d = self._library_detail
                 self._do_library_detail(d.get("kind", ""), d.get("key", ""),
@@ -1746,6 +1939,18 @@ class Api:
     def library_request_browser(self, view, needle="") -> None:
         self._post("library_browser", str(view), str(needle or ""))
 
+    def library_note_view(self, view, needle="") -> None:
+        """Record a navigation the frontend already satisfied locally.
+
+        Used when the frontend rendered a view straight from its own
+        pre-warmed cache, without asking the backend for anything - which
+        means the backend otherwise never learns the user looked at this
+        view at all, so "last tab used" would never update once every
+        view's data is warm (which is effectively always, after the
+        first few seconds of the app running).
+        """
+        self._post("library_note_view", str(view), str(needle or ""))
+
     def library_request_detail(self, kind, key, key2="") -> None:
         self._post("library_detail", str(kind), str(key), str(key2 or ""))
 
@@ -1763,6 +1968,10 @@ class Api:
 
     def library_get_browser(self) -> dict:
         return dict(self._library_browser)
+
+    def library_get_prewarmed(self, view) -> dict:
+        entry = self._library_browser_cache.get(str(view or ""))
+        return dict(entry) if entry is not None else {}
 
     def library_get_detail(self) -> dict:
         return dict(self._library_detail)
@@ -1805,9 +2014,116 @@ class Api:
     def library_close_editor(self) -> None:
         self._post("library_close_editor")
 
-    def library_save_editor(self, paths, changes) -> None:
+    def library_save_editor(self, paths, changes, art_whole_album=False) -> None:
         self._post("library_save_editor",
-                   [str(p) for p in (paths or []) if p], dict(changes or {}))
+                   [str(p) for p in (paths or []) if p], dict(changes or {}),
+                   bool(art_whole_album))
+
+    def paste_image_from_clipboard(self):
+        """The image currently on the system clipboard, as a data URL.
+
+        None if the clipboard holds no image. Used by the album art
+        editor's Paste button; ImageGrab.grabclipboard() is a Pillow
+        call, not tkinter, and is fast and local, so this runs directly
+        rather than being queued for the worker.
+        """
+        try:
+            from io import BytesIO
+
+            from PIL import Image, ImageGrab
+
+            data = ImageGrab.grabclipboard()
+            img = None
+            if isinstance(data, Image.Image):
+                img = data
+            elif isinstance(data, list) and data:
+                # Some platforms hand back a list of file paths (e.g. a
+                # file copied in Explorer) rather than pixel data.
+                try:
+                    img = Image.open(data[0])
+                except Exception:
+                    img = None
+            if img is None:
+                return None
+            buf = BytesIO()
+            img.convert("RGB").save(buf, format="PNG")
+            return ("data:image/png;base64," +
+                   base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception:
+            log.warning("clipboard image paste failed", exc_info=True)
+            return None
+
+    def copy_image_to_clipboard(self, data_url) -> bool:
+        """Push an image (as a data URL) onto the system clipboard.
+
+        Writes both CF_DIB (older apps, classic Paint) and a registered
+        "PNG" format (modern apps that want alpha), the same two formats
+        the Pyicon Editor's own clipboard copy uses - this is that same
+        approach, just working from a data URL already sitting in the
+        frontend rather than a live canvas. Windows-only; returns False
+        anywhere else.
+        """
+        if not sys.platform.startswith("win"):
+            return False
+        try:
+            import ctypes
+            from ctypes import wintypes
+            from io import BytesIO
+
+            from PIL import Image
+
+            _header, _, b64data = str(data_url or "").partition(",")
+            if not b64data:
+                return False
+            img = Image.open(BytesIO(base64.b64decode(b64data)))
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+            user32.OpenClipboard.argtypes = [wintypes.HWND]
+            user32.SetClipboardData.argtypes = [wintypes.UINT, wintypes.HANDLE]
+            user32.SetClipboardData.restype = wintypes.HANDLE
+            kernel32.GlobalAlloc.argtypes = [wintypes.UINT, ctypes.c_size_t]
+            kernel32.GlobalAlloc.restype = wintypes.HANDLE
+            kernel32.GlobalLock.argtypes = [wintypes.HANDLE]
+            kernel32.GlobalLock.restype = wintypes.LPVOID
+            kernel32.GlobalUnlock.argtypes = [wintypes.HANDLE]
+            user32.RegisterClipboardFormatW.argtypes = [wintypes.LPCWSTR]
+            user32.RegisterClipboardFormatW.restype = wintypes.UINT
+
+            user32.OpenClipboard(0)
+            try:
+                user32.EmptyClipboard()
+
+                out_dib = BytesIO()
+                bg = Image.new("RGB", img.size, (255, 255, 255))
+                if img.mode in ("RGBA", "LA") or (
+                        img.mode == "P" and "transparency" in img.info):
+                    bg.paste(img, mask=img.convert("RGBA").split()[3])
+                else:
+                    bg.paste(img.convert("RGB"))
+                bg.save(out_dib, "DIB")
+                data_dib = out_dib.getvalue()
+                h_dib = kernel32.GlobalAlloc(0x0002, len(data_dib))
+                p_dib = kernel32.GlobalLock(h_dib)
+                ctypes.memmove(p_dib, data_dib, len(data_dib))
+                kernel32.GlobalUnlock(h_dib)
+                user32.SetClipboardData(8, h_dib)  # CF_DIB
+
+                png_format = user32.RegisterClipboardFormatW("PNG")
+                out_png = BytesIO()
+                img.save(out_png, "PNG")
+                data_png = out_png.getvalue()
+                h_png = kernel32.GlobalAlloc(0x0002, len(data_png))
+                p_png = kernel32.GlobalLock(h_png)
+                ctypes.memmove(p_png, data_png, len(data_png))
+                kernel32.GlobalUnlock(h_png)
+                user32.SetClipboardData(png_format, h_png)
+            finally:
+                user32.CloseClipboard()
+            return True
+        except Exception:
+            log.warning("clipboard image copy failed", exc_info=True)
+            return False
 
     def library_get_editor_state(self) -> dict:
         src = self._library_editor
@@ -2085,21 +2401,21 @@ class Api:
                             exc_info=True)
         self._refresh_library_summary()
 
-        # Prime the background cover fill unconditionally, not only once the
-        # user visits the Library tab. This is the exact same path a Library
-        # visit already triggers (_do_library_browser -> ...browser_ready ->
-        # _do_library_fill_art), just fired here too so the 4 art workers
-        # have something to chew on from the moment the app opens, whether
-        # or not Library is ever opened this session. Reads the local
-        # SQLite index only - no network I/O, no folder walk - so this is
-        # safe even with a multi-thousand-track library on a slow share.
-        # _do_library_browser_ready only feeds the fill queue for the
-        # unfiltered "albums" view, which is what this asks for; it also
-        # updates self._library_browser and bumps library_browser_revision,
-        # but the frontend ignores that bump until libOpened is true (set
-        # only once the user actually switches to the Library tab), so this
-        # has no visible effect until then.
-        self._do_library_browser("albums", "")
+        # Prime all four library views unconditionally at startup, not
+        # only once the user visits the Library tab, and not only the
+        # Albums view - whichever tab is clicked first, its listing has
+        # already been computing since the app launched. This also
+        # feeds the background cover fill (_do_library_browser_ready's
+        # side effect for the unfiltered Albums view specifically), so
+        # the 4 art workers have something to chew on from the moment
+        # the app opens too. Reads the local SQLite index only - no
+        # network I/O, no folder walk - so this is safe even with a
+        # multi-thousand-track library on a slow share. Each view's
+        # result is cached independently (self._library_browser_cache)
+        # and can be read instantly via library_get_prewarmed(view) the
+        # moment a tab is actually opened, whether or not that query has
+        # finished yet.
+        self._do_library_prewarm_all()
 
     def _save_session(self) -> None:
         track = self._playlist.by_id(self._current_id)
@@ -2197,13 +2513,14 @@ class Api:
         "win_minimise", "win_maximise", "win_close",
         "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",
-        "library_cancel_scan", "library_request_browser",
+        "library_cancel_scan", "library_request_browser", "library_note_view",
         "library_request_detail", "library_get_state",
-        "library_get_browser", "library_get_detail",
+        "library_get_browser", "library_get_prewarmed", "library_get_detail",
         "library_enqueue", "library_play_context",
         "library_request_art", "library_visible_art", "library_get_art",
         "library_open_editor", "library_close_editor",
         "library_save_editor", "library_get_editor_state",
+        "paste_image_from_clipboard", "copy_image_to_clipboard",
     })
 
     #: Public for the host process only, never called from JavaScript, but

@@ -1121,6 +1121,26 @@ let libEditor = { open: false, loading: false, saving: false, paths: [],
                   failed: 0 };
 let libEditorTouched = new Set();
 
+/* Album art editing. pendingArtDataUrl is the final cropped square JPEG
+   once the person confirms a crop; null means no art change is pending.
+   The crop tool itself works on a fixed-resolution square canvas (backing
+   store ART_EXPORT_SIZE, displayed smaller via CSS at ART_DISPLAY_SIZE),
+   drawing the source image at a "cover" scale (its shorter side exactly
+   fills the square) times whatever the zoom slider adds on top, panned by
+   dragging. What's actually painted on that canvas is exported directly
+   via toDataURL, so there is no separate final-render step to drift from
+   what the person saw. */
+let pendingArtDataUrl = null;
+const ART_EXPORT_SIZE = 500;
+const ART_DISPLAY_SIZE = 260;
+let artCropImg = null;
+let artCropBaseScale = 1;
+let artCropScale = 1;
+let artCropOffsetX = 0;
+let artCropOffsetY = 0;
+let artCropDragging = false;
+let artCropDragStart = null;
+
 function tagModalOpen() {
   return $("tagmodal").classList.contains("show");
 }
@@ -1133,10 +1153,25 @@ const TAG_FIELD_INPUTS = {
   year: "tag-year",
 };
 
+let tagEditorTab = "fields";
+
+function setTagTab(name) {
+  tagEditorTab = name;
+  $("tagtab-fields").classList.toggle("active", name === "fields");
+  $("tagtab-art").classList.toggle("active", name === "art");
+  $("tagmodal-body").classList.toggle("tagpane-hidden", name !== "fields");
+  $("tagmodal-art-body").classList.toggle("tagpane-hidden", name !== "art");
+}
+$("tagtab-fields").addEventListener("click", () => setTagTab("fields"));
+$("tagtab-art").addEventListener("click", () => setTagTab("art"));
+
 function openTagEditor(paths) {
   const a = api();
   if (!a || !paths.length) return;
   libEditorTouched.clear();
+  pendingArtDataUrl = null;
+  $("tag-art-whole-album").checked = false;
+  setTagTab("fields");
   a.library_open_editor(paths);
 }
 
@@ -1145,6 +1180,9 @@ function closeTagEditor() {
   if (a) a.library_close_editor();
   $("tagmodal").classList.remove("show");
   libEditorTouched.clear();
+  pendingArtDataUrl = null;
+  $("tag-art-whole-album").checked = false;
+  setTagTab("fields");
 }
 
 function renderTagEditor() {
@@ -1173,6 +1211,11 @@ function renderTagEditor() {
     comp.checked = !comp.indeterminate && !!libEditor.data.compilation;
   }
 
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  const artBox = $("tag-art-preview-large");
+  artBox.classList.toggle("tag-art-empty", !artUrl);
+  artBox.style.backgroundImage = artUrl ? `url("${artUrl}")` : "none";
+
   const errs = $("tagmodal-errors");
   if (libEditor.errors && libEditor.errors.length) {
     errs.classList.remove("hidden");
@@ -1186,7 +1229,10 @@ function renderTagEditor() {
     errs.classList.add("hidden");
   }
 
-  $("tag-save").disabled = libEditor.saving || libEditor.loading;
+  const saveBtn = $("tag-save");
+  saveBtn.disabled = libEditor.saving || libEditor.loading;
+  saveBtn.classList.toggle("saving", libEditor.saving);
+  saveBtn.textContent = libEditor.saving ? "Saving\u2026" : "Save";
   $("tag-cancel").disabled = libEditor.saving;
 }
 
@@ -1209,6 +1255,9 @@ function collectTagChanges() {
   if (libEditorTouched.has("compilation")) {
     changes.compilation = $("tag-compilation").checked ? 1 : 0;
   }
+  if (libEditorTouched.has("art") && pendingArtDataUrl) {
+    changes.art = pendingArtDataUrl;
+  }
   return changes;
 }
 
@@ -1228,7 +1277,204 @@ $("tag-save").addEventListener("click", () => {
   if (!a || !libEditor.paths.length) return;
   const changes = collectTagChanges();
   if (!Object.keys(changes).length) { closeTagEditor(); return; }
-  a.library_save_editor(libEditor.paths, changes);
+  const artWholeAlbum = $("tag-art-whole-album").checked;
+  a.library_save_editor(libEditor.paths, changes, artWholeAlbum);
+});
+
+/* ---------- album art crop tool ---------- */
+
+function artCropClamp() {
+  if (!artCropImg) return;
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+  // Independent per axis: an axis the image doesn't reach across (still
+  // showing transparent padding on that axis) stays centered rather than
+  // being panned, since there is nothing useful to drag into view there.
+  // An axis the image fully covers clamps normally, same as before.
+  if (dispW <= ART_EXPORT_SIZE) {
+    artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
+  } else {
+    const minX = ART_EXPORT_SIZE - dispW;
+    artCropOffsetX = Math.min(0, Math.max(minX, artCropOffsetX));
+  }
+  if (dispH <= ART_EXPORT_SIZE) {
+    artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
+  } else {
+    const minY = ART_EXPORT_SIZE - dispH;
+    artCropOffsetY = Math.min(0, Math.max(minY, artCropOffsetY));
+  }
+}
+
+function artCropRedraw() {
+  if (!artCropImg) return;
+  const canvas = $("artcrop-canvas");
+  const ctx = canvas.getContext("2d");
+  ctx.clearRect(0, 0, ART_EXPORT_SIZE, ART_EXPORT_SIZE);
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+  ctx.drawImage(artCropImg, artCropOffsetX, artCropOffsetY, dispW, dispH);
+}
+
+function openArtCropModal(img) {
+  artCropImg = img;
+  // "Contain" fit: the image's longer side exactly fills the square, so
+  // the whole image is visible with the shorter axis left as transparent
+  // padding - never cropping anything away until the person zooms in.
+  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.naturalWidth, img.naturalHeight);
+  $("artcrop-zoom").value = 100;
+  artCropScale = artCropBaseScale;
+  const dispW = img.naturalWidth * artCropScale;
+  const dispH = img.naturalHeight * artCropScale;
+  artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
+  artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
+  artCropRedraw();
+  $("artcropmodal").classList.add("show");
+}
+
+function closeArtCropModal() {
+  $("artcropmodal").classList.remove("show");
+  artCropImg = null;
+}
+
+$("artcrop-zoom").addEventListener("input", () => {
+  if (!artCropImg) return;
+  const newScale = artCropBaseScale * ($("artcrop-zoom").value / 100);
+  // Keep whatever point is currently at the viewport's center fixed while
+  // the scale changes, rather than re-centering on the image's own
+  // center, so zooming feels anchored to what's actually being looked at.
+  const centerImgX = (ART_EXPORT_SIZE / 2 - artCropOffsetX) / artCropScale;
+  const centerImgY = (ART_EXPORT_SIZE / 2 - artCropOffsetY) / artCropScale;
+  artCropScale = newScale;
+  artCropOffsetX = ART_EXPORT_SIZE / 2 - centerImgX * artCropScale;
+  artCropOffsetY = ART_EXPORT_SIZE / 2 - centerImgY * artCropScale;
+  artCropClamp();
+  artCropRedraw();
+});
+
+const artCropViewport = $("artcrop-viewport");
+artCropViewport.addEventListener("pointerdown", (e) => {
+  if (!artCropImg) return;
+  artCropDragging = true;
+  artCropDragStart = { x: e.clientX, y: e.clientY,
+                       offsetX: artCropOffsetX, offsetY: artCropOffsetY };
+  artCropViewport.setPointerCapture(e.pointerId);
+});
+artCropViewport.addEventListener("pointermove", (e) => {
+  if (!artCropDragging || !artCropDragStart) return;
+  // The canvas backing store is ART_EXPORT_SIZE but displayed at
+  // ART_DISPLAY_SIZE via CSS, so a screen-pixel drag delta has to be
+  // scaled up to canvas-pixel space before it's applied as an offset.
+  const ratio = ART_EXPORT_SIZE / ART_DISPLAY_SIZE;
+  artCropOffsetX = artCropDragStart.offsetX + (e.clientX - artCropDragStart.x) * ratio;
+  artCropOffsetY = artCropDragStart.offsetY + (e.clientY - artCropDragStart.y) * ratio;
+  artCropClamp();
+  artCropRedraw();
+});
+function artCropEndDrag() {
+  artCropDragging = false;
+  artCropDragStart = null;
+}
+artCropViewport.addEventListener("pointerup", artCropEndDrag);
+artCropViewport.addEventListener("pointercancel", artCropEndDrag);
+
+$("artcrop-cancel").addEventListener("click", closeArtCropModal);
+$("artcrop-use").addEventListener("click", () => {
+  if (!artCropImg) return;
+  const dispW = artCropImg.naturalWidth * artCropScale;
+  const dispH = artCropImg.naturalHeight * artCropScale;
+
+  // The actual visible portion of the ORIGINAL image, in that image's
+  // own pixel coordinates - not the padded workspace square. At "fit"
+  // (the default) this is the whole image; only zooming in past fit
+  // narrows it to a genuine sub-crop.
+  let sx0, sx1, sy0, sy1;
+  if (dispW <= ART_EXPORT_SIZE) {
+    sx0 = 0; sx1 = artCropImg.naturalWidth;
+  } else {
+    sx0 = Math.max(0, (0 - artCropOffsetX) / artCropScale);
+    sx1 = Math.min(artCropImg.naturalWidth,
+                    (ART_EXPORT_SIZE - artCropOffsetX) / artCropScale);
+  }
+  if (dispH <= ART_EXPORT_SIZE) {
+    sy0 = 0; sy1 = artCropImg.naturalHeight;
+  } else {
+    sy0 = Math.max(0, (0 - artCropOffsetY) / artCropScale);
+    sy1 = Math.min(artCropImg.naturalHeight,
+                    (ART_EXPORT_SIZE - artCropOffsetY) / artCropScale);
+  }
+  const srcW = sx1 - sx0, srcH = sy1 - sy0;
+
+  // Sized so the longer side is exactly ART_EXPORT_SIZE, keeping
+  // whatever aspect ratio the visible crop actually has - never forced
+  // to square, and drawn straight from the full-resolution source so
+  // this is one resample, not a second pass over an already-scaled copy.
+  const outScale = ART_EXPORT_SIZE / Math.max(srcW, srcH);
+  const outW = Math.max(1, Math.round(srcW * outScale));
+  const outH = Math.max(1, Math.round(srcH * outScale));
+  const outCanvas = document.createElement("canvas");
+  outCanvas.width = outW;
+  outCanvas.height = outH;
+  outCanvas.getContext("2d")
+    .drawImage(artCropImg, sx0, sy0, srcW, srcH, 0, 0, outW, outH);
+
+  pendingArtDataUrl = outCanvas.toDataURL("image/jpeg", 0.92);
+  libEditorTouched.add("art");
+  closeArtCropModal();
+  renderTagEditor();
+});
+
+function loadImageFromDataUrl(dataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = dataUrl;
+  });
+}
+
+$("tag-art-choose").addEventListener("click", () => $("tag-art-file").click());
+$("tag-art-file").addEventListener("change", () => {
+  const file = $("tag-art-file").files && $("tag-art-file").files[0];
+  $("tag-art-file").value = "";
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = async () => {
+    try {
+      const img = await loadImageFromDataUrl(reader.result);
+      openArtCropModal(img);
+    } catch { /* not a decodable image; nothing to do */ }
+  };
+  reader.readAsDataURL(file);
+});
+
+$("tag-art-paste").addEventListener("click", async () => {
+  const a = api();
+  if (!a) return;
+  const dataUrl = await a.paste_image_from_clipboard();
+  if (!dataUrl) return;
+  try {
+    const img = await loadImageFromDataUrl(dataUrl);
+    openArtCropModal(img);
+  } catch { /* not a decodable image; nothing to do */ }
+});
+
+// Click the large preview to reposition/re-crop whatever is currently
+// showing - the saved cover, or an image already picked/pasted this
+// session - rather than only being able to crop a brand-new image.
+$("tag-art-preview-large").addEventListener("click", async () => {
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  if (!artUrl) return;
+  try {
+    const img = await loadImageFromDataUrl(artUrl);
+    openArtCropModal(img);
+  } catch { /* not a decodable image; nothing to do */ }
+});
+
+$("tag-art-copy").addEventListener("click", async () => {
+  const a = api();
+  const artUrl = pendingArtDataUrl || libEditor.data.art || null;
+  if (!a || !artUrl) return;
+  await a.copy_image_to_clipboard(artUrl);
 });
 
 /* Windows paths are case-insensitive, and the path for whatever is
@@ -1302,8 +1548,40 @@ function libraryOpened() {
       libAnchor = null;
       renderLibrary();
       libPending++;
-      a.library_request_browser(libView, libDesiredNeedle);
-      schedule();
+      // Every view has been kept warm since app startup, not just since
+      // Library was first opened, and not only Albums (see the startup
+      // prewarm). If this open wants the plain unfiltered version of
+      // whatever tab was last open, use whatever has already finished
+      // directly. request_browser is still safe to fall through to
+      // otherwise: the backend now recognizes an identical query already
+      // in flight and does not start a second one for it - this only
+      // ever waits on that same work, never repeats it.
+      if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
+        a.library_get_prewarmed(view).then((b) => {
+          const stillWanted = view === libView && libDesiredNeedle === "";
+          if (stillWanted && b && Array.isArray(b.items)
+              && (b.needle || "") === "") {
+            libPending--;
+            libLoading = false;
+            libItems = b.items;
+            renderLibrary();
+            libTabState[libView] = captureCurrentLibTabState();
+            libTabState[libView].stale = false;
+            a.library_note_view(view, "");
+          } else if (stillWanted) {
+            a.library_request_browser(libView, libDesiredNeedle);
+          } else {
+            libPending--;
+          }
+          schedule();
+        }).catch(() => {
+          a.library_request_browser(libView, libDesiredNeedle);
+          schedule();
+        });
+      } else {
+        a.library_request_browser(libView, libDesiredNeedle);
+        schedule();
+      }
     };
     if (typeof a.library_get_state === "function") {
       a.library_get_state()
@@ -2245,10 +2523,41 @@ function setLibView(name) {
   renderLibrary();
 
   const a = api();
-  if (a) {
-    libDesiredNeedle = activeNeedle;
-    libLoading = true;
-    libPending++;
+  if (!a) return;
+  libDesiredNeedle = activeNeedle;
+  libLoading = true;
+  libPending++;
+  // The backend has kept every view's unfiltered listing warm since
+  // startup (and refreshed on every library-changing event since), not
+  // just whichever tab happened to be open. If this switch wants that
+  // exact thing (no active filter), use whatever has already finished
+  // directly instead of firing a live query that repeats work already
+  // done. request_browser is still safe to fall through to otherwise -
+  // the backend recognizes an identical query already in flight and
+  // waits on it rather than starting a second one.
+  if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
+    a.library_get_prewarmed(name).then((b) => {
+      const stillWanted = name === libView && libDesiredNeedle === "";
+      if (stillWanted && b && Array.isArray(b.items)
+          && (b.needle || "") === "") {
+        libPending--;
+        libLoading = false;
+        libItems = b.items;
+        renderLibrary();
+        libTabState[libView] = captureCurrentLibTabState();
+        libTabState[libView].stale = false;
+        a.library_note_view(name, "");
+      } else if (stillWanted) {
+        a.library_request_browser(name, activeNeedle);
+      } else {
+        libPending--;
+      }
+      schedule();
+    }).catch(() => {
+      a.library_request_browser(name, activeNeedle);
+      schedule();
+    });
+  } else {
     a.library_request_browser(name, activeNeedle);
     schedule();
   }
@@ -2313,8 +2622,32 @@ $("libfilter").addEventListener("input", () => {
     const a = api();
     if (!a) return;
     libPending++;
-    a.library_request_browser(libView, needle);
-    schedule();
+    if (!needle && typeof a.library_get_prewarmed === "function") {
+      a.library_get_prewarmed(libView).then((b) => {
+        const stillWanted = libDesiredNeedle === needle;
+        if (stillWanted && b && Array.isArray(b.items)
+            && (b.needle || "") === "") {
+          libPending--;
+          libLoading = false;
+          libItems = b.items;
+          renderLibrary();
+          libTabState[libView] = captureCurrentLibTabState();
+          libTabState[libView].stale = false;
+          a.library_note_view(libView, "");
+        } else if (stillWanted) {
+          a.library_request_browser(libView, needle);
+        } else {
+          libPending--;
+        }
+        schedule();
+      }).catch(() => {
+        a.library_request_browser(libView, needle);
+        schedule();
+      });
+    } else {
+      a.library_request_browser(libView, needle);
+      schedule();
+    }
   }, 120);
 });
 
@@ -2624,8 +2957,35 @@ function applyLibraryTick(tick) {
           libDesiredNeedle = $("libfilter").value.trim();
           libLoading = true;
           libPending++;
-          a.library_request_browser(libView, libDesiredNeedle);
-          schedule();
+          const thisView = libView;
+          const thisNeedle = libDesiredNeedle;
+          if (!thisNeedle && typeof a.library_get_prewarmed === "function") {
+            a.library_get_prewarmed(thisView).then((b) => {
+              const stillWanted = thisView === libView
+                                 && libDesiredNeedle === thisNeedle;
+              if (stillWanted && b && Array.isArray(b.items)
+                  && (b.needle || "") === "") {
+                libPending--;
+                libLoading = false;
+                libItems = b.items;
+                renderLibrary();
+                libTabState[libView] = captureCurrentLibTabState();
+                libTabState[libView].stale = false;
+                a.library_note_view(thisView, "");
+              } else if (stillWanted) {
+                a.library_request_browser(thisView, thisNeedle);
+              } else {
+                libPending--;
+              }
+              schedule();
+            }).catch(() => {
+              a.library_request_browser(thisView, thisNeedle);
+              schedule();
+            });
+          } else {
+            a.library_request_browser(thisView, thisNeedle);
+            schedule();
+          }
         }
       }
     }).catch(() => {});
