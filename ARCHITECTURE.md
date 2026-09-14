@@ -99,6 +99,75 @@ track at its saved position once the write finishes. Anything that
 touches playback state around a tag save should call `release_file()`,
 not `stop()`; `stop()` alone will silently leave the file locked.
 
+### Library pre-warming
+
+All four browse views (Albums, Artists, Genres, Songs) start their
+unfiltered query at app startup, not on first visit to Library, and are
+re-fired at every point the library already refreshes itself - a scan
+tick, a scan finishing, a root removed, a tag save - so a tab nobody has
+opened yet never goes stale waiting for someone to click into it
+(`_do_library_prewarm_all` in `api.py`). The background art fill is fed by
+the Albums query specifically, the same way it always was; the other
+three tabs have no art of their own to fill.
+
+Each view tracks its own query generation, not one shared counter: firing
+all four together must never let one invalidate another's still-in-flight
+result, which a single shared counter did - verified directly, it made a
+later-scheduled but individually cheap query (Genres, say) sometimes
+finish last regardless of its own actual cost, since it was waiting
+behind the others under one lock. A `(view, needle)` pending set also
+dedupes in-flight queries: a tab switch landing while its own prewarm
+query is still running never starts a second one, it just waits on the
+one already in flight.
+
+The frontend checks a per-view cache (`library_get_prewarmed`) before
+falling through to a live query, at every one of the four places that can
+trigger a browse: opening Library for the first time, switching tabs,
+clearing the filter box back to empty, and the scan-triggered refresh.
+Serving a view straight from that cache renders locally with no round
+trip at all - which means the backend never otherwise learns a navigation
+happened. A separate `library_note_view` call records it anyway (updating
+the current-view tracker and the persisted "last tab used" setting
+without re-running the query), and deliberately does not bump the same
+revision counter a real completed query does: bumping it there was tried
+first, and it made every cache-hit navigation also trigger a second,
+redundant fetch and re-render a moment later, on top of the one that had
+already rendered locally.
+
+### Album art caching
+
+Resolved album art is cached to local disk as a small JPEG
+(`ART_CACHE_DIR` in `config.py`), keyed by the album's (album, artist)
+tag pair rather than by file path or folder, so every track on an album
+shares one cached cover and a cover is never tied to whichever folder
+happened to supply it. The cache (`art_cache` table in the library
+database) records the exact file the cover was decoded from - the audio
+file itself if the picture was embedded, or the specific cover image file
+if it came from the folder - and that file's modification time at the
+moment it was cached. A lookup is a `stat()` and a small local file read
+if the source's mtime still matches; anything else (mtime changed, entry
+missing, thumbnail file gone) falls through to a real decode, which then
+updates the cache.
+
+Removing a library root deletes any cache entries and thumbnail files
+whose source lived under it. Editing a tag that moves a file to a
+different (album, artist) grouping - most commonly renaming the album or
+album artist field - invalidates both the album a file left and the one
+it joined, so a cover already resolved earlier in the same session
+doesn't keep showing a stale value; the invalidated album is re-resolved
+immediately rather than waiting for something else to ask for it.
+
+Library reads (`LibraryService._rows()`) do not hold a Python-level lock.
+Each call opens its own connection, and the database runs in WAL mode
+specifically so reads can proceed alongside each other and alongside an
+active write. An earlier version wrapped every read in a shared lock,
+which forced independent queries - the four startup pre-warm queries, for
+instance - to run one at a time regardless of how cheap any individual
+one was, and meant whichever got scheduled last paid for the others'
+combined time before it could even start; verified directly by timing the
+actual query strings at realistic library scale. Every write path (root
+add/remove, batch upserts, schema migrations) still holds the lock.
+
 ## Frontend implementation notes
 
 `ROW_H` in `app.js` and the `.row` height in `style.css` must stay equal, or
@@ -137,6 +206,46 @@ regions. `#nowplaying` carries an explicit `min-height` for the same
 reason: hiding both of its only in-flow children would otherwise collapse
 the flex container to zero height, taking the absolutely-positioned
 canvas down with it.
+
+One base color, picked from a fully custom picker (`applyTheme()` /
+`deriveTheme()` / `deriveNeutrals()` in `app.js` - a saturation/value
+square, a hue strip, and hex/RGB fields, no OS dialog involved anywhere),
+drives the whole palette. The four accent shades (`--accent`,
+`--accent-hi`, `--accent-dim`, `--accent-wash`) scale the picked color's
+own saturation and lightness by the ratios the original red theme's four
+shades already had to each other, same hue throughout. Eight background
+surfaces (`--panel`, `--panel-2`, `--line`, and five more) that were
+hand-tuned with their own warm undertone in the original red theme scale
+the same way, sharing the picked color's exact hue rather than a fixed
+offset from it - an offset reproduced the original red closely but was
+confirmed, by sampling actual rendered pixels, to rotate an unrelated
+base hue into a different perceived color entirely (a picked teal
+reading green, a picked yellow reading reddish). Saturation in both cases
+scales by the *picked* color's own saturation, not a fixed constant, or a
+fully desaturated pick (black, white, gray) would still come out tinted.
+
+Canvas-drawn elements - the main waveform, spectrum bars, oscilloscope,
+tunnel and belt visualizers - cannot read CSS custom properties, so they
+read plain JS variables kept in sync by `applyTheme()` instead. Those
+variables animate toward a new color over a short
+`requestAnimationFrame` loop rather than jumping to it instantly, since
+canvas has no built-in transition the way a CSS-driven element gets one
+for free; re-targeting mid-animation (continuous dragging in the picker)
+picks up from wherever the animation currently is, not the original
+start, so a fast drag reads as one continuous fade rather than a series
+of snaps. Melt (`vizMode 5`) runs its own independent palette system
+entirely and reads none of this.
+
+The album art crop tool (`#artcropmodal` in `index.html`, the `artCrop*`
+functions in `app.js`) only ever exports the actual visible image
+content, never the fixed-size square workspace it's composed in. Left at
+"fit" (the default), the visible content is the whole original image, so
+what gets saved is resized so its longer side is 500px, keeping whatever
+aspect ratio the source actually has; zooming in narrows the exported
+rectangle toward, and eventually to, a real square crop.
+`art.prepare_embed_jpeg()` on the Python side re-derives this defensively
+rather than trusting the frontend blindly, in case anything else ever
+calls it with a non-square source.
 
 Note on paths: whether two strings name the same file is decided in one
 place, `paths.key()`. It is `normcase` plus `abspath`, because `pathlib` has

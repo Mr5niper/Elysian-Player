@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.5.2.0
+- **Version**: 2.6.0.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**
@@ -20,11 +20,15 @@ megabytes. Audio runs on miniaudio.
   files fall back to their filename.
 * Shows embedded album art. If a track has none, the folder it lives in is
   checked for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png`
-  or `folder.png`.
+  or `folder.png`. Resolved covers are cached to local disk, so a large
+  library only decodes each one once, not on every launch.
+* Pick the app's own accent color from a built-in picker, no OS dialog
+  involved; the whole interface, waveform included, re-derives from
+  whatever is chosen. See [Appearance](#appearance).
 * Draws a waveform of the current track.
-* Double-click the cover or the waveform to swap in a live visualizer over
-  the whole row instead: spectrum bars, then an oscilloscope trace, then
-  back to the normal view. Double-click again to cycle through them.
+* Double-click the cover or the waveform to swap the whole row into a live
+  visualizer instead. Five modes to cycle through, then back to normal.
+  See [Visualizer](#visualizer).
 * Save and load M3U playlists. Paths are written relative to the playlist file
   where possible, so a playlist survives moving the folder it sits in.
 * Drag audio files or folders onto the window to add them.
@@ -96,11 +100,12 @@ unreachable.
   Artists, Genres and Songs is a visit, not a reset.
 * **Edit tags directly on the files.** Select one or more tracks, or open an
   album, and Edit Tags lets you change title, artist, album, album artist,
-  genre, track and disc number, year, and compilation. A field left alone
-  across a mixed selection is shown blank rather than guessed at, and only
-  the fields you actually touch get written. Editing the track that's
-  currently playing pauses it just long enough to save, then picks back up
-  right where it left off.
+  genre, track and disc number, year, and compilation, on their own tab. A
+  field left alone across a mixed selection is shown blank rather than
+  guessed at, and only the fields you actually touch get written. Editing
+  the track that's currently playing pauses it just long enough to save,
+  then picks back up right where it left off. A separate Album Art tab
+  handles the cover - see [Album Art Editing](#album-art-editing) below.
 * **Queue tracks straight from an open album, artist or genre.** Add to
   playlist queues whatever's selected, or everything shown if nothing is.
   Add all to playlist always queues everything regardless of selection, so
@@ -110,8 +115,11 @@ unreachable.
   track count and total time underneath. The cover comes from the first
   track in the album that actually carries one, so a compilation whose
   opening file happens to be untagged still gets its artwork from wherever it
-  actually lives. Covers for whatever you are looking at are fetched first;
-  everything else in the library fills in quietly in the background.
+  actually lives. All four tabs, and the background cover fill, start
+  populating the moment the app launches - not on first visit to Library -
+  and stay warm across everything that can change them (a rescan, a folder
+  removed, a tag edit). Whatever is actually on screen is still resolved
+  first if it hasn't been already; everything else fills in behind it.
 * **Scanning a folder works one subfolder at a time**, and each one is
   written and made browsable the moment it finishes rather than all at once
   at the end. A rescan only re-reads a file if its modification time
@@ -129,6 +137,54 @@ unreachable.
   already seen needs no file opened at all to show its title and artist,
   which is what makes browsing a large collection on a network share feel
   normal instead of slow.
+
+### Album Art Editing
+
+<img width="385" height="621" alt="image" src="https://github.com/user-attachments/assets/03a0f48b-f617-4f07-9c49-81a58f048209" />
+
+A second tab in the tag editor, next to the text fields.
+
+* Choose a file, paste one from the clipboard, or copy the current cover out - all on the original image, not a downsized copy.
+* Clicking on the album cover opens a crop tool that zooms and positions it in a square viewport. Left alone, the whole image is used instead, resized to 500px on its longer side at its natural aspect ratio.
+
+<img width="385" height="511" alt="image" src="https://github.com/user-attachments/assets/35051863-7edd-4940-934d-5f537bd92eab" />
+ 
+* Applies to whichever files are open in the editor, or every track on the album if a checkbox is ticked.
+* Written directly with mutagen: ID3 APIC for MP3/WAV, FLAC's native picture block, or base64 `METADATA_BLOCK_PICTURE` for OGG/Opus.
+
+### Appearance
+
+<img width="1846" height="1096" alt="image" src="https://github.com/user-attachments/assets/ed055991-9fbe-4d85-998e-33d1b7f33a23" />
+
+A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts.
+
+### Visualizer
+
+Double-click the cover or the waveform to swap the whole row into a live visualizer. Double-click again to cycle through five modes, then back to normal: spectrum bars, an oscilloscope trace, a tunnel, a belt, and Melt.
+* **Spectrum Bars**
+  
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/56aaeac6-26d6-4bd1-b936-a863a2b98429" />
+
+  <br>
+* **Oscilloscope Trace**
+  
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/90f954d6-0064-4fe3-8237-c0b602ec55af" />
+
+  <br>
+* **Tunnel** rings pulse outward from the center, each one shaped from the raw waveform around its own circumference rather than the frequency bars, so a ring can bulge inward as easily as outward. Glowing particles drift down the tunnel, each tracking one specific frequency band for as long as it's alive.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/a9749b55-b659-400b-b52c-aaeeb463545e" />
+
+  <br>
+* **Belt** wraps the spectrum into a ring viewed in perspective, tilting and turning on its own over time, with particle trails tracing its motion.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/2e5b2d17-bf8a-4fc6-a3d6-025f6b25557c" />
+
+  <br>
+* **Melt** continuously resamples its own previous frame through a shifting coordinate warp, so whatever's drawn into it keeps getting dragged, spiraled or rippled by the frame before it - the technique behind Sonique's classic "Smear" visualizer, reimplemented from scratch rather than ported. Its color palette, particle shapes, and waveform paths each hold for a while on their own independent timer, then crossfade to a new one.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/1979e2ad-4f76-4f58-9274-73b52d357eb6" />
+
 
 ## Controls
 
@@ -176,8 +232,12 @@ until it has to:
   enumerated. Indexing a folder into the Library works the same way, one
   subfolder at a time, described above.
 * Album art for the playlist is fetched only for the track that is playing.
-  Library cover art is fetched for whatever is on screen first and fills in
-  the rest afterward, also described above.
+  Library covers are cached to local disk the first time they're resolved,
+  keyed by album and artist tag - every launch after that reads the small
+  cached file instead of decoding the original again, so a large library
+  over a slow share only ever pays that cost once, not on every startup. All
+  four library tabs, and the cover fill, start populating the moment the app
+  launches rather than waiting for a first visit to Library.
 * Startup does not check that every saved path still exists.
 * Every operation that can block runs on a worker thread. The interface only
   ever reads a precomputed snapshot, so a slow share cannot stall a button.
@@ -199,6 +259,11 @@ The library index is a SQLite database at `.elysian_library.db`, also in your
 home folder. It holds the tags and file paths it has seen, never the audio
 itself. Deleting it loses nothing but the index: the folders are remembered in
 the settings file and a rescan rebuilds it.
+
+Resolved album covers are cached as small JPEGs in `.elysian_art_cache`,
+also in your home folder, indexed by the same database above. Deleting that
+folder loses nothing but the cache: covers just get decoded again the next
+time each one is needed.
 
 If you are updating from a version older than 2.4.0.0 and already have folders
 indexed, the next scan will take longer than usual, since a couple of columns

@@ -189,6 +189,12 @@ class LibraryService:
                     CREATE INDEX IF NOT EXISTS idx_album_group
                         ON tracks(album_artist, album, disc_number, track_number);
                     CREATE INDEX IF NOT EXISTS idx_key ON tracks(key);
+                    CREATE TABLE IF NOT EXISTS art_cache (
+                        key           TEXT PRIMARY KEY,
+                        source_path   TEXT NOT NULL,
+                        source_mtime  REAL NOT NULL,
+                        thumb_file    TEXT NOT NULL
+                    );
                 """)
                 # Older databases predate the compilation column. Add it,
                 # and clear modified_at so the next scan actually re-reads
@@ -219,6 +225,30 @@ class LibraryService:
                 # skipped, so an index naming a newly added column would fail
                 # and abort the whole script before the migration ran.
                 con.execute("CREATE INDEX IF NOT EXISTS idx_dir ON tracks(dir)")
+                # art_cache predates source_key. Backfilled in Python since
+                # pathutil.key() (normcase + abspath) isn't expressible in
+                # SQL, and there are only ever as many rows as albums, not
+                # tracks.
+                have_art = {r["name"] for r in
+                            con.execute("PRAGMA table_info(art_cache)")}
+                if "source_key" not in have_art:
+                    con.execute(
+                        "ALTER TABLE art_cache ADD COLUMN source_key "
+                        "TEXT DEFAULT ''")
+                    rows = list(con.execute(
+                        "SELECT key, source_path FROM art_cache"))
+                    for row in rows:
+                        try:
+                            skey = pathutil.key(row["source_path"])
+                        except Exception:
+                            skey = ""
+                        con.execute(
+                            "UPDATE art_cache SET source_key = ? "
+                            "WHERE key = ?", (skey, row["key"]))
+                    log.info("art cache upgraded; backfilled source_key "
+                             "for %d existing entries", len(rows))
+                con.execute("CREATE INDEX IF NOT EXISTS idx_art_cache_source_key "
+                            "ON art_cache(source_key)")
                 con.commit()
             except Exception:
                 log.exception("could not open the library database")
@@ -262,6 +292,28 @@ class LibraryService:
                 cur = con.execute(
                     "DELETE FROM tracks WHERE key LIKE ? ESCAPE '\\'",
                     (_like_prefix(folder),))
+                # Cached covers whose source file lived under this root
+                # are now pointing at nothing this library still indexes.
+                # Best-effort: a thumbnail file that fails to delete just
+                # becomes an orphan on disk, which is harmless, so this
+                # never blocks the root/track removal that must succeed.
+                try:
+                    pattern = _like_prefix(folder)
+                    stale = con.execute(
+                        "SELECT thumb_file FROM art_cache "
+                        "WHERE source_key LIKE ? ESCAPE '\\'",
+                        (pattern,)).fetchall()
+                    con.execute(
+                        "DELETE FROM art_cache WHERE source_key LIKE ? "
+                        "ESCAPE '\\'", (pattern,))
+                    for row in stale:
+                        try:
+                            (config.ART_CACHE_DIR / row["thumb_file"]).unlink()
+                        except OSError:
+                            pass
+                except Exception:
+                    log.exception("could not purge cached art for root %s",
+                                  folder)
                 con.commit()
                 return cur.rowcount or 0
             except Exception:
@@ -452,15 +504,24 @@ class LibraryService:
     # ---- queries -------------------------------------------------------
 
     def _rows(self, sql, args=()) -> list:
-        with self._lock:
-            con = self._connect()
-            try:
-                return [dict(r) for r in con.execute(sql, args)]
-            except Exception:
-                log.exception("library query failed")
-                return []
-            finally:
-                con.close()
+        # No self._lock: this only ever opens its own fresh connection,
+        # never one shared across threads, and WAL mode (see _connect)
+        # exists specifically so reads can run alongside each other and
+        # alongside an active write. Serializing every read through one
+        # Python-level lock defeated that - four concurrent startup
+        # queries (albums/artists/genres/songs) were forced to run one
+        # at a time regardless, so whichever one happened to be
+        # scheduled last paid for the other three's combined time before
+        # it could even start, which is what made an individually fast
+        # query (genres) sometimes feel slow.
+        con = self._connect()
+        try:
+            return [dict(r) for r in con.execute(sql, args)]
+        except Exception:
+            log.exception("library query failed")
+            return []
+        finally:
+            con.close()
 
     def summary(self) -> dict:
         rows = self._rows(f"""
@@ -613,6 +674,66 @@ class LibraryService:
         for row in rows:
             row["truncated"] = truncated
         return rows
+
+    def album_key_for_path(self, path: str):
+        """The (album, album_artist) grouping for one indexed file.
+
+        Uses the exact same _EFFECTIVE_ALBUM/_GROUP_ARTIST expressions as
+        album_paths and the grid's own album grouping, so a track looked up
+        this way lands on the identical cache key as its album's card -
+        never a per-file or per-folder key. Returns None for a path the
+        library has not indexed (e.g. a file played from outside any
+        library root), so callers can fall back to a direct per-file read.
+        """
+        sql = (f"SELECT {_EFFECTIVE_ALBUM} AS album, {_GROUP_ARTIST} AS album_artist "
+               "FROM tracks WHERE key = ? LIMIT 1")
+        rows = self._rows(sql, (pathutil.key(path),))
+        if not rows:
+            return None
+        return rows[0]["album"], rows[0]["album_artist"]
+
+    def get_art_cache_entry(self, key: str):
+        """The persisted cache row for one album, or None.
+
+        Returns a dict with source_path, source_mtime, thumb_file, so a
+        caller can stat source_path and decide whether the cached
+        thumbnail is still valid without touching the audio file itself.
+        """
+        rows = self._rows(
+            "SELECT source_path, source_mtime, thumb_file "
+            "FROM art_cache WHERE key = ?", (key,))
+        return dict(rows[0]) if rows else None
+
+    def set_art_cache_entry(self, key: str, source_path: str,
+                             source_mtime: float, thumb_file: str) -> None:
+        """Persist which file supplied an album's cover, and when.
+
+        source_path is whichever file actually supplied the image - the
+        audio file itself if the art was embedded, or the specific cover
+        image file if it came from the folder - never just "the folder",
+        so a re-tagged track or a swapped cover image is each detected by
+        checking the one file that actually matters for that album.
+        """
+        try:
+            with self._lock:
+                con = self._connect()
+                try:
+                    con.execute(
+                        "INSERT INTO art_cache (key, source_path, "
+                        "source_mtime, thumb_file, source_key) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET "
+                        "source_path=excluded.source_path, "
+                        "source_mtime=excluded.source_mtime, "
+                        "thumb_file=excluded.thumb_file, "
+                        "source_key=excluded.source_key",
+                        (key, source_path, source_mtime, thumb_file,
+                         pathutil.key(source_path)))
+                    con.commit()
+                finally:
+                    con.close()
+        except Exception:
+            log.exception("could not persist art cache entry for %s", key)
 
     def album_paths(self, album: str, album_artist: str = "") -> list:
         """Candidate files for an album's cover, best first.

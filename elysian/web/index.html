@@ -177,6 +177,9 @@
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
       </div>
       <span class="time right" id="t-total">0:00</span>
+      <button class="toggle" id="theme-color-btn" title="Change theme color">
+        <span id="theme-color-wheel"></span>
+      </button>
       <svg id="volicon" title="Mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><g id="vol-waves"><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></g><g id="vol-muted" style="display:none" stroke-linecap="round"><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></g></svg>
       <div class="slider" id="vol">
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
@@ -201,45 +204,66 @@
       <div id="tagmodal-title">Edit Tags</div>
       <div id="tagmodal-sub"></div>
 
-      <div id="tagmodal-body">
-        <label>Title
-          <input id="tag-title" type="text" spellcheck="false">
-        </label>
-        <label>Artist
-          <input id="tag-artist" type="text" spellcheck="false">
-        </label>
-        <label>Album
-          <input id="tag-album" type="text" spellcheck="false">
-        </label>
-        <label>Album Artist
-          <input id="tag-album-artist" type="text" spellcheck="false">
-        </label>
-        <label>Genre
-          <input id="tag-genre" type="text" spellcheck="false">
-        </label>
-        <div class="tagrow-pair">
-          <label>Track
-            <input id="tag-track-number" type="number" min="0">
+      <div id="tagmodal-tabs">
+        <button type="button" class="tagtab active" id="tagtab-fields">Tags</button>
+        <button type="button" class="tagtab" id="tagtab-art">Album Art</button>
+      </div>
+
+      <div id="tagmodal-panes">
+        <div id="tagmodal-body">
+          <label>Title
+            <input id="tag-title" type="text" spellcheck="false">
           </label>
-          <label>of
-            <input id="tag-track-total" type="number" min="0">
+          <label>Artist
+            <input id="tag-artist" type="text" spellcheck="false">
+          </label>
+          <label>Album
+            <input id="tag-album" type="text" spellcheck="false">
+          </label>
+          <label>Album Artist
+            <input id="tag-album-artist" type="text" spellcheck="false">
+          </label>
+          <label>Genre
+            <input id="tag-genre" type="text" spellcheck="false">
+          </label>
+          <div class="tagrow-pair">
+            <label>Track
+              <input id="tag-track-number" type="number" min="0">
+            </label>
+            <label>of
+              <input id="tag-track-total" type="number" min="0">
+            </label>
+          </div>
+          <div class="tagrow-pair">
+            <label>Disc
+              <input id="tag-disc-number" type="number" min="0">
+            </label>
+            <label>of
+              <input id="tag-disc-total" type="number" min="0">
+            </label>
+          </div>
+          <label>Year
+            <input id="tag-year" type="number" min="0">
+          </label>
+          <label class="checkrow">
+            <input id="tag-compilation" type="checkbox">
+            Part of a compilation
           </label>
         </div>
-        <div class="tagrow-pair">
-          <label>Disc
-            <input id="tag-disc-number" type="number" min="0">
-          </label>
-          <label>of
-            <input id="tag-disc-total" type="number" min="0">
+
+        <div id="tagmodal-art-body">
+          <div id="tag-art-preview-large" class="tag-art-empty" title="Click to reposition/crop"></div>
+          <div id="tag-art-controls">
+            <button type="button" class="tbtn" id="tag-art-choose">Choose File</button>
+            <button type="button" class="tbtn" id="tag-art-paste">Paste</button>
+            <button type="button" class="tbtn" id="tag-art-copy">Copy</button>
+            <input id="tag-art-file" type="file" accept="image/*" class="hidden">
+          </div>
+          <label class="checkrow" id="tag-art-whole-album-row">
+            <input id="tag-art-whole-album" type="checkbox">
+            Apply to every track on this album
           </label>
         </div>
-        <label>Year
-          <input id="tag-year" type="number" min="0">
-        </label>
-        <label class="checkrow">
-          <input id="tag-compilation" type="checkbox">
-          Part of a compilation
-        </label>
       </div>
 
       <div id="tagmodal-errors" class="hidden"></div>
@@ -247,6 +271,55 @@
       <div id="tagmodal-buttons">
         <button class="tbtn" id="tag-cancel">Cancel</button>
         <button class="tbtn" id="tag-save">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="artcropmodal">
+    <div id="artcrop-box">
+      <div id="artcrop-title">Position Cover</div>
+      <div id="artcrop-viewport">
+        <canvas id="artcrop-canvas" width="500" height="500"></canvas>
+      </div>
+      <input id="artcrop-zoom" type="range" min="100" max="500" value="100">
+      <div id="artcrop-buttons">
+        <button type="button" class="tbtn" id="artcrop-cancel">Cancel</button>
+        <button type="button" class="tbtn" id="artcrop-use">Use This</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="themecolormodal">
+    <div id="themecolor-box">
+      <div id="themecolor-title">Theme Color</div>
+      <div id="themecolor-picker">
+        <div id="themecolor-sv-wrap">
+          <canvas id="themecolor-sv" width="200" height="160"></canvas>
+          <div id="themecolor-sv-cursor"></div>
+        </div>
+        <div id="themecolor-hue-wrap">
+          <canvas id="themecolor-hue" width="20" height="160"></canvas>
+          <div id="themecolor-hue-cursor"></div>
+        </div>
+      </div>
+      <div id="themecolor-fields">
+        <div id="themecolor-preview"></div>
+        <div id="themecolor-numbers">
+          <label>Hex
+            <input id="themecolor-hex" type="text" maxlength="7" spellcheck="false">
+          </label>
+          <div id="themecolor-rgb-row">
+            <label>R <input id="themecolor-r" type="number" min="0" max="255"></label>
+            <label>G <input id="themecolor-g" type="number" min="0" max="255"></label>
+            <label>B <input id="themecolor-b" type="number" min="0" max="255"></label>
+          </div>
+        </div>
+      </div>
+      <div id="themecolor-buttons">
+        <button type="button" class="tbtn" id="themecolor-default">Default</button>
+        <span id="themecolor-spacer"></span>
+        <button type="button" class="tbtn" id="themecolor-cancel">Cancel</button>
+        <button type="button" class="tbtn" id="themecolor-ok">OK</button>
       </div>
     </div>
   </div>

@@ -7,6 +7,7 @@ APP_VERSION = "2.5.2.0"
 
 SETTINGS_FILE = Path.home() / ".elysian_player.json"
 LIBRARY_DB_FILE = Path.home() / ".elysian_library.db"
+ART_CACHE_DIR = Path.home() / ".elysian_art_cache"
 
 AUDIO_EXTENSIONS = {".mp3", ".flac", ".wav", ".ogg"}
 
@@ -17,6 +18,7 @@ COVER_NAMES = (
 
 ART_SIZE = 240  # the CSS #art box; art.py renders at 2x this for HiDPI
 ART_CACHE_LIMIT = 64
+EMBED_ART_SIZE = 500  # square dimension for art written into files
 
 TICK_SECONDS = 0.1
 
