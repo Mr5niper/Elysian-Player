@@ -1,6 +1,6 @@
 # Elysian Player
 
-<img width="2350" height="855" alt="image" src="https://github.com/user-attachments/assets/f2f410e4-81b3-4cff-95b8-b8ba0229c737" />
+<img width="2350" height="855" alt="image" src="https://github.com/user-attachments/assets/d6eb0d39-8113-471b-95ca-ffb44b30773c" />
 
 A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
