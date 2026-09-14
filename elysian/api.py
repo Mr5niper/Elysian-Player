@@ -8,6 +8,7 @@ import base64
 import os
 import queue
 import random
+import re
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -64,6 +65,7 @@ class Api:
         # _do_library_save_done.
         self._tag_save_old_art_keys: set = set()
         self._shuffle = bool(self._settings["shuffle"])
+        self._theme_color = str(self._settings.get("theme_color", "#e04b3c"))
         self._repeat = self._settings["repeat"]
         self._engine.set_volume(self._settings.get("volume", 0.8))
         # Mute is session-local: the engine goes to 0 but _premute_volume is
@@ -470,6 +472,7 @@ class Api:
                 "muted": self._muted,
                 "shuffle": self._shuffle,
                 "repeat": self._repeat,
+                "theme_color": self._theme_color,
                 "status": self._footer(),
                 "maximized": self._maximized,
                 "revision": self._revision,
@@ -1075,6 +1078,15 @@ class Api:
     def _do_cycle_repeat(self) -> None:
         self._repeat = REPEAT_CYCLE[self._repeat]
         self._bump()
+
+    def _do_set_theme_color(self, hex_color) -> None:
+        hex_color = str(hex_color or "")
+        if not re.fullmatch(r"#[0-9a-fA-F]{6}", hex_color):
+            log.warning("ignoring invalid theme color %r", hex_color)
+            return
+        self._theme_color = hex_color
+        self._settings["theme_color"] = hex_color
+        settings_store.save(self._settings)
 
     def _advance_if_finished(self) -> None:
         if self._current_id >= 0 and self._engine.finished():
@@ -2181,6 +2193,9 @@ class Api:
     def cycle_repeat(self) -> None:
         self._post("cycle_repeat")
 
+    def set_theme_color(self, hex_color) -> None:
+        self._post("set_theme_color", str(hex_color or ""))
+
     def toggle_mute(self) -> None:
         self._post("toggle_mute")
 
@@ -2449,7 +2464,8 @@ class Api:
     _PERSISTED_COMMANDS = frozenset({
         "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
-        "set_volume", "toggle_shuffle", "cycle_repeat", "save_m3u",
+        "set_volume", "toggle_shuffle", "cycle_repeat", "set_theme_color",
+        "save_m3u",
         "clear_playlist", "library_play_context",
     })
 
@@ -2509,7 +2525,7 @@ class Api:
         "remove", "reorder",
         "play_id", "toggle_play", "stop", "next_track", "previous",
         "seek", "nudge", "set_volume", "toggle_shuffle", "cycle_repeat",
-        "toggle_mute",
+        "toggle_mute", "set_theme_color",
         "win_minimise", "win_maximise", "win_close",
         "win_resize_to", "win_geometry",
         "library_add_folder", "library_remove_root", "library_rescan",

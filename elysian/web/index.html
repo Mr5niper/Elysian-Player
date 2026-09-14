@@ -177,6 +177,9 @@
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
       </div>
       <span class="time right" id="t-total">0:00</span>
+      <button class="toggle" id="theme-color-btn" title="Change theme color">
+        <span id="theme-color-wheel"></span>
+      </button>
       <svg id="volicon" title="Mute" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M11 5 6 9H2v6h4l5 4z"/><g id="vol-waves"><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M18.5 5.5a9 9 0 0 1 0 13"/></g><g id="vol-muted" style="display:none" stroke-linecap="round"><line x1="16" y1="9" x2="22" y2="15"/><line x1="22" y1="9" x2="16" y2="15"/></g></svg>
       <div class="slider" id="vol">
         <div class="track"></div><div class="fill"></div><div class="knob"></div>
@@ -282,6 +285,41 @@
       <div id="artcrop-buttons">
         <button type="button" class="tbtn" id="artcrop-cancel">Cancel</button>
         <button type="button" class="tbtn" id="artcrop-use">Use This</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="themecolormodal">
+    <div id="themecolor-box">
+      <div id="themecolor-title">Theme Color</div>
+      <div id="themecolor-picker">
+        <div id="themecolor-sv-wrap">
+          <canvas id="themecolor-sv" width="200" height="160"></canvas>
+          <div id="themecolor-sv-cursor"></div>
+        </div>
+        <div id="themecolor-hue-wrap">
+          <canvas id="themecolor-hue" width="20" height="160"></canvas>
+          <div id="themecolor-hue-cursor"></div>
+        </div>
+      </div>
+      <div id="themecolor-fields">
+        <div id="themecolor-preview"></div>
+        <div id="themecolor-numbers">
+          <label>Hex
+            <input id="themecolor-hex" type="text" maxlength="7" spellcheck="false">
+          </label>
+          <div id="themecolor-rgb-row">
+            <label>R <input id="themecolor-r" type="number" min="0" max="255"></label>
+            <label>G <input id="themecolor-g" type="number" min="0" max="255"></label>
+            <label>B <input id="themecolor-b" type="number" min="0" max="255"></label>
+          </div>
+        </div>
+      </div>
+      <div id="themecolor-buttons">
+        <button type="button" class="tbtn" id="themecolor-default">Default</button>
+        <span id="themecolor-spacer"></span>
+        <button type="button" class="tbtn" id="themecolor-cancel">Cancel</button>
+        <button type="button" class="tbtn" id="themecolor-ok">OK</button>
       </div>
     </div>
   </div>
