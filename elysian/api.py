@@ -221,6 +221,14 @@ class Api:
         # still running. Consumed and cleared by _do_library_art_ready
         # the moment that key resolves.
         self._art_wait_key: dict[str, str] = {}
+        # True once the startup "prioritize the first screenful" trick has
+        # run. It must fire only this one time: it works by draining the
+        # real on-screen priority queue and replacing it with a guess,
+        # which is correct exactly once at startup (nothing real is in
+        # that queue yet) and actively harmful on every later albums
+        # refresh (a scan tick, a tag save), where it would keep
+        # stomping whatever the user is actually looking at right now.
+        self._art_startup_primed = False
         self._cmd: queue.Queue = queue.Queue()
         self._snap_lock = threading.RLock()
         self._worker = threading.Thread(target=self._run, name="elysian-core",
@@ -1320,7 +1328,14 @@ class Api:
         needle = str(needle or "")
         cached = self._library_browser_cache.get(view) if not needle else None
         items = cached["items"] if cached else []
-        self._library_browser_revision += 1
+        # No revision bump here: that counter tells the frontend's poll
+        # loop "a fresh query result exists, go fetch and re-render it" -
+        # this is called only when the frontend already rendered
+        # everything itself, from its own cache hit, so bumping it just
+        # made every fast-path switch trigger a second, redundant
+        # re-fetch and re-render (and a full art-cache resync from
+        # scratch) a moment later, which is exactly what made switching
+        # tabs feel sluggish again despite the fast path working.
         self._library_browser = {"view": view, "items": items,
                                  "needle": needle,
                                  "revision": self._library_browser_revision}
@@ -1330,12 +1345,19 @@ class Api:
     def _do_library_browser_ready(self, view, items, needle="",
                                   remember=True) -> None:
         if view == "albums" and not needle:
-            # Fill in the whole library in the background. Anything already
-            # cached or queued is skipped, so a refresh during a scan does
-            # not re-queue what is already done.
-            self._do_library_fill_art(
-                [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
-                 for i in (items or [])])
+            keys = [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
+                   for i in (items or [])]
+            if not self._art_startup_primed:
+                self._art_startup_primed = True
+                # Jump the first screenful to the front of the queue
+                # right now, exactly as if the user had already opened
+                # Library and scrolled to them - only ever done this
+                # once, at startup. Doing this again on a later refresh
+                # (a scan tick, a tag save) would drain whatever the user
+                # is actually looking at out of the real priority queue
+                # and replace it with this guess instead.
+                self._do_library_visible_art(keys[:60])
+            self._do_library_fill_art(keys)
         if not needle:
             # Kept independent of which tab is "current" below, so a tab
             # nobody is looking at right now still has something ready
@@ -1398,7 +1420,13 @@ class Api:
     def _start_art_workers(self) -> None:
         if self._art_workers:
             return
-        for i in range(4):
+        # Each worker spends almost all of its time blocked - waiting on
+        # a network file read, or waiting on the queue - not on CPU, so
+        # running many more of them in parallel does not compete for a
+        # core the way CPU-bound work would. More of them means the
+        # whole library clears the background queue several times
+        # faster instead of trickling through 4 at a time.
+        for i in range(12):
             t = threading.Thread(target=self._art_worker,
                                  name=f"elysian-lib-art-{i}", daemon=True)
             t.start()

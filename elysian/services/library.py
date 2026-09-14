@@ -504,15 +504,24 @@ class LibraryService:
     # ---- queries -------------------------------------------------------
 
     def _rows(self, sql, args=()) -> list:
-        with self._lock:
-            con = self._connect()
-            try:
-                return [dict(r) for r in con.execute(sql, args)]
-            except Exception:
-                log.exception("library query failed")
-                return []
-            finally:
-                con.close()
+        # No self._lock: this only ever opens its own fresh connection,
+        # never one shared across threads, and WAL mode (see _connect)
+        # exists specifically so reads can run alongside each other and
+        # alongside an active write. Serializing every read through one
+        # Python-level lock defeated that - four concurrent startup
+        # queries (albums/artists/genres/songs) were forced to run one
+        # at a time regardless, so whichever one happened to be
+        # scheduled last paid for the other three's combined time before
+        # it could even start, which is what made an individually fast
+        # query (genres) sometimes feel slow.
+        con = self._connect()
+        try:
+            return [dict(r) for r in con.execute(sql, args)]
+        except Exception:
+            log.exception("library query failed")
+            return []
+        finally:
+            con.close()
 
     def summary(self) -> dict:
         rows = self._rows(f"""
