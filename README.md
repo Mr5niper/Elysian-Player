@@ -20,21 +20,15 @@ megabytes. Audio runs on miniaudio.
   files fall back to their filename.
 * Shows embedded album art. If a track has none, the folder it lives in is
   checked for `cover.jpg`, `folder.jpg`, `front.jpg`, `album.jpg`, `cover.png`
-  or `folder.png`. Once resolved, a cover is cached to local disk keyed by its
-  album and artist tag, so it only ever needs decoding once, ever - not once
-  per launch. A cover can also be replaced directly from the tag editor: pick
-  a file, paste one from the clipboard, or copy the current cover out to
-  paste into another program, with a zoom/pan crop tool in between. See
-  [Album Art Editing](#album-art-editing) below.
-* Pick the app's accent color from a built-in color picker (a
-  saturation/value square, a hue strip, and hex/RGB fields - no OS dialog
-  involved). Every accent shade, background surface, and the waveform and
-  other visualizers all re-derive from whatever is picked, and the choice is
-  remembered across restarts. See [Appearance](#appearance) below.
+  or `folder.png`. Resolved covers are cached to local disk, so a large
+  library only decodes each one once, not on every launch.
+* Pick the app's own accent color from a built-in picker, no OS dialog
+  involved; the whole interface, waveform included, re-derives from
+  whatever is chosen. See [Appearance](#appearance).
 * Draws a waveform of the current track.
-* Double-click the cover or the waveform to swap in a live visualizer over
-  the whole row instead: spectrum bars, then an oscilloscope trace, then
-  back to the normal view. Double-click again to cycle through them.
+* Double-click the cover or the waveform to swap the whole row into a live
+  visualizer instead. Five modes to cycle through, then back to normal.
+  See [Visualizer](#visualizer).
 * Save and load M3U playlists. Paths are written relative to the playlist file
   where possible, so a playlist survives moving the folder it sits in.
 * Drag audio files or folders onto the window to add them.
@@ -126,8 +120,6 @@ unreachable.
   and stay warm across everything that can change them (a rescan, a folder
   removed, a tag edit). Whatever is actually on screen is still resolved
   first if it hasn't been already; everything else fills in behind it.
-
-  <!-- SCREENSHOT PLACEHOLDER: library album grid -->
 * **Scanning a folder works one subfolder at a time**, and each one is
   written and made browsable the moment it finishes rather than all at once
   at the end. A rescan only re-reads a file if its modification time
@@ -148,44 +140,51 @@ unreachable.
 
 ### Album Art Editing
 
-<!-- SCREENSHOT PLACEHOLDER: tag editor, Album Art tab -->
+<img width="385" height="621" alt="image" src="https://github.com/user-attachments/assets/03a0f48b-f617-4f07-9c49-81a58f048209" />
 
-A separate tab in the tag editor, next to the text fields, so it can never
-be confused with an apply-to-everything checkbox.
+A second tab in the tag editor, next to the text fields.
 
-* **Choose a file, paste one from the clipboard, or copy the current cover**
-  to paste into another program. All three work on the true original image,
-  not a small downsized copy kept for the app's own display.
-* **A built-in crop tool** positions and zooms whatever you picked or pasted
-  in a square viewport before it's saved. Leave it alone and the whole
-  original image is used, resized so its longer side is 500px, keeping its
-  natural aspect ratio - a tall cover stays tall, a wide one stays wide.
-  Zooming in crops it to a square instead. Nothing about a cover is ever
-  forced to square unless you actually zoom in to make it one.
+* Choose a file, paste one from the clipboard, or copy the current cover out - all on the original image, not a downsized copy.
+* Clicking on the album cover opens a crop tool that zooms and positions it in a square viewport. Left alone, the whole image is used instead, resized to 500px on its longer side at its natural aspect ratio.
 
-  <!-- SCREENSHOT PLACEHOLDER: crop tool, zoom + drag -->
-* **Applies to whichever files are open in the editor**, the same as every
-  other field - one track, or a whole album if that's what's selected. A
-  checkbox lets it apply to every track on the album instead, regardless of
-  the current selection; every other field's scope is unaffected either way.
-* **Written with mutagen directly**, no external tools: ID3 APIC for MP3 and
-  WAV, FLAC's native picture block for FLAC, and the standard base64
-  `METADATA_BLOCK_PICTURE` convention for OGG and Opus.
+<img width="385" height="511" alt="image" src="https://github.com/user-attachments/assets/35051863-7edd-4940-934d-5f537bd92eab" />
+ 
+* Applies to whichever files are open in the editor, or every track on the album if a checkbox is ticked.
+* Written directly with mutagen: ID3 APIC for MP3/WAV, FLAC's native picture block, or base64 `METADATA_BLOCK_PICTURE` for OGG/Opus.
 
 ### Appearance
 
-<!-- SCREENSHOT PLACEHOLDER: theme color picker -->
+<img width="1846" height="1096" alt="image" src="https://github.com/user-attachments/assets/ed055991-9fbe-4d85-998e-33d1b7f33a23" />
 
-A small color-wheel button next to the mute icon opens a built-in color
-picker - a saturation/value square, a hue strip, and hex/R/G/B fields, kept
-in sync with each other. No OS dialog is involved anywhere in it.
+A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts.
 
-Whatever color is picked becomes the app's accent color, and every other
-shade - buttons, panels, borders, the waveform, and every other visualizer
-except Melt, which keeps its own independent palette - re-derives from it
-using the same relative shading the built-in red theme already has. Default
-resets to that original red; Cancel reverts to whatever was active before
-the picker opened; OK saves the choice, which is remembered across restarts.
+### Visualizer
+
+Double-click the cover or the waveform to swap the whole row into a live visualizer. Double-click again to cycle through five modes, then back to normal: spectrum bars, an oscilloscope trace, a tunnel, a belt, and Melt.
+* **Spectrum Bars**
+  
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/56aaeac6-26d6-4bd1-b936-a863a2b98429" />
+
+  <br>
+* **Oscilloscope Trace**
+  
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/90f954d6-0064-4fe3-8237-c0b602ec55af" />
+
+  <br>
+* **Tunnel** rings pulse outward from the center, each one shaped from the raw waveform around its own circumference rather than the frequency bars, so a ring can bulge inward as easily as outward. Glowing particles drift down the tunnel, each tracking one specific frequency band for as long as it's alive.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/a9749b55-b659-400b-b52c-aaeeb463545e" />
+
+  <br>
+* **Belt** wraps the spectrum into a ring viewed in perspective, tilting and turning on its own over time, with particle trails tracing its motion.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/2e5b2d17-bf8a-4fc6-a3d6-025f6b25557c" />
+
+  <br>
+* **Melt** continuously resamples its own previous frame through a shifting coordinate warp, so whatever's drawn into it keeps getting dragged, spiraled or rippled by the frame before it - the technique behind Sonique's classic "Smear" visualizer, reimplemented from scratch rather than ported. Its color palette, particle shapes, and waveform paths each hold for a while on their own independent timer, then crossfade to a new one.
+
+  <img width="590" height="380" alt="image" src="https://github.com/user-attachments/assets/1979e2ad-4f76-4f58-9274-73b52d357eb6" />
+
 
 ## Controls
 
