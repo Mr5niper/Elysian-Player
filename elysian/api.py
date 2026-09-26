@@ -153,11 +153,14 @@ class Api:
         # tab does not have to wait for a fresh query if one already
         # finished, whatever tab was last open.
         self._library_browser_cache = {}
-        # (view, needle) -> True while that exact query is already
-        # running, so a click on a tab whose prewarm hasn't finished yet
-        # never starts a second, duplicate query for the same thing -
-        # the one already in flight is left to finish and deliver its
-        # result normally.
+        # (view, needle) -> {"remember": bool} while that exact query is
+        # already running, so a click on a tab whose prewarm hasn't
+        # finished yet never starts a second, duplicate query for the
+        # same thing - the one already in flight is left to finish and
+        # deliver its result normally. The dict (rather than a bare
+        # True) lets a later call for the same key escalate "remember"
+        # to True in place if the in-flight query was only ever a
+        # background prewarm; see _do_library_browser.
         self._library_browser_pending = {}
         self._library_detail_gen = 0
         self._library_art_pending = set()
@@ -1279,11 +1282,31 @@ class Api:
                 else "albums")
         needle = str(needle or "")
         key = (view, needle)
-        if key in self._library_browser_pending:
-            return  # this exact query is already running; nothing new
-                     # to start, the one in flight will deliver its
-                     # result normally when it finishes
-        self._library_browser_pending[key] = True
+        pending = self._library_browser_pending.get(key)
+        if pending is not None:
+            # This exact query is already running - nothing new to
+            # start, the one in flight will deliver its result normally
+            # when it finishes. But dropping this call outright used to
+            # also drop what it was actually asking for: a background
+            # prewarm (remember=False) is very often already in flight
+            # for a view the instant a real navigation to that same
+            # view arrives, since a scan tick, a scan finishing, a tag
+            # save or a root being removed all refire
+            # _do_library_prewarm_all for every view, and an unfiltered
+            # tab switch whose cache was just invalidated by that same
+            # event goes through this exact path. Silently keeping the
+            # in-flight call's own remember=False meant the navigation
+            # that triggered this call was never actually recorded as
+            # "the current view", which is what intermittently left the
+            # persisted last-used tab stuck on whatever view last won
+            # that race, rather than the one actually being looked at.
+            # remember only ever escalates False -> True here, never
+            # the reverse, so a real navigation's intent always wins
+            # regardless of which call happened to start the thread.
+            if remember and not pending["remember"]:
+                pending["remember"] = True
+            return
+        self._library_browser_pending[key] = {"remember": remember}
         gen = self._library_browser_gen.get(view, 0) + 1
         self._library_browser_gen[view] = gen
 
@@ -1311,8 +1334,12 @@ class Api:
                             # just late, and showing it now would
                             # silently undo whatever the newer one
                             # produced
+                # Read last, not the parameter captured when this thread
+                # started: a later call for this same key may have
+                # escalated remember to True in the meantime (see
+                # above), and that escalation must win.
                 self._post("library_browser_ready", view, items, needle,
-                           remember)
+                           self._library_browser_pending[key]["remember"])
             finally:
                 self._library_browser_pending.pop(key, None)
 
@@ -2450,7 +2477,18 @@ class Api:
     #: reorder, and costs no file I/O to apply here, since add_paths only
     #: compares strings. save_m3u is an explicit
     #: user action; silently discarding a save the user believes happened is
-    #: worse than a slow exit. load_m3u, ingest and open_paths are deliberately
+    #: worse than a slow exit. library_note_view is here for the same reason:
+    #: it is a pure, fast settings write with no thread of its own, posted on
+    #: nearly every ordinary tab switch (whenever the frontend's own cache
+    #: already had the answer), so closing a moment after switching tabs
+    #: should not silently leave the library on whatever tab an earlier
+    #: session left it on. library_browser is deliberately absent even
+    #: though it is what records the same "current view" when the cache
+    #: was not warm: it only starts a background query and returns, and
+    #: that query's own result - the thing that would actually write the
+    #: setting - arrives later on a thread nothing is left listening to
+    #: once the window is gone, so flushing it here would not accomplish
+    #: anything. load_m3u, ingest and open_paths are deliberately
     #: absent: applying them here would stat or read files, possibly over a
     #: dead network share, with the window already gone, and their loss costs
     #: nothing that reopening the app cannot redo. Anything else still queued
@@ -2462,7 +2500,7 @@ class Api:
         "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "set_theme_color",
-        "save_m3u",
+        "save_m3u", "library_note_view",
         "clear_playlist", "library_play_context",
     })
 
