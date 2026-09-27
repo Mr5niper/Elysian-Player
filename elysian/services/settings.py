@@ -34,12 +34,19 @@ def load() -> dict:
                         data[key] = raw[key]
     except Exception:
         log.warning("could not read settings, using defaults", exc_info=True)
+    # TEMPORARY DIAGNOSTIC: pinning down the library tab persistence bug.
+    # Remove once that is confirmed fixed with real evidence.
+    log.info("[LIBDIAG] settings.load(): library_view=%r",
+             data.get("library_view"))
     return data
 
 
 def save(data: dict) -> None:
     """Write atomically so a crash mid-write cannot leave a truncated file."""
     payload = {k: data.get(k, DEFAULTS[k]) for k in DEFAULTS}
+    # TEMPORARY DIAGNOSTIC: see load() above.
+    log.info("[LIBDIAG] settings.save(): library_view=%r last_path=%r",
+             payload.get("library_view"), payload.get("last_path"))
     tmp = Path(str(SETTINGS_FILE) + ".tmp")
     try:
         tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")

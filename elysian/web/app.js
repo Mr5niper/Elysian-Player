@@ -1536,51 +1536,72 @@ function libraryOpened() {
     // Open on the tab the library was left on. The backend saves it, and
     // asking for the state first costs one call on the first open only.
     const ask = (view) => {
-      libView = view;
-      libDesiredNeedle = $("libfilter").value.trim();
-      libLoading = true;
-      document.querySelectorAll(".libtab").forEach((x) =>
-        x.classList.toggle("active", x.dataset.lib === libView));
-      libGridSig = "";
-      libItems = [];
-      libDetail = null;
-      libSelected.clear();
-      libAnchor = null;
-      renderLibrary();
-      libPending++;
-      // Every view has been kept warm since app startup, not just since
-      // Library was first opened, and not only Albums (see the startup
-      // prewarm). If this open wants the plain unfiltered version of
-      // whatever tab was last open, use whatever has already finished
-      // directly. request_browser is still safe to fall through to
-      // otherwise: the backend now recognizes an identical query already
-      // in flight and does not start a second one for it - this only
-      // ever waits on that same work, never repeats it.
-      if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
-        a.library_get_prewarmed(view).then((b) => {
-          const stillWanted = view === libView && libDesiredNeedle === "";
-          if (stillWanted && b && Array.isArray(b.items)
-              && (b.needle || "") === "") {
-            libPending--;
-            libLoading = false;
-            libItems = b.items;
-            renderLibrary();
-            libTabState[libView] = captureCurrentLibTabState();
-            libTabState[libView].stale = false;
-            a.library_note_view(view, "");
-          } else if (stillWanted) {
+      traceLibJS(`libraryOpened/ask(${view}) starting`);
+      try {
+        libView = view;
+        libDesiredNeedle = $("libfilter").value.trim();
+        libLoading = true;
+        document.querySelectorAll(".libtab").forEach((x) =>
+          x.classList.toggle("active", x.dataset.lib === libView));
+        libGridSig = "";
+        libItems = [];
+        libDetail = null;
+        libSelected.clear();
+        libAnchor = null;
+        renderLibrary();
+        libPending++;
+        // Every view has been kept warm since app startup, not just since
+        // Library was first opened, and not only Albums (see the startup
+        // prewarm). If this open wants the plain unfiltered version of
+        // whatever tab was last open, use whatever has already finished
+        // directly. request_browser is still safe to fall through to
+        // otherwise: the backend now recognizes an identical query already
+        // in flight and does not start a second one for it - this only
+        // ever waits on that same work, never repeats it.
+        if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
+          a.library_get_prewarmed(view).then((b) => {
+            try {
+              const stillWanted = view === libView && libDesiredNeedle === "";
+              traceLibJS(`libraryOpened/ask(${view}): prewarmed resolved, ` +
+                         `stillWanted=${stillWanted} items=` +
+                         `${b && Array.isArray(b.items) ? b.items.length
+                         : "n/a"}`);
+              if (stillWanted && b && Array.isArray(b.items)
+                  && (b.needle || "") === "") {
+                libPending--;
+                libLoading = false;
+                libItems = b.items;
+                renderLibrary();
+                libTabState[libView] = captureCurrentLibTabState();
+                libTabState[libView].stale = false;
+                traceLibJS(`libraryOpened/ask(${view}): calling ` +
+                           `library_note_view`);
+                a.library_note_view(view, "");
+              } else if (stillWanted) {
+                traceLibJS(`libraryOpened/ask(${view}): cache not usable, ` +
+                           `calling library_request_browser`);
+                a.library_request_browser(libView, libDesiredNeedle);
+              } else {
+                libPending--;
+              }
+              schedule();
+            } catch (err) {
+              traceLibJS(`libraryOpened/ask(${view}): THREW inside ` +
+                         `prewarmed callback: ${err && err.stack || err}`);
+            }
+          }).catch((err) => {
+            traceLibJS(`libraryOpened/ask(${view}): prewarmed rejected: ` +
+                       `${err && err.stack || err}`);
             a.library_request_browser(libView, libDesiredNeedle);
-          } else {
-            libPending--;
-          }
-          schedule();
-        }).catch(() => {
+            schedule();
+          });
+        } else {
           a.library_request_browser(libView, libDesiredNeedle);
           schedule();
-        });
-      } else {
-        a.library_request_browser(libView, libDesiredNeedle);
-        schedule();
+        }
+      } catch (err) {
+        traceLibJS(`libraryOpened/ask(${view}): THREW: ` +
+                   `${err && err.stack || err}`);
       }
     };
     if (typeof a.library_get_state === "function") {
@@ -2495,71 +2516,146 @@ function invalidateAllLibTabState() {
   invalidateLibTabState("songs");
 }
 
+// TEMPORARY DIAGNOSTIC: a real Library tab click has twice now been
+// observed to produce zero backend activity - not the wrong tab,
+// nothing at all. Every function setLibView runs was checked and none
+// of them should throw on real data, but an uncaught exception
+// anywhere inside it would abort silently right where it happened,
+// including skipping the note_view/request_browser call the whole
+// function exists to make. console.log alone needs DevTools open to
+// see, which is an extra step nobody should have to take just to
+// capture this - so this also forwards the same line into the
+// backend's own log file (js_log), the same file already being sent
+// for every other trace, tagged the same way ([LIBDIAG-JS]). Remove
+// both this and js_log in api.py once the cause is confirmed.
+function traceLibJS(msg) {
+  console.log(msg);
+  try {
+    const a = api();
+    if (a && typeof a.js_log === "function") a.js_log(msg);
+  } catch (err) { /* never let tracing itself break anything */ }
+}
+
 function setLibView(name) {
-  if (libView === name) return;
+  traceLibJS(`setLibView(${name}) called, current libView=${libView}`);
+  try {
+    if (libView === name) {
+      traceLibJS(`setLibView(${name}): already on this tab, no-op`);
+      return;
+    }
 
-  libTabState[libView] = captureCurrentLibTabState();
+    libTabState[libView] = captureCurrentLibTabState();
 
-  libView = name;
-  document.querySelectorAll(".libtab").forEach((b) =>
-    b.classList.toggle("active", b.dataset.lib === name));
+    libView = name;
+    document.querySelectorAll(".libtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.lib === name));
 
-  const saved = libTabState[name];
-  const activeNeedle = $("libfilter").value.trim();
-  // A cached tab snapshot may have been captured under a different (or no)
-  // filter, so it can't be trusted while one is currently active - restore
-  // it only when there is nothing typed to filter by.
-  if (!activeNeedle && saved && !saved.stale) {
-    libLoading = false;
-    restoreLibTabState(saved);
-    return;
-  }
-
-  libGridSig = "";
-  libItems = [];
-  libDetail = null;
-  libSelected.clear();
-  libAnchor = null;
-  renderLibrary();
-
-  const a = api();
-  if (!a) return;
-  libDesiredNeedle = activeNeedle;
-  libLoading = true;
-  libPending++;
-  // The backend has kept every view's unfiltered listing warm since
-  // startup (and refreshed on every library-changing event since), not
-  // just whichever tab happened to be open. If this switch wants that
-  // exact thing (no active filter), use whatever has already finished
-  // directly instead of firing a live query that repeats work already
-  // done. request_browser is still safe to fall through to otherwise -
-  // the backend recognizes an identical query already in flight and
-  // waits on it rather than starting a second one.
-  if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
-    a.library_get_prewarmed(name).then((b) => {
-      const stillWanted = name === libView && libDesiredNeedle === "";
-      if (stillWanted && b && Array.isArray(b.items)
-          && (b.needle || "") === "") {
-        libPending--;
-        libLoading = false;
-        libItems = b.items;
-        renderLibrary();
-        libTabState[libView] = captureCurrentLibTabState();
-        libTabState[libView].stale = false;
-        a.library_note_view(name, "");
-      } else if (stillWanted) {
-        a.library_request_browser(name, activeNeedle);
-      } else {
-        libPending--;
+    const saved = libTabState[name];
+    const activeNeedle = $("libfilter").value.trim();
+    // A cached tab snapshot may have been captured under a different (or no)
+    // filter, so it can't be trusted while one is currently active - restore
+    // it only when there is nothing typed to filter by.
+    if (!activeNeedle && saved && !saved.stale) {
+      traceLibJS(`setLibView(${name}): restoring from local cache`);
+      libLoading = false;
+      restoreLibTabState(saved);
+      // Restoring locally skips the backend round trip for the *data*,
+      // which is the whole point - but it must not also skip telling the
+      // backend this is now the current view. It used to: this branch
+      // returned right after restoreLibTabState, before the api() call
+      // further down that every other path uses to reach
+      // library_note_view - so the FIRST visit to a tab in a session
+      // persisted correctly, and every visit after that (second, third,
+      // ...) silently didn't, because it always took this same early
+      // return. "Current tab" then stuck on whichever tab was last
+      // visited for the first time that session, not whichever was
+      // actually looked at last - exactly backwards, and exactly what
+      // made a revisited tab never get remembered no matter how many
+      // times it was clicked back to right before closing.
+      const a2 = api();
+      if (a2 && typeof a2.library_note_view === "function") {
+        traceLibJS(`setLibView(${name}): calling library_note_view from ` +
+                   `the cache-restore path`);
+        a2.library_note_view(name, "");
       }
-      schedule();
-    }).catch(() => {
+      return;
+    }
+
+    libGridSig = "";
+    libItems = [];
+    libDetail = null;
+    libSelected.clear();
+    libAnchor = null;
+    renderLibrary();
+    traceLibJS(`setLibView(${name}): initial empty renderLibrary done, ` +
+               `querying backend`);
+
+    const a = api();
+    if (!a) {
+      traceLibJS(`setLibView(${name}): api() returned falsy, backend ` +
+                 `never contacted`);
+      return;
+    }
+    libDesiredNeedle = activeNeedle;
+    libLoading = true;
+    libPending++;
+    // The backend has kept every view's unfiltered listing warm since
+    // startup (and refreshed on every library-changing event since), not
+    // just whichever tab happened to be open. If this switch wants that
+    // exact thing (no active filter), use whatever has already finished
+    // directly instead of firing a live query that repeats work already
+    // done. request_browser is still safe to fall through to otherwise -
+    // the backend recognizes an identical query already in flight and
+    // waits on it rather than starting a second one.
+    if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
+      a.library_get_prewarmed(name).then((b) => {
+        try {
+          const stillWanted = name === libView && libDesiredNeedle === "";
+          traceLibJS(`setLibView(${name}): library_get_prewarmed ` +
+                     `resolved, stillWanted=${stillWanted} items=` +
+                     `${b && Array.isArray(b.items) ? b.items.length : "n/a"}` +
+                     ` needle=${JSON.stringify(b && b.needle)}`);
+          if (stillWanted && b && Array.isArray(b.items)
+              && (b.needle || "") === "") {
+            libPending--;
+            libLoading = false;
+            libItems = b.items;
+            renderLibrary();
+            libTabState[libView] = captureCurrentLibTabState();
+            libTabState[libView].stale = false;
+            traceLibJS(`setLibView(${name}): calling library_note_view`);
+            a.library_note_view(name, "");
+          } else if (stillWanted) {
+            traceLibJS(`setLibView(${name}): cache not usable, calling ` +
+                       `library_request_browser`);
+            a.library_request_browser(name, activeNeedle);
+          } else {
+            traceLibJS(`setLibView(${name}): no longer wanted by the ` +
+                       `time this resolved, dropped`);
+            libPending--;
+          }
+          schedule();
+        } catch (err) {
+          traceLibJS(`setLibView(${name}): THREW inside ` +
+                     `library_get_prewarmed callback: ${err && err.stack
+                     || err}`);
+        }
+      }).catch((err) => {
+        traceLibJS(`setLibView(${name}): library_get_prewarmed rejected, ` +
+                   `falling back to request_browser: ${err && err.stack
+                   || err}`);
+        a.library_request_browser(name, activeNeedle);
+        schedule();
+      });
+    } else {
+      traceLibJS(`setLibView(${name}): needle active or ` +
+                 `library_get_prewarmed missing, calling ` +
+                 `request_browser directly`);
       a.library_request_browser(name, activeNeedle);
       schedule();
-    });
-  } else {
-    a.library_request_browser(name, activeNeedle);
-    schedule();
+    }
+  } catch (err) {
+    traceLibJS(`setLibView(${name}): THREW: ${err && err.stack || err}`);
   }
 }
 
@@ -2841,6 +2937,26 @@ function applyLibraryTick(tick) {
   const a = api();
   if (!a) return;
   libScanning = !!tick.library_scanning;
+  // Deliberately ahead of the libOpened gate below. The backend starts
+  // resolving every album's art at startup and keeps going the whole
+  // time the app is open, whether or not Library has ever been visited
+  // (see _do_restore_session / _do_library_prewarm_all on the Python
+  // side) - it does not wait for a click, and never has. But this
+  // frontend used to only ever ask for those results, via collectArt,
+  // from inside the block the libOpened check below guards - so the
+  // work the backend had already finished sat there unread, and the
+  // very first Library visit was the first moment anything client-side
+  // caught up, which is what made it look like nothing had started
+  // before that click. collectArt/paintLibArt are both no-ops before
+  // any card exists (libCards starts as an empty Map), so calling this
+  // early does nothing visible yet - it just keeps the local art cache
+  // caught up continuously, so that by the time Library is actually
+  // opened for the first time, every card it builds paints its cover
+  // immediately instead of one at a time as each one "arrives".
+  if (tick.library_art_revision !== libArtRevision) {
+    libArtRevision = tick.library_art_revision;
+    collectArt(libArtSeq);
+  }
   if (!libOpened) return;
   if (tick.library_browser_revision !== libBrowserRevision) {
     libBrowserRevision = tick.library_browser_revision;
@@ -2920,10 +3036,6 @@ function applyLibraryTick(tick) {
         settle();
       }
     }).catch(() => {});
-  }
-  if (tick.library_art_revision !== libArtRevision) {
-    libArtRevision = tick.library_art_revision;
-    collectArt(libArtSeq);
   }
   if (tick.library_editor_revision !== libEditorRevision) {
     libEditorRevision = tick.library_editor_revision;
