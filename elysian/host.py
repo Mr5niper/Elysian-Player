@@ -7,7 +7,9 @@ handles a path passed on the command line so double-clicking an audio file in
 Explorer opens it here.
 """
 import os
+import re
 import sys
+import json
 
 import webview
 from webview.dom import DOMEventHandler
@@ -25,14 +27,60 @@ log = _get_logger("host")
 
 WEB_DIR = "elysian/web"
 
+# Matches exactly what index.html's own inline script expects to find and
+# replace - see its /*ELYSIAN_THEME_COLOR*/ comment markers.
+_THEME_TOKEN_START = "/*ELYSIAN_THEME_COLOR*/"
+_THEME_TOKEN_END = "/*END_ELYSIAN_THEME_COLOR*/"
 
-def _index_path() -> str:
+
+def _static_index_path() -> Path:
     base = getattr(sys, "_MEIPASS", None)
     if base:
         candidate = Path(base) / WEB_DIR / "index.html"
         if candidate.is_file():
-            return str(candidate)
-    return str(Path(__file__).resolve().parent / "web" / "index.html")
+            return candidate
+    return Path(__file__).resolve().parent / "web" / "index.html"
+
+
+def _index_path(theme_color: str | None = None) -> str:
+    """Where to point the window's url at.
+
+    Ordinarily just the plain static file. But that file opens in
+    style.css's own hardcoded default accent color for an instant before
+    JavaScript, running only once the window and the bridge to Python
+    both exist, gets a chance to apply the color actually saved - a
+    visible flash of the wrong color on every single launch. index.html
+    carries its own early inline script that applies the real color
+    before anything paints, specifically to avoid that, but it needs
+    that color baked into the page text itself to do it - there is no
+    bridge call it could make that would be fast enough, since the
+    entire point is running before the window (and so the bridge) is
+    even up.
+    A sibling copy with that color spliced in is written fresh next to
+    the original on every launch - cheap, and always exactly matches
+    whatever Api.initial_theme_color() currently returns. Writing next
+    to the original, rather than to some other directory, is what keeps
+    index.html's own relative references to style.css and app.js
+    working unchanged.
+    """
+    original = _static_index_path()
+    if not theme_color or not re.fullmatch(r"#[0-9a-fA-F]{6}", theme_color):
+        return str(original)
+    try:
+        html = original.read_text(encoding="utf-8")
+        start = html.index(_THEME_TOKEN_START)
+        end = html.index(_THEME_TOKEN_END, start) + len(_THEME_TOKEN_END)
+        html = (html[:start] + _THEME_TOKEN_START
+                + json.dumps(theme_color) + _THEME_TOKEN_END
+                + html[end:])
+        boot_path = original.with_name("index.boot.html")
+        boot_path.write_text(html, encoding="utf-8")
+        return str(boot_path)
+    except Exception:
+        log.warning("could not bake the saved theme color into the boot "
+                    "page; opening with the default color for this one "
+                    "launch instead", exc_info=True)
+        return str(original)
 
 
 def _argv_paths() -> list[str]:
@@ -136,7 +184,7 @@ def run() -> int:
 
     window = webview.create_window(
         title=config.APP_NAME,
-        url=_index_path(),
+        url=_index_path(api.initial_theme_color()),
         js_api=api,
         width=config.WINDOW_WIDTH,
         height=config.WINDOW_HEIGHT,

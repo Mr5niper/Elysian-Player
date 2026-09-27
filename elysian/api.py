@@ -2755,6 +2755,7 @@ class Api:
     #: sees them as public attributes of this object too.
     HOST_PUBLIC = frozenset({
         "attach", "boot", "ingest", "open_paths", "close", "set_maximized",
+        "initial_theme_color",
         "JS_BRIDGE", "HOST_PUBLIC",
     })
 
@@ -2804,6 +2805,16 @@ class Api:
         # bind thread while _rebuild_snapshot was iterating it. The queue is
         # FIFO, so restore still lands before any open_paths posted after it.
         self._post("restore_session")
+
+    def initial_theme_color(self) -> str:
+        """The saved theme color, read directly rather than through a
+        queued command: called from host.run(), before the window (and
+        so the worker loop's usual caller) exists at all, to bake this
+        into the page HTML itself - see host._index_path. Never called
+        from JavaScript, which gets this same value the ordinary way,
+        on the first tick, once the window is up.
+        """
+        return self._theme_color
 
     def ingest(self, paths) -> int:
         return self._add_paths(paths)
