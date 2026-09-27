@@ -686,12 +686,23 @@ class LibraryService:
         # tagged name - so it keeps the plain "" it always has, which is
         # fine: compilations are already ordered by the primary key above,
         # not by this one.
+        #
+        # The year keys are forced to a constant for a compilation rather
+        # than left to apply as they do for a band: year makes sense for
+        # ordering one band's own discography chronologically, but a shelf
+        # of unrelated Various Artists compilations has no such thing as
+        # "chronological order" between one release and the next, and
+        # sorting them by year first meant two compilations with adjacent
+        # years landed nowhere near each other alphabetically - forcing
+        # both to tie here is what actually makes the album name (the
+        # last key) the real differentiator, rather than only a tiebreaker
+        # for whichever compilations happened to share a year.
         rows.sort(key=lambda r: (
             1 if r["compilation"] else 0,
             "" if r["compilation"] else
                 _effective_sort(r["artist_sort_tag"], r["album_artist"]),
-            1 if not r["year"] else 0,
-            r["year"] or 0,
+            0 if r["compilation"] else (1 if not r["year"] else 0),
+            0 if r["compilation"] else (r["year"] or 0),
             _effective_sort(r["album_sort_tag"], r["album"]),
         ))
         for row in rows:
