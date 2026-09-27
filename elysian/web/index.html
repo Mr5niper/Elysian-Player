@@ -239,7 +239,11 @@ window.ELYSIAN_INITIAL_THEME_COLOR = /*ELYSIAN_THEME_COLOR*/null/*END_ELYSIAN_TH
             <button class="libtab" data-lib="genres">Genres</button>
             <button class="libtab" data-lib="songs">Songs</button>
           </div>
-          <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
+          <div id="libfilter-wrap">
+            <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
+            <button type="button" id="libfilter-clear" class="hidden"
+                    title="Clear filter" aria-label="Clear filter">&times;</button>
+          </div>
           <button class="tbtn" id="lib-folders">Folders</button>
           <button class="tbtn" id="lib-rescan">Rescan</button>
         </div>

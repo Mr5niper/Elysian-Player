@@ -688,14 +688,24 @@ html, body {
 .libtab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
 .libtab.active { border-color: var(--accent); color: var(--accent-hi); }
 .tbtn.on { border-color: var(--accent); color: var(--accent-hi); }
+#libfilter-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
 #libfilter {
   flex: 1; min-width: 0; background: rgba(0,0,0,0.28);
   border: 1px solid var(--line); border-radius: 7px;
-  padding: 7px 11px; color: var(--text); font-size: 12px;
+  padding: 7px 28px 7px 11px; color: var(--text); font-size: 12px;
   font-family: inherit; outline: none; user-select: text;
 }
 #libfilter:focus { border-color: var(--accent); }
 #libfilter::placeholder { color: #6a6a74; }
+#libfilter-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; padding: 0; border: none; background: none;
+  color: var(--muted); font-size: 16px; line-height: 1; cursor: default;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 5px;
+}
+#libfilter-clear:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+#libfilter-clear.hidden { display: none; }
 
 #libcrumb {
   display: flex; align-items: center; gap: 10px;

@@ -1025,7 +1025,7 @@ document.addEventListener("keydown", (e) => {
       field.value = "";
       field.blur();
       if (field === $("filter")) renderList(true);
-      else if (field === $("libfilter")) renderLibrary();
+      else if (field === $("libfilter")) applyLibraryFilter("", true);
     }
     return;
   }
@@ -1530,6 +1530,10 @@ function paintLibPlaying() {
   if (cell) cell.textContent = "\u25B6";
   libPlayingRow = row;
 }
+function paintLibFilterClearBtn() {
+  $("libfilter-clear").classList.toggle("hidden",
+    $("libfilter").value.length === 0);
+}
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -1537,6 +1541,19 @@ let libBrowserRevision = -1;
 let libDetailRevision = -1;
 let libLoading = false;
 let libDesiredNeedle = "";
+// Each of the four tabs remembers its own search text, keyed by view name.
+// #libfilter is one shared DOM element - there is only one box on screen -
+// but what it *shows*, and what it's actually filtering, now changes to
+// match whichever tab is current rather than leaving one tab's typed
+// search sitting there while a different tab is displayed. That sharing
+// used to be the whole bug: switching tabs never touched the box, so a
+// search typed on one tab stayed visible (and stayed the active filter)
+// on every tab visited afterward, silently baking that filtered result
+// into each of those tabs' own cached snapshot as if it were their
+// normal, unfiltered state - clearing the box later fixed only whichever
+// tab was current at that exact moment, not the others already
+// contaminated.
+let libFilterByView = { albums: "", artists: "", genres: "", songs: "" };
 
 const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -2556,11 +2573,22 @@ function setLibView(name) {
       return;
     }
 
+    // Defensive: the "input" listener already keeps this in sync on every
+    // keystroke, but this guarantees it regardless of how the box's value
+    // got here.
+    libFilterByView[libView] = $("libfilter").value.trim();
     libTabState[libView] = captureCurrentLibTabState();
 
     libView = name;
     document.querySelectorAll(".libtab").forEach((b) =>
       b.classList.toggle("active", b.dataset.lib === name));
+    // The actual fix for a search typed on one tab silently filtering (or
+    // contaminating the cache of) every other tab visited afterward: the
+    // box now shows THIS tab's own remembered search - empty if it has
+    // never had one - instead of whatever was left over from whichever
+    // tab was open before.
+    $("libfilter").value = libFilterByView[name] || "";
+    paintLibFilterClearBtn();
 
     const saved = libTabState[name];
     const activeNeedle = $("libfilter").value.trim();
@@ -2710,53 +2738,80 @@ document.querySelectorAll(".libtab").forEach((b) =>
   b.addEventListener("click", () => setLibView(b.dataset.lib)));
 
 let libFilterTimer = 0;
-$("libfilter").addEventListener("input", () => {
+
+function applyLibraryFilter(needle, immediate) {
   // Filtering is backend-owned, not a local array filter, because Albums,
   // Artists, Genres and Songs each search against different fields. But
   // the UI should still react immediately while the query is in flight,
   // rather than sitting on the previous result until it lands.
-  const needle = $("libfilter").value.trim();
+  //
+  // Shared by the filter box's own "input" listener, the clear button and
+  // Escape, so all three behave identically - Escape in particular used
+  // to only ever blank the box visually and re-render whatever was
+  // already on screen, without actually re-querying anything, so
+  // clearing the box did not really clear the filter.
+  const view = libView;
+  libFilterByView[view] = needle;
   libDesiredNeedle = needle;
   libDetail = null;
   libAnchor = null;
   libLoading = true;
   libItems = [];
   libGridSig = "";
+  paintLibFilterClearBtn();
   renderLibrary();
   schedule();
 
   clearTimeout(libFilterTimer);
-  libFilterTimer = setTimeout(() => {
+  const fire = () => {
+    // The tab this search was typed on may no longer be the one on
+    // screen by the time this fires - switching tabs never canceled or
+    // redirected this timer, so a search typed on one tab could still
+    // land on whichever *different* tab someone had already moved on
+    // to, silently applying that search as if it belonged there.
+    if (view !== libView) return;
     const a = api();
     if (!a) return;
     libPending++;
     if (!needle && typeof a.library_get_prewarmed === "function") {
-      a.library_get_prewarmed(libView).then((b) => {
-        const stillWanted = libDesiredNeedle === needle;
+      a.library_get_prewarmed(view).then((b) => {
+        const stillWanted = view === libView && libDesiredNeedle === needle;
         if (stillWanted && b && Array.isArray(b.items)
             && (b.needle || "") === "") {
           libPending--;
           libLoading = false;
           libItems = b.items;
           renderLibrary();
-          libTabState[libView] = captureCurrentLibTabState();
-          libTabState[libView].stale = false;
-          a.library_note_view(libView, "");
+          libTabState[view] = captureCurrentLibTabState();
+          libTabState[view].stale = false;
+          a.library_note_view(view, "");
         } else if (stillWanted) {
-          a.library_request_browser(libView, needle);
+          a.library_request_browser(view, needle);
         } else {
           libPending--;
         }
         schedule();
       }).catch(() => {
-        a.library_request_browser(libView, needle);
+        if (view === libView) a.library_request_browser(view, needle);
         schedule();
       });
     } else {
-      a.library_request_browser(libView, needle);
+      a.library_request_browser(view, needle);
       schedule();
     }
-  }, 120);
+  };
+  if (immediate) fire();
+  else libFilterTimer = setTimeout(fire, 120);
+}
+
+$("libfilter").addEventListener("input", () => {
+  applyLibraryFilter($("libfilter").value.trim(), false);
+});
+
+$("libfilter-clear").addEventListener("click", () => {
+  $("libfilter").value = "";
+  applyLibraryFilter("", true);
+  $("libfilter").focus();
 });
 
 $("libfolders").addEventListener("click", (e) => {
