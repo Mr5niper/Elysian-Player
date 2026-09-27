@@ -20,6 +20,13 @@ const prev = {
   shuffleOn: null, repeatOn: null,
   listSig: null, currentId: null, selSig: null,
   waveW: 0, waveH: 0, waveSig: null,
+  // Set from index.html's own early application of this same color
+  // (see its inline script), not left null: applyTick's first real tick
+  // otherwise always finds this unset and calls applyTheme() again for
+  // a color that already matches, which used to also restart the
+  // canvas color animation from scratch even though nothing visible
+  // needed to change.
+  themeColor: window.ELYSIAN_INITIAL_THEME_COLOR || null,
 };
 
 const fmt = (s) => {
@@ -3106,129 +3113,44 @@ function applyLibraryTick(tick) {
 
 /* ---------- theme color ---------- */
 
-function hexToHsl(hex) {
-  hex = hex.replace("#", "");
-  const r = parseInt(hex.slice(0, 2), 16) / 255;
-  const g = parseInt(hex.slice(2, 4), 16) / 255;
-  const b = parseInt(hex.slice(4, 6), 16) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h, s;
-  const l = (max + min) / 2;
-  if (max === min) {
-    h = s = 0;
-  } else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h /= 6;
-  }
-  return { h: h * 360, s: s * 100, l: l * 100 };
-}
-
-function hslToHex(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  s = Math.max(0, Math.min(100, s)) / 100;
-  l = Math.max(0, Math.min(100, l)) / 100;
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
-  const m = l - c / 2;
-  let r, g, b;
-  if (h < 60) [r, g, b] = [c, x, 0];
-  else if (h < 120) [r, g, b] = [x, c, 0];
-  else if (h < 180) [r, g, b] = [0, c, x];
-  else if (h < 240) [r, g, b] = [0, x, c];
-  else if (h < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-function hexToRgbTriplet(hex) {
-  hex = hex.replace("#", "");
-  const r = parseInt(hex.slice(0, 2), 16);
-  const g = parseInt(hex.slice(2, 4), 16);
-  const b = parseInt(hex.slice(4, 6), 16);
-  return `${r},${g},${b}`;
-}
-
-/* Ratios of each shade's saturation/lightness to the base's own, taken
-   directly from the original red palette (--accent-hi #e04b3c as base):
-     accent      S x0.836  L x0.842
-     accent-dim  S x0.821  L x0.627
-     accent-wash S x0.671  L x0.275
-   Same hue throughout - only saturation and lightness scale - so picking
-   any base color reproduces the same relative shading the red theme
-   already has, rather than a fixed offset that would land wrong for a
-   very different starting saturation/lightness. */
-// panel/panel-2/line/etc were hand-tuned with their own warm reddish
-// undertone in the original red theme, at a lower saturation than the
-// accent itself. These now share the accent's exact hue (no offset -
-// an earlier version preserved each one's original hue OFFSET from the
-// accent, which kept things in the same color family for red, but the
-// same fixed rotation pushed a very different base hue like teal or
-// yellow into a completely different perceived color - confirmed by
-// sampling actual rendered pixels showing the panel's hue drifting by
-// the same ~35deg the offset applied, regardless of direction). --bg
-// is deliberately left alone: unlike the others, it was independently
-// blue-toned to begin with, not on the same warm-tint family at all.
-const ORIGINAL_BASE_S = 72.6;  // saturation of the original --accent-hi
-// sRatio: this neutral's original saturation as a fraction of the
-// original base's saturation - scaling by the CURRENT base's own
-// saturation means a desaturated pick (gray/black/white) correctly
-// produces a desaturated (truly neutral) result. A fixed absolute
-// saturation here (the previous version) applied the same tint no
-// matter what was picked, including pure black or white - verified
-// directly: black, white, and gray all produced the identical
-// #1c1419 before this fix.
-const NEUTRAL_ORIGINALS = {
-  panel: { sRatio: 16.7 / ORIGINAL_BASE_S, l: 9.4 },
-  panel2: { sRatio: 10.8 / ORIGINAL_BASE_S, l: 12.7 },
-  line: { sRatio: 10.5 / ORIGINAL_BASE_S, l: 14.9 },
-  sliderTrack: { sRatio: 12.2 / ORIGINAL_BASE_S, l: 16.1 },
-  tctlHover: { sRatio: 11.1 / ORIGINAL_BASE_S, l: 17.6 },
-  scrollbarThumb: { sRatio: 10.9 / ORIGINAL_BASE_S, l: 18.0 },
-  tctlActive: { sRatio: 11.9 / ORIGINAL_BASE_S, l: 21.4 },
-  scrollbarThumbHover: { sRatio: 12.1 / ORIGINAL_BASE_S, l: 25.9 },
-};
-
-function deriveNeutrals(baseHex) {
-  const { h, s } = hexToHsl(baseHex);
-  const out = {};
-  for (const k in NEUTRAL_ORIGINALS) {
-    const o = NEUTRAL_ORIGINALS[k];
-    out[k] = hslToHex(h, s * o.sRatio, o.l);
-  }
-  return out;
-}
-
-function deriveTheme(baseHex) {
-  const { h, s, l } = hexToHsl(baseHex);
-  return {
-    hi: baseHex,
-    accent: hslToHex(h, s * 0.836, l * 0.842),
-    dim: hslToHex(h, s * 0.821, l * 0.627),
-    wash: hslToHex(h, s * 0.671, l * 0.275),
-  };
-}
+// hexToHsl, hslToHex, hexToRgbTriplet, deriveNeutrals and deriveTheme now
+// live in index.html's own early inline script, not here: that script
+// runs before first paint specifically so it can apply the saved theme
+// before anything renders with style.css's plain default, and applyTheme
+// below needs the exact same derivation, not a second copy of it that
+// could drift out of sync. A classic <script> shares one scope with
+// everything loaded after it, so they are already in scope here.
 
 // Canvas fillStyle/strokeStyle cannot read CSS custom properties, so the
 // waveform/spectrum/oscilloscope/tunnel/belt drawing code below reads
 // these plain JS variables instead - kept in sync with the CSS variables
 // by applyTheme(). Melt (vizMode 5) uses its own independent palette
 // system entirely and never reads these.
-let themeHi = "#e04b3c";
-let themeDim = "#8e2b24";
-let themeHiRgb = "224,75,60";
+//
+// Seeded from the same color index.html already applied before paint,
+// when available, rather than hardcoded to the original red: without
+// this, the first real tick's applyTheme() call (still needed - see
+// prev.themeColor below) would find these sitting at the red default
+// and animate the waveform/visualizer from red to the actual saved
+// color over the next 220ms, a small but real leftover of the exact
+// flash the rest of this fix removes everywhere else.
+const ELYSIAN_INITIAL_SHADES =
+  /^#[0-9a-fA-F]{6}$/.test(window.ELYSIAN_INITIAL_THEME_COLOR || "")
+    ? deriveTheme(window.ELYSIAN_INITIAL_THEME_COLOR) : null;
+let themeHi = ELYSIAN_INITIAL_SHADES ? ELYSIAN_INITIAL_SHADES.hi : "#e04b3c";
+let themeDim = ELYSIAN_INITIAL_SHADES ? ELYSIAN_INITIAL_SHADES.dim : "#8e2b24";
+let themeHiRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgbTriplet(ELYSIAN_INITIAL_SHADES.hi) : "224,75,60";
 
 // The canvas-drawn colors animate smoothly toward these targets instead
 // of jumping instantly - see startColorAnimation below. themeHi/themeDim/
 // themeHiRgb above stay as the immediate target (read by the picker's
 // own logic); animHiRgb/animDimRgb below are what the drawing code
 // actually paints with, each frame, while catching up to that target.
-let animHiRgb = { r: 224, g: 75, b: 60 };
-let animDimRgb = { r: 142, g: 43, b: 36 };
+let animHiRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgb(ELYSIAN_INITIAL_SHADES.hi) : { r: 224, g: 75, b: 60 };
+let animDimRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgb(ELYSIAN_INITIAL_SHADES.dim) : { r: 142, g: 43, b: 36 };
 let colorAnimFromHi = null, colorAnimFromDim = null;
 let colorAnimTargetHi = null, colorAnimTargetDim = null;
 let colorAnimStart = 0, colorAnimHandle = null;
