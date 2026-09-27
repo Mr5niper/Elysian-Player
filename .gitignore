@@ -20,8 +20,13 @@ __pycache__/
 # Settings, session state and the log are written to the user's home directory
 # (~/.elysian_player.json, ~/.elysian_player.log), not into the repo, so there
 # is nothing to ignore for those. Playlists the user saves are wherever they
-# chose.
+# chose. index.boot.html is different: host.py writes it fresh, on every
+# launch, directly next to the real index.html (see host._index_path), so
+# that a relative reference from it to style.css/app.js still resolves - a
+# frozen build's copy lands in a PyInstaller extraction directory instead,
+# never in the repo, but running from source writes it right here.
 *.m3u
+elysian/web/index.boot.html
 
 # ---- OS / editor cruft ----
 .DS_Store

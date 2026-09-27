@@ -361,6 +361,7 @@ window.ELYSIAN_INITIAL_THEME_COLOR = /*ELYSIAN_THEME_COLOR*/null/*END_ELYSIAN_TH
 
       <div id="tagmodal-tabs">
         <button type="button" class="tagtab active" id="tagtab-fields">Tags</button>
+        <button type="button" class="tagtab" id="tagtab-sort">Sorting</button>
         <button type="button" class="tagtab" id="tagtab-art">Album Art</button>
       </div>
 
@@ -403,6 +404,26 @@ window.ELYSIAN_INITIAL_THEME_COLOR = /*ELYSIAN_THEME_COLOR*/null/*END_ELYSIAN_TH
           <label class="checkrow">
             <input id="tag-compilation" type="checkbox">
             Part of a compilation
+          </label>
+        </div>
+
+        <div id="tagmodal-sort-body">
+          <p id="tagmodal-sort-note">
+            Overrides how this filters alphabetically, without changing what
+            is shown - the same mechanism iTunes calls Sort Name/Sort Artist/
+            Sort Album/Sort Album Artist. Leave blank to file normally.
+          </p>
+          <label>Sort Title
+            <input id="tag-title-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Artist
+            <input id="tag-artist-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Album
+            <input id="tag-album-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Album Artist
+            <input id="tag-album-artist-sort" type="text" spellcheck="false">
           </label>
         </div>
 

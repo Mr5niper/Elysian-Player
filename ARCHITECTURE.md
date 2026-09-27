@@ -58,6 +58,18 @@ the library index actually changes underneath it — a rescan, a root removed,
 a tag edit that changes grouping. An active filter always bypasses the cached
 snapshot, since the cache may not reflect it.
 
+Restoring from that local snapshot still calls `library_note_view` before
+returning, even though it skips the backend round trip for the data itself.
+It didn't always: an earlier version returned right after restoring the
+snapshot, which meant the first visit to a tab in a session persisted
+correctly and every visit after that silently didn't, since it always took
+the same early return. Whichever tab happened to be visited for the first
+time last, not whichever was actually looked at last, is what ended up
+remembered — a session that went Albums → Artists → back to Albums (already
+visited, so restored from cache, so silently not persisted) reopened on
+Artists, not Albums, no matter how long Albums was the last thing on screen
+before closing.
+
 Typing in the library filter clears the visible list immediately, before the
 debounced backend query fires, so the interface never sits on a stale result
 mid-keystroke. A result is discarded on arrival if the filter text or active
@@ -108,7 +120,24 @@ tick, a scan finishing, a root removed, a tag save - so a tab nobody has
 opened yet never goes stale waiting for someone to click into it
 (`_do_library_prewarm_all` in `api.py`). The background art fill is fed by
 the Albums query specifically, the same way it always was; the other
-three tabs have no art of their own to fill.
+three tabs have no art of their own to fill. The frontend keeps up with
+that art independently of Library ever being opened too: `applyLibraryTick`
+collects newly-resolved art on every poll tick from app start, not only
+once Library has been visited - it used to be gated behind that, which
+meant the backend could easily have finished resolving the entire
+library's covers before anyone had looked, and the first visit would
+still open to a grid of blank cards catching up one at a time, because
+nothing had been asking the backend for those results until then.
+
+`_library_browser["view"]` - the single field both the four pre-warm
+queries and the frontend's first visit to Library key off "the current
+tab" - is seeded from `settings.json`'s own `library_view` at
+construction, not hardcoded to Albums: correct before a single query has
+run, rather than only being corrected once Library is first opened.
+`_do_library_prewarm_all` queries that seeded view first, ahead of the
+other three, rather than always starting with Albums regardless of
+relevance - whichever tab is actually going to matter gets a real head
+start rather than running behind three others in a fixed order.
 
 Each view tracks its own query generation, not one shared counter: firing
 all four together must never let one invalidate another's still-in-flight
@@ -118,7 +147,27 @@ finish last regardless of its own actual cost, since it was waiting
 behind the others under one lock. A `(view, needle)` pending set also
 dedupes in-flight queries: a tab switch landing while its own prewarm
 query is still running never starts a second one, it just waits on the
-one already in flight.
+one already in flight - and if that in-flight query was only ever a
+background prewarm (which never persists anything), the tab switch's own
+intent to be remembered escalates it in place rather than being silently
+dropped along with the query it was deduped against.
+
+Escalating that flag is not enough on its own to decide which view ends
+up persisted, though: two *different* tabs can each have a legitimate
+"remember me" query in flight at once - most plainly, switching tabs
+again before the previous switch's own query has resolved - and nothing
+about the remember flag says which of two different views should win.
+A monotonic counter (`_library_view_intent_seq`) does: every call that is
+actually asking to be remembered - a real navigation, or the fast local
+restore above via `library_note_view` - stamps the counter's current
+value, and a result is only allowed to persist as "the current view" if
+that stamp still matches the counter by the time the result comes back.
+Whichever navigation was most *recently* asked for is therefore the only
+one that can win, regardless of which query happens to finish first -
+which matters because Songs, by far the biggest table, is consistently
+the slowest of the four to resolve, and under the old completion-order-
+only rule was consistently the one left standing no matter which tab
+anyone had actually switched to.
 
 The frontend checks a per-view cache (`library_get_prewarmed`) before
 falling through to a live query, at every one of the four places that can
@@ -207,34 +256,58 @@ reason: hiding both of its only in-flow children would otherwise collapse
 the flex container to zero height, taking the absolutely-positioned
 canvas down with it.
 
-One base color, picked from a fully custom picker (`applyTheme()` /
-`deriveTheme()` / `deriveNeutrals()` in `app.js` - a saturation/value
-square, a hue strip, and hex/RGB fields, no OS dialog involved anywhere),
-drives the whole palette. The four accent shades (`--accent`,
-`--accent-hi`, `--accent-dim`, `--accent-wash`) scale the picked color's
-own saturation and lightness by the ratios the original red theme's four
-shades already had to each other, same hue throughout. Eight background
-surfaces (`--panel`, `--panel-2`, `--line`, and five more) that were
-hand-tuned with their own warm undertone in the original red theme scale
-the same way, sharing the picked color's exact hue rather than a fixed
-offset from it - an offset reproduced the original red closely but was
-confirmed, by sampling actual rendered pixels, to rotate an unrelated
+One base color, picked from a fully custom picker (`applyTheme()` in
+`app.js`, calling `deriveTheme()` / `deriveNeutrals()` in `index.html` - a
+saturation/value square, a hue strip, and hex/RGB fields, no OS dialog
+involved anywhere), drives the whole palette. The four accent shades
+(`--accent`, `--accent-hi`, `--accent-dim`, `--accent-wash`) scale the
+picked color's own saturation and lightness by the ratios the original red
+theme's four shades already had to each other, same hue throughout. Eight
+background surfaces (`--panel`, `--panel-2`, `--line`, and five more) that
+were hand-tuned with their own warm undertone in the original red theme
+scale the same way, sharing the picked color's exact hue rather than a
+fixed offset from it - an offset reproduced the original red closely but
+was confirmed, by sampling actual rendered pixels, to rotate an unrelated
 base hue into a different perceived color entirely (a picked teal
 reading green, a picked yellow reading reddish). Saturation in both cases
 scales by the *picked* color's own saturation, not a fixed constant, or a
 fully desaturated pick (black, white, gray) would still come out tinted.
 
+`deriveTheme`/`deriveNeutrals` and their supporting color-math functions
+live in an early inline script in `index.html`'s `<head>`, not in
+`app.js` where the rest of the frontend's own logic lives - deliberately,
+so they are available to run before anything in `<body>` paints, applying
+the saved color immediately rather than leaving `style.css`'s own
+hardcoded default on screen for an instant first. `app.js` still calls
+the same functions for the color picker's live preview and for applying
+a newly-picked color; a classic `<script>` tag shares one global scope
+with everything loaded after it, so this is the one definition, not a
+second copy kept in sync by hand. The actual saved color reaches that
+early script baked directly into the page text, not fetched: `host.py`
+writes a fresh sibling copy of `index.html` on every launch
+(`index.boot.html`, next to the original so its relative references to
+`style.css`/`app.js` keep working) with a placeholder comment replaced by
+the real value, read via `Api.initial_theme_color()` before the window
+even exists - there is no bridge call that could beat first paint, since
+the entire point is running before the window, and so the bridge to
+Python, is up at all.
+
 Canvas-drawn elements - the main waveform, spectrum bars, oscilloscope,
 tunnel and belt visualizers - cannot read CSS custom properties, so they
 read plain JS variables kept in sync by `applyTheme()` instead. Those
-variables animate toward a new color over a short
-`requestAnimationFrame` loop rather than jumping to it instantly, since
-canvas has no built-in transition the way a CSS-driven element gets one
-for free; re-targeting mid-animation (continuous dragging in the picker)
-picks up from wherever the animation currently is, not the original
-start, so a fast drag reads as one continuous fade rather than a series
-of snaps. Melt (`vizMode 5`) runs its own independent palette system
-entirely and reads none of this.
+variables also seed from the same baked-in color at load, rather than
+the original red default, so the first real tick's own call to
+`applyTheme()` (still needed, since the backend is the actual source of
+truth and the two are expected to usually agree, not assumed to always)
+finds them already at the right value and does not visibly re-animate
+canvas colors that had nothing left to change. They animate toward a new
+color over a short `requestAnimationFrame` loop rather than jumping to it
+instantly otherwise, since canvas has no built-in transition the way a
+CSS-driven element gets one for free; re-targeting mid-animation
+(continuous dragging in the picker) picks up from wherever the animation
+currently is, not the original start, so a fast drag reads as one
+continuous fade rather than a series of snaps. Melt (`vizMode 5`) runs its
+own independent palette system entirely and reads none of this.
 
 The album art crop tool (`#artcropmodal` in `index.html`, the `artCrop*`
 functions in `app.js`) only ever exports the actual visible image
