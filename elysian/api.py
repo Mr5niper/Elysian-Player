@@ -123,8 +123,21 @@ class Api:
         self._library_refresh_at = 0.0
         self._library_summary = {"tracks": 0, "artists": 0, "albums": 0,
                                  "genres": 0, "duration": 0.0, "roots": []}
-        self._library_browser = {"view": "albums", "items": [], "needle": "",
-                                 "revision": 0}
+        self._library_browser = {
+            # Read from settings immediately, not hardcoded, and not
+            # something the frontend has to ask for and confirm later:
+            # by the time _do_library_prewarm_all runs a moment from
+            # now, this already IS the last-used tab, so its query can
+            # be given priority (see _do_library_prewarm_all) and, once
+            # it lands, there is nothing left for a click on Library to
+            # "figure out" or wait on - only a genuine later switch to
+            # a *different* tab needs to change this at all.
+            "view": self._settings.get("library_view", "albums"),
+            "items": [], "needle": "", "revision": 0}
+        log.info("[LIBDIAG] __init__: seeded _library_browser view=%r "
+                 "(from settings library_view=%r)",
+                 self._library_browser["view"],
+                 self._settings.get("library_view"))
         self._library_detail = {"kind": "", "key": "", "key2": "",
                                 "title": "", "items": [], "revision": 0}
         # Cover art, resolved only for the cards actually on screen. A
@@ -153,12 +166,32 @@ class Api:
         # tab does not have to wait for a fresh query if one already
         # finished, whatever tab was last open.
         self._library_browser_cache = {}
-        # (view, needle) -> True while that exact query is already
-        # running, so a click on a tab whose prewarm hasn't finished yet
-        # never starts a second, duplicate query for the same thing -
-        # the one already in flight is left to finish and deliver its
-        # result normally.
+        # (view, needle) -> {"remember": bool} while that exact query is
+        # already running, so a click on a tab whose prewarm hasn't
+        # finished yet never starts a second, duplicate query for the
+        # same thing - the one already in flight is left to finish and
+        # deliver its result normally. The dict (rather than a bare
+        # True) lets a later call for the same key escalate "remember"
+        # to True in place if the in-flight query was only ever a
+        # background prewarm; see _do_library_browser.
         self._library_browser_pending = {}
+        # Bumped by an actual navigation - a real tab switch - never by
+        # a background prewarm, and never by the app simply opening to
+        # whatever was last used (_library_browser["view"] is seeded
+        # from settings at construction, so that is already correct
+        # before a single query has run; see __init__ and
+        # _do_library_prewarm_all). The escalation above only protects
+        # two calls competing for the SAME (view, needle) key; this
+        # protects across DIFFERENT keys, for the ordinary case of
+        # switching tabs again before the previous switch's own query
+        # has resolved. Every _do_library_browser_ready/_do_library_
+        # note_view that is allowed to persist "the current view"
+        # captures this counter's value at the moment it was asked for,
+        # and only actually writes to settings if nothing newer has
+        # been requested since - so whichever navigation was most
+        # RECENTLY asked for always wins the write, regardless of which
+        # one's query happens to finish first.
+        self._library_view_intent_seq = 0
         self._library_detail_gen = 0
         self._library_art_pending = set()
         # The tag editor. Unlike everything else the library owns, opening
@@ -183,6 +216,11 @@ class Api:
         self._art_urgent: queue.Queue = queue.Queue()
         self._art_bulk: queue.Queue = queue.Queue()
         self._art_workers = []
+        # TEMPORARY DIAGNOSTIC: lets _art_worker log the first resolve in
+        # full and then only every 50th, so a large library's art-priming
+        # doesn't flood the rotating log file and push the startup
+        # sequence (the actual thing under investigation) out of it.
+        self._art_diag_count = 0
         # Keys sitting in the background queue and not yet started. A key
         # here can be promoted to the urgent queue when it scrolls into
         # view; the background copy is skipped when a worker reaches it.
@@ -1274,18 +1312,69 @@ class Api:
         self._library_scanning = False
         self._set_status(f"Library scan failed: {message}")
 
-    def _do_library_browser(self, view, needle="", remember=True) -> None:
+    def _do_library_browser(self, view, needle="", remember=True,
+                            new_intent=False) -> None:
         view = (view if view in ("albums", "artists", "genres", "songs")
                 else "albums")
         needle = str(needle or "")
         key = (view, needle)
-        if key in self._library_browser_pending:
-            return  # this exact query is already running; nothing new
-                     # to start, the one in flight will deliver its
-                     # result normally when it finishes
-        self._library_browser_pending[key] = True
+        # Only a call that is actually asking to be remembered carries an
+        # intent number at all - a plain background prewarm (remember=
+        # False) never competes to become "the current view", so it has
+        # nothing to stamp. new_intent mints a fresh, strictly-newer
+        # number (only ever passed for a real navigation, from
+        # library_request_browser); everything else - a prewarm's own
+        # promotion, and the four internal "keep the tab I already
+        # believe is current fresh" refreshes - just captures whatever
+        # the newest known number already is, so a genuine navigation
+        # that happens while one of those is still in flight is still
+        # free to leave it behind.
+        intent = None
+        if remember:
+            if new_intent:
+                self._library_view_intent_seq += 1
+            intent = self._library_view_intent_seq
+        pending = self._library_browser_pending.get(key)
+        call_t = time.monotonic()
+        if pending is not None:
+            # This exact query is already running - nothing new to
+            # start, the one in flight will deliver its result normally
+            # when it finishes. But dropping this call outright used to
+            # also drop what it was actually asking for: a background
+            # prewarm (remember=False) is very often already in flight
+            # for a view the instant a real navigation to that same
+            # view arrives, since a scan tick, a scan finishing, a tag
+            # save or a root being removed all refire
+            # _do_library_prewarm_all for every view, and an unfiltered
+            # tab switch whose cache was just invalidated by that same
+            # event goes through this exact path. Silently keeping the
+            # in-flight call's own remember=False meant the navigation
+            # that triggered this call was never actually recorded as
+            # "the current view", which is what intermittently left the
+            # persisted last-used tab stuck on whatever view last won
+            # that race, rather than the one actually being looked at.
+            # remember only ever escalates False -> True here, never
+            # the reverse, so a real navigation's intent always wins
+            # regardless of which call happened to start the thread.
+            before = dict(pending)
+            if remember:
+                if not pending["remember"]:
+                    pending["remember"] = True
+                if pending["intent"] is None or intent > pending["intent"]:
+                    pending["intent"] = intent
+            log.info("[LIBDIAG] _do_library_browser t=%.3f DEDUPED "
+                     "view=%r needle=%r remember=%r new_intent=%r "
+                     "intent=%r; pending was %r, now %r",
+                     call_t, view, needle, remember, new_intent, intent,
+                     before, pending)
+            return
+        self._library_browser_pending[key] = {"remember": remember,
+                                               "intent": intent}
         gen = self._library_browser_gen.get(view, 0) + 1
         self._library_browser_gen[view] = gen
+        log.info("[LIBDIAG] _do_library_browser t=%.3f STARTING "
+                 "view=%r needle=%r remember=%r new_intent=%r intent=%r",
+                 call_t, view, needle, remember, new_intent, intent)
 
         def work():
             try:
@@ -1305,14 +1394,30 @@ class Api:
                 except Exception:
                     log.exception("library browser query failed")
                     items = []
+                done_t = time.monotonic()
                 if gen != self._library_browser_gen.get(view):
+                    log.info("[LIBDIAG] _do_library_browser t=%.3f "
+                             "SUPERSEDED (gen) view=%r needle=%r "
+                             "(%.3fs elapsed, %d items discarded)",
+                             done_t, view, needle, done_t - call_t,
+                             len(items))
                     return  # a newer request for this same view has
                             # since been made; this result is not wrong,
                             # just late, and showing it now would
                             # silently undo whatever the newer one
                             # produced
+                # Read last, not the parameters captured when this
+                # thread started: a later call for this same key may
+                # have escalated remember, or raised the intent, in the
+                # meantime (see above), and both must win.
+                entry = self._library_browser_pending[key]
+                log.info("[LIBDIAG] _do_library_browser t=%.3f FINISHED "
+                         "view=%r needle=%r %d items (%.3fs elapsed) "
+                         "final remember=%r intent=%r",
+                         done_t, view, needle, len(items), done_t - call_t,
+                         entry["remember"], entry["intent"])
                 self._post("library_browser_ready", view, items, needle,
-                           remember)
+                           entry["remember"], entry["intent"])
             finally:
                 self._library_browser_pending.pop(key, None)
 
@@ -1327,8 +1432,27 @@ class Api:
         moments the currently-viewed tab already refreshes itself -
         this just means the other three, not currently on screen,
         never go stale waiting for someone to click into them.
+
+        The current view - the persisted last-used tab already seeded
+        into _library_browser at startup, or wherever a real navigation
+        has since moved it - is queried first, ahead of the other
+        three. This isn't just about the frontend seeing that tab's
+        data sooner: it's what makes the whole guess-vs-navigation race
+        this used to lose to go away. Started immediately at boot
+        rather than waiting for Library to be clicked, the query for
+        whatever tab actually matters gets a real head start on the
+        other three instead of running in a fixed albums-first order
+        regardless of relevance - Songs being consistently the slowest
+        of the four (it's by far the biggest table) is exactly why it
+        used to keep landing last and winning that race even when
+        nobody had asked for Songs at all.
         """
-        for view in ("albums", "artists", "genres", "songs"):
+        current = self._library_browser.get("view", "albums")
+        order = [current] + [v for v in ("albums", "artists", "genres", "songs")
+                             if v != current]
+        log.info("[LIBDIAG] _do_library_prewarm_all at t=%.3f: current=%r "
+                 "order=%r", time.monotonic(), current, order)
+        for view in order:
             self._do_library_browser(view, "", remember=False)
 
     def _do_library_note_view(self, view, needle="") -> None:
@@ -1337,6 +1461,21 @@ class Api:
         needle = str(needle or "")
         cached = self._library_browser_cache.get(view) if not needle else None
         items = cached["items"] if cached else []
+        log.info("[LIBDIAG] _do_library_note_view t=%.3f view=%r "
+                 "needle=%r cache_hit=%r (%d items)", time.monotonic(),
+                 view, needle, cached is not None, len(items))
+        # A genuine navigation confirmation, exactly like a real
+        # library_request_browser call - bumped here too so an older,
+        # still-in-flight query for a *different* tab (someone
+        # switching again before the previous switch's own query has
+        # resolved) is recognised as stale once it eventually resolves,
+        # rather than silently overwriting this. Bootstrap opens are no
+        # longer a source of this: _library_browser["view"] is seeded
+        # from settings at construction (see __init__ and
+        # _do_library_prewarm_all), so the very first query for a
+        # session is never a "guess" racing a real choice - it already
+        # IS the real choice, before a single query has even run.
+        self._library_view_intent_seq += 1
         # No revision bump here: that counter tells the frontend's poll
         # loop "a fresh query result exists, go fetch and re-render it" -
         # this is called only when the frontend already rendered
@@ -1352,10 +1491,18 @@ class Api:
         settings_store.save(self._settings)
 
     def _do_library_browser_ready(self, view, items, needle="",
-                                  remember=True) -> None:
+                                  remember=True, intent=None) -> None:
+        log.info("[LIBDIAG] _do_library_browser_ready t=%.3f view=%r "
+                 "needle=%r %d items remember=%r intent=%r "
+                 "current_intent_seq=%r", time.monotonic(), view, needle,
+                 len(items or []), remember, intent,
+                 self._library_view_intent_seq)
         if view == "albums" and not needle:
             keys = [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
                    for i in (items or [])]
+            log.info("[LIBDIAG] _do_library_browser_ready: albums branch, "
+                     "%d album keys, art_startup_primed=%r",
+                     len(keys), self._art_startup_primed)
             if not self._art_startup_primed:
                 self._art_startup_primed = True
                 # Jump the first screenful to the front of the queue
@@ -1373,16 +1520,40 @@ class Api:
             # the moment it's opened.
             self._library_browser_cache[view] = {"items": items,
                                                  "needle": needle}
-        if remember:
+        should_persist = remember and (intent is None
+                        or intent == self._library_view_intent_seq)
+        log.info("[LIBDIAG] _do_library_browser_ready: view=%r -> %s",
+                 view, "PERSISTING as current view"
+                 if should_persist else
+                 f"SKIPPED (remember={remember}, intent={intent} != "
+                 f"current_intent_seq={self._library_view_intent_seq})")
+        if should_persist:
             # Only an actual navigation updates which view is "current" -
-            # a background prewarm completing must never touch this, or
-            # whichever of the four prewarm queries finished last (almost
-            # always Songs, being by far the biggest) would silently
-            # become "the current view" internally, and the next
-            # unrelated refresh trigger (a scan tick, a tag save) would
-            # then re-browse and persist that contaminated value with
-            # its own default remember=True - exactly what was
-            # intermittently overwriting the real last-used tab.
+            # a background prewarm completing must never touch this
+            # (remember=False short-circuits this whole block for
+            # those). remember alone used to not be enough either: two
+            # DIFFERENT tabs could each have a legitimate remember=True
+            # query in flight at once, and remember says nothing about
+            # which of two different views should actually win - only
+            # completion order did, which is exactly backwards, since
+            # Songs (by far the biggest table) is consistently the
+            # slowest of the four to resolve and so consistently the
+            # most likely to land last and overwrite whatever tab
+            # someone had actually switched to in the meantime,
+            # regardless of whether anyone had asked for Songs at all.
+            #
+            # The real fix for that was upstream of this method
+            # entirely: _library_browser["view"] is now seeded from
+            # settings at construction and _do_library_prewarm_all
+            # queries that exact tab first, so the very first query of
+            # a session is never a stale "guess" competing with a real
+            # navigation - it already IS correct before anything has
+            # run. What intent still guards here is the narrower,
+            # ordinary case of two REAL navigations racing each other -
+            # switching tabs again before the previous switch's own
+            # query has resolved - by making sure whichever one was
+            # most recently asked for is the only one still equal to
+            # _library_view_intent_seq by the time its query finishes.
             self._library_browser_revision += 1
             self._library_browser = {"view": view, "items": items,
                                      "needle": needle,
@@ -1429,6 +1600,8 @@ class Api:
     def _start_art_workers(self) -> None:
         if self._art_workers:
             return
+        log.info("[LIBDIAG] _start_art_workers: starting 12 workers at "
+                 "t=%.3f", time.monotonic())
         # Each worker spends almost all of its time blocked - waiting on
         # a network file read, or waiting on the queue - not on CPU, so
         # running many more of them in parallel does not compete for a
@@ -1463,6 +1636,12 @@ class Api:
             except Exception:
                 log.warning("library art failed for %s", album, exc_info=True)
                 url = None
+            self._art_diag_count += 1
+            n = self._art_diag_count
+            if n == 1 or n % 50 == 0:
+                log.info("[LIBDIAG] _art_worker t=%.3f resolved #%d %r -> "
+                         "%s", time.monotonic(), n, key,
+                         "found" if url else "no cover")
             self._post("library_art_ready", key, url)
 
     def _do_library_visible_art(self, keys) -> None:
@@ -1473,6 +1652,8 @@ class Api:
         worth doing, so it stays in the background queue rather than being
         thrown away.
         """
+        log.info("[LIBDIAG] _do_library_visible_art t=%.3f: %d keys",
+                 time.monotonic(), len(keys or []))
         while True:
             try:
                 dropped = self._art_urgent.get_nowait()
@@ -1498,6 +1679,8 @@ class Api:
 
     def _do_library_fill_art(self, keys) -> None:
         """Queue the rest of the library, behind anything on screen."""
+        log.info("[LIBDIAG] _do_library_fill_art t=%.3f: %d keys",
+                 time.monotonic(), len(keys or []))
         self._start_art_workers()
         for key in keys or []:
             if key in self._library_art or key in self._library_art_pending:
@@ -1946,7 +2129,13 @@ class Api:
         self._library.cancel()
 
     def library_request_browser(self, view, needle="") -> None:
-        self._post("library_browser", str(view), str(needle or ""))
+        # remember and new_intent both explicit: this is always a real
+        # navigation - either an actual tab switch, or the bootstrap's
+        # own "open to whichever tab was last used" attempt - never a
+        # background refresh, so it must mint a fresh intent number
+        # rather than just inheriting whatever the current one is.
+        self._post("library_browser", str(view), str(needle or ""),
+                   True, True)
 
     def library_note_view(self, view, needle="") -> None:
         """Record a navigation the frontend already satisfied locally.
@@ -1981,6 +2170,17 @@ class Api:
     def library_get_prewarmed(self, view) -> dict:
         entry = self._library_browser_cache.get(str(view or ""))
         return dict(entry) if entry is not None else {}
+
+    def js_log(self, message) -> None:
+        """TEMPORARY DIAGNOSTIC: forwards a frontend trace line into this
+        process's own log file. A plain, synchronous log write - not
+        posted through the command queue, since there is no state to
+        change here and this must never wait behind, or be dropped
+        along with, anything else queued. Lets a click that silently
+        never reaches this file's other [LIBDIAG] lines still show up
+        here instead of requiring DevTools to be open to see it at all.
+        """
+        log.info("[LIBDIAG-JS] %s", str(message)[:2000])
 
     def library_get_detail(self) -> dict:
         return dict(self._library_detail)
@@ -2373,6 +2573,8 @@ class Api:
     # ---- session -------------------------------------------------------
 
     def _do_restore_session(self) -> None:
+        log.info("[LIBDIAG] _do_restore_session starting at t=%.3f "
+                 "(process monotonic)", time.monotonic())
         # Deliberately no os.path.isfile() here. On a network share that is
         # one round trip per saved path before the window has even drawn.
         # Missing files surface only when something later tries to open them.
@@ -2450,7 +2652,18 @@ class Api:
     #: reorder, and costs no file I/O to apply here, since add_paths only
     #: compares strings. save_m3u is an explicit
     #: user action; silently discarding a save the user believes happened is
-    #: worse than a slow exit. load_m3u, ingest and open_paths are deliberately
+    #: worse than a slow exit. library_note_view is here for the same reason:
+    #: it is a pure, fast settings write with no thread of its own, posted on
+    #: nearly every ordinary tab switch (whenever the frontend's own cache
+    #: already had the answer), so closing a moment after switching tabs
+    #: should not silently leave the library on whatever tab an earlier
+    #: session left it on. library_browser is deliberately absent even
+    #: though it is what records the same "current view" when the cache
+    #: was not warm: it only starts a background query and returns, and
+    #: that query's own result - the thing that would actually write the
+    #: setting - arrives later on a thread nothing is left listening to
+    #: once the window is gone, so flushing it here would not accomplish
+    #: anything. load_m3u, ingest and open_paths are deliberately
     #: absent: applying them here would stat or read files, possibly over a
     #: dead network share, with the window already gone, and their loss costs
     #: nothing that reopening the app cannot redo. Anything else still queued
@@ -2462,7 +2675,7 @@ class Api:
         "library_add_root", "library_remove_root",
         "restore_session", "remove", "reorder", "add_batch",
         "set_volume", "toggle_shuffle", "cycle_repeat", "set_theme_color",
-        "save_m3u",
+        "save_m3u", "library_note_view",
         "clear_playlist", "library_play_context",
     })
 
@@ -2534,6 +2747,7 @@ class Api:
         "library_open_editor", "library_close_editor",
         "library_save_editor", "library_get_editor_state",
         "paste_image_from_clipboard", "copy_image_to_clipboard",
+        "js_log",
     })
 
     #: Public for the host process only, never called from JavaScript, but
@@ -2541,6 +2755,7 @@ class Api:
     #: sees them as public attributes of this object too.
     HOST_PUBLIC = frozenset({
         "attach", "boot", "ingest", "open_paths", "close", "set_maximized",
+        "initial_theme_color",
         "JS_BRIDGE", "HOST_PUBLIC",
     })
 
@@ -2590,6 +2805,16 @@ class Api:
         # bind thread while _rebuild_snapshot was iterating it. The queue is
         # FIFO, so restore still lands before any open_paths posted after it.
         self._post("restore_session")
+
+    def initial_theme_color(self) -> str:
+        """The saved theme color, read directly rather than through a
+        queued command: called from host.run(), before the window (and
+        so the worker loop's usual caller) exists at all, to bake this
+        into the page HTML itself - see host._index_path. Never called
+        from JavaScript, which gets this same value the ordinary way,
+        on the first tick, once the window is up.
+        """
+        return self._theme_color
 
     def ingest(self, paths) -> int:
         return self._add_paths(paths)

@@ -43,14 +43,23 @@ log = _get_logger("library")
 #: its work.
 BATCH_SIZE = 400
 
-#: Concurrent tag reads during a scan. These threads spend nearly all
-#: their time blocked on a network round trip, which releases the GIL.
-SCAN_WORKERS = 8
+#: Concurrent tag reads during a scan, and (see _scan_directory) concurrent
+#: modification-time checks too. These threads spend nearly all their time
+#: blocked on a network round trip, which releases the GIL - the same
+#: reasoning the library's own art workers were bumped to 12 for, and the
+#: playlist's own MetadataScanner.WORKERS was set to 8 for: more of them
+#: does not compete for a CPU core the way genuinely CPU-bound work would,
+#: it just means a slow share is waiting on SCAN_WORKERS round trips at
+#: once instead of one, and a rescan of the whole library (every schema
+#: migration that adds a column forces exactly this) clears proportionally
+#: faster.
+SCAN_WORKERS = 16
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
             "compilation", "dir", "track_total", "disc_total",
-            "modified_at", "added_at")
+            "modified_at", "added_at",
+            "title_sort", "artist_sort", "album_sort", "album_artist_sort")
 
 _UPSERT = f"""
     INSERT INTO tracks ({','.join(_COLUMNS)})
@@ -62,7 +71,10 @@ _UPSERT = f"""
         track_number=excluded.track_number, disc_number=excluded.disc_number,
         year=excluded.year, compilation=excluded.compilation,
         dir=excluded.dir, track_total=excluded.track_total,
-        disc_total=excluded.disc_total, modified_at=excluded.modified_at
+        disc_total=excluded.disc_total, modified_at=excluded.modified_at,
+        title_sort=excluded.title_sort, artist_sort=excluded.artist_sort,
+        album_sort=excluded.album_sort,
+        album_artist_sort=excluded.album_artist_sort
 """
 
 #: Falls back through album artist, then track artist, then a placeholder,
@@ -112,6 +124,57 @@ def sort_key(name) -> str:
     return (stripped or text).casefold()
 
 
+def _effective_sort(sort_tag, display_name) -> str:
+    """How a name should file, preferring an explicit sort tag - what
+    iTunes calls Sort Name/Sort Artist/Sort Album/Sort Album Artist -
+    over sort_key()'s own guess at the display name.
+
+    This is the actual fix for "The Beatles" filing under B or "The
+    White Album" filing under W: sort_key() only strips leading
+    punctuation, never an article, because stripping "The" (or "A"/"An")
+    unconditionally would be wrong exactly as often as it is right - "A
+    Tribe Called Quest" is conventionally filed under A, not T. A sort
+    tag settles it explicitly, per artist or per album, the same way
+    iTunes has always relied on the tag rather than guessing.
+
+    A sort tag being written to reorder something ("Beatles, The") is a
+    separate fact from it having already been normalised for leading
+    punctuation, and is not always both at once: plenty of taggers
+    populate the sort field as a plain, untouched copy of the display
+    name whenever nothing has been manually reordered, symbols and all -
+    and a name like '"Weird Al" Yankovic' or a leading quote mark on an
+    album title used to still file correctly through sort_key() alone,
+    before this field existed to short-circuit that path. Running the
+    tag through the exact same leading-junk strip as the plain fallback
+    below keeps that working in both cases: it does nothing to "Beatles,
+    The" (nothing junk-like leads it), and correctly drops a leading
+    quote or symbol from a tag that is really just the display name
+    copied over unedited.
+    """
+    tag = (sort_tag or "").strip()
+    return sort_key(tag) if tag else sort_key(display_name)
+
+
+#: Whichever sort tag corresponds to the artist name _EFFECTIVE_ARTIST (and
+#: _GROUP_ARTIST's non-compilation case) actually resolved to: album_artist's
+#: own sort tag when album_artist itself was the one used, otherwise plain
+#: artist's. Kept in exact lockstep with _EFFECTIVE_ARTIST's own fallback
+#: order so the sort tag used is always the one belonging to the name
+#: actually shown, never the other track-level field's.
+_ARTIST_SORT_TAG = ("CASE WHEN NULLIF(album_artist,'') IS NOT NULL "
+                    "THEN NULLIF(album_artist_sort,'') "
+                    "ELSE NULLIF(artist_sort,'') END")
+
+#: Which of EDITABLE_TRACK_FIELDS are text rather than numeric - decides
+#: whether a field with no value (or mixed values across a batch of
+#: files) defaults to "" or 0 in the tag editor's payload. Every field
+#: not listed here is numeric. Defined once, rather than as two separate
+#: hardcoded tuples in edit_payload, so they cannot quietly drift apart.
+_TEXT_EDIT_FIELDS = ("title", "artist", "album", "album_artist", "genre",
+                    "title_sort", "artist_sort", "album_sort",
+                    "album_artist_sort")
+
+
 def _escape_like(needle: str) -> str:
     return (needle.replace("\\", "\\\\")
                   .replace("%", "\\%").replace("_", "\\_"))
@@ -123,6 +186,17 @@ def _like_prefix(root: str) -> str:
     for ch in ("\\", "%", "_"):
         stem = stem.replace(ch, "\\" + ch)
     return stem + "%"
+
+
+def _stat_job(path):
+    """One file's modification time. Never raises, so one bad file (gone,
+    permission denied, a network share timing out) cannot stop a scan -
+    same reasoning _read_job already applies to reading tags.
+    """
+    try:
+        return path, os.path.getmtime(path)
+    except OSError:
+        return path, None
 
 
 def _read_job(job):
@@ -220,6 +294,18 @@ class LibraryService:
                     con.execute("UPDATE tracks SET modified_at = 0")
                     log.info("library upgraded; a rescan will fill in the "
                              "track and disc totals")
+                if "title_sort" not in have:
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN title_sort TEXT DEFAULT ''")
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN artist_sort TEXT DEFAULT ''")
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN album_sort TEXT DEFAULT ''")
+                    con.execute("ALTER TABLE tracks "
+                                "ADD COLUMN album_artist_sort TEXT DEFAULT ''")
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    log.info("library upgraded; a rescan will fill in "
+                             "sort-name tags")
                 # Indexes are created after the column checks above, not in
                 # the schema script: on an existing table the CREATE TABLE is
                 # skipped, so an index naming a newly added column would fail
@@ -376,14 +462,16 @@ class LibraryService:
             finally:
                 con.close()
 
-        todo, seen = [], set()
-        for path in files:
-            key = pathutil.key(path)
-            seen.add(key)
-            try:
-                mtime = os.path.getmtime(path)
-            except OSError:
+        keys_by_path = {path: pathutil.key(path) for path in files}
+        seen = set(keys_by_path.values())
+
+        todo = []
+        for path, mtime in pool.map(_stat_job, files):
+            if self._cancel.is_set():
+                break
+            if mtime is None:
                 continue
+            key = keys_by_path[path]
             if key in known and abs(known[key] - mtime) < 1e-4:
                 continue
             todo.append((path, key, mtime))
@@ -408,6 +496,8 @@ class LibraryService:
                     dkey, int(meta.get("track_total", 0) or 0),
                     int(meta.get("disc_total", 0) or 0),
                     float(mtime or 0.0), now,
+                    meta.get("title_sort", ""), meta.get("artist_sort", ""),
+                    meta.get("album_sort", ""), meta.get("album_artist_sort", ""),
                 ))
 
         stale = [k for k in known if k not in seen]
@@ -569,13 +659,16 @@ class LibraryService:
         Grouping is case insensitive, or a tagger that wrote NEVERMIND on
         one track and Nevermind on the rest would produce two albums.
         Ordering is done in Python rather than SQL so it can ignore leading
-        punctuation; see sort_key.
+        punctuation, or prefer an explicit sort tag over the display name
+        entirely; see sort_key and _effective_sort.
         """
         clause, args = self._match(needle, ("album", "album_artist", "artist"))
         where = f"WHERE {clause}" if clause else ""
         rows = self._rows(f"""
             SELECT MIN({_EFFECTIVE_ALBUM}) AS album,
                    {_GROUP_ARTIST} AS album_artist,
+                   MIN(NULLIF(album_sort,'')) AS album_sort_tag,
+                   MIN({_ARTIST_SORT_TAG}) AS artist_sort_tag,
                    MIN(NULLIF(year,0)) AS year,
                    COUNT(*)      AS tracks,
                    COALESCE(SUM(duration),0) AS duration
@@ -588,13 +681,33 @@ class LibraryService:
 
         # Bands first, alphabetically then by year, with compilations after
         # them. An album with no year sorts to the end of its band's run.
+        # A "Various Artists" compilation has no artist sort tag of its own
+        # to fall back to - it is a synthetic placeholder, not a real
+        # tagged name - so it keeps the plain "" it always has, which is
+        # fine: compilations are already ordered by the primary key above,
+        # not by this one.
+        #
+        # The year keys are forced to a constant for a compilation rather
+        # than left to apply as they do for a band: year makes sense for
+        # ordering one band's own discography chronologically, but a shelf
+        # of unrelated Various Artists compilations has no such thing as
+        # "chronological order" between one release and the next, and
+        # sorting them by year first meant two compilations with adjacent
+        # years landed nowhere near each other alphabetically - forcing
+        # both to tie here is what actually makes the album name (the
+        # last key) the real differentiator, rather than only a tiebreaker
+        # for whichever compilations happened to share a year.
         rows.sort(key=lambda r: (
             1 if r["compilation"] else 0,
-            "" if r["compilation"] else sort_key(r["album_artist"]),
-            1 if not r["year"] else 0,
-            r["year"] or 0,
-            sort_key(r["album"]),
+            "" if r["compilation"] else
+                _effective_sort(r["artist_sort_tag"], r["album_artist"]),
+            0 if r["compilation"] else (1 if not r["year"] else 0),
+            0 if r["compilation"] else (r["year"] or 0),
+            _effective_sort(r["album_sort_tag"], r["album"]),
         ))
+        for row in rows:
+            row.pop("album_sort_tag", None)
+            row.pop("artist_sort_tag", None)
         return rows
 
     def artists(self, needle="") -> list:
@@ -602,6 +715,7 @@ class LibraryService:
         where = f"WHERE {clause}" if clause else ""
         rows = self._rows(f"""
             SELECT MIN(COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist')) AS artist,
+                   MIN({_ARTIST_SORT_TAG}) AS artist_sort_tag,
                    COUNT(*)  AS tracks,
                    COUNT(DISTINCT COALESCE(NULLIF(album,''), 'Unknown Album')
                                   COLLATE NOCASE) AS albums,
@@ -610,7 +724,9 @@ class LibraryService:
             {where}
             GROUP BY COALESCE(NULLIF(album_artist,''), NULLIF(artist,''), 'Unknown Artist') COLLATE NOCASE
         """, tuple(args))
-        rows.sort(key=lambda r: sort_key(r["artist"]))
+        rows.sort(key=lambda r: _effective_sort(r["artist_sort_tag"], r["artist"]))
+        for row in rows:
+            row.pop("artist_sort_tag", None)
         return rows
 
     def genres(self, needle="") -> list:
@@ -646,7 +762,8 @@ class LibraryService:
         effective_limit = 1500 if text else int(limit)
         rows = self._rows(f"""
             SELECT path, title, artist, album, album_artist, genre,
-                   duration, track_number, disc_number, year
+                   duration, track_number, disc_number, year,
+                   title_sort, album_sort, {_ARTIST_SORT_TAG} AS artist_sort_tag
             FROM tracks
             {where}
             ORDER BY CASE WHEN COALESCE(album,'') = '' THEN 1 ELSE 0 END,
@@ -658,21 +775,24 @@ class LibraryService:
         if truncated:
             rows = rows[:effective_limit]
         # Re-sorted here so leading punctuation is ignored, which SQL
-        # collation cannot do; within an album the SQL order is kept.
-        # Tracks with no album tag collect at the very end rather than
-        # after each artist's records, where they were scattered down the
-        # length of the list. Everything else keeps album order.
+        # collation cannot do, and so an explicit sort tag can override the
+        # display name entirely, same as albums()/artists(); within an
+        # album the SQL order is kept. Tracks with no album tag collect at
+        # the very end rather than after each artist's records, where they
+        # were scattered down the length of the list. Everything else
+        # keeps album order.
         rows.sort(key=lambda r: (
             1 if not (r["album"] or "").strip() else 0,
-            sort_key(r["album_artist"] or r["artist"]),
+            _effective_sort(r["artist_sort_tag"], r["album_artist"] or r["artist"]),
             r["year"] or 0,
-            sort_key(r["album"]),
+            _effective_sort(r["album_sort"], r["album"]),
             max(r["disc_number"] or 1, 1),
             r["track_number"] or 0,
-            sort_key(r["title"]),
+            _effective_sort(r["title_sort"], r["title"]),
         ))
         for row in rows:
             row["truncated"] = truncated
+            row.pop("artist_sort_tag", None)
         return rows
 
     def album_key_for_path(self, path: str):
@@ -950,6 +1070,10 @@ class LibraryService:
                 "disc_total": int(meta.get("disc_total", 0) or 0),
                 "year": int(meta.get("year", 0) or 0),
                 "compilation": int(meta.get("compilation", 0) or 0),
+                "title_sort": meta.get("title_sort", ""),
+                "artist_sort": meta.get("artist_sort", ""),
+                "album_sort": meta.get("album_sort", ""),
+                "album_artist_sort": meta.get("album_artist_sort", ""),
             }
         return fresh
 
@@ -975,7 +1099,9 @@ class LibraryService:
                     sql = ("SELECT key, title, artist, album, album_artist, "
                            "genre, duration, track_number, track_total, "
                            "disc_number, disc_total, year, compilation, "
-                           "modified_at FROM tracks WHERE key IN (%s)"
+                           "modified_at, title_sort, artist_sort, "
+                           "album_sort, album_artist_sort "
+                           "FROM tracks WHERE key IN (%s)"
                            % ",".join("?" * len(chunk)))
                     for row in con.execute(sql, chunk):
                         current[by_key[row["key"]]] = dict(row)
@@ -996,7 +1122,9 @@ class LibraryService:
                      if f == "duration" else existing.get(f) == fresh[f])
                     for f in ("title", "artist", "album", "album_artist",
                              "genre", "duration", "track_number", "track_total",
-                             "disc_number", "disc_total", "year", "compilation"))
+                             "disc_number", "disc_total", "year", "compilation",
+                             "title_sort", "artist_sort", "album_sort",
+                             "album_artist_sort"))
                 if same_mtime and same_tags:
                     continue   # index already matches the file exactly
             rows.append((
@@ -1006,6 +1134,8 @@ class LibraryService:
                 fresh["year"], fresh["compilation"], fresh["dir"],
                 fresh["track_total"], fresh["disc_total"],
                 fresh["modified_at"], now,
+                fresh["title_sort"], fresh["artist_sort"],
+                fresh["album_sort"], fresh["album_artist_sort"],
             ))
         if not rows:
             return 0
@@ -1057,13 +1187,10 @@ class LibraryService:
         for field in self.EDITABLE_FIELDS:
             values = {row.get(field) for row in rows}
             if len(values) <= 1:
-                data[field] = next(iter(values), "" if field in
-                                   ("title", "artist", "album", "album_artist",
-                                    "genre") else 0)
+                data[field] = next(iter(values),
+                                   "" if field in _TEXT_EDIT_FIELDS else 0)
             else:
-                data[field] = "" if field in (
-                    "title", "artist", "album", "album_artist", "genre"
-                ) else 0
+                data[field] = "" if field in _TEXT_EDIT_FIELDS else 0
                 mixed[field] = True
         return {
             "count": len(rows),

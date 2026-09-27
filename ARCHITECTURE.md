@@ -58,13 +58,51 @@ the library index actually changes underneath it — a rescan, a root removed,
 a tag edit that changes grouping. An active filter always bypasses the cached
 snapshot, since the cache may not reflect it.
 
-Typing in the library filter clears the visible list immediately, before the
-debounced backend query fires, so the interface never sits on a stale result
-mid-keystroke. A result is discarded on arrival if the filter text or active
-tab has moved on since it was requested. Songs, the one browse surface that
-can run into many thousands of rows, uses a much smaller result cap while a
-filter is active than while browsing unfiltered, since a large result there
-means rebuilding thousands of rows on every settled keystroke.
+Restoring from that local snapshot still calls `library_note_view` before
+returning, even though it skips the backend round trip for the data itself.
+It didn't always: an earlier version returned right after restoring the
+snapshot, which meant the first visit to a tab in a session persisted
+correctly and every visit after that silently didn't, since it always took
+the same early return. Whichever tab happened to be visited for the first
+time last, not whichever was actually looked at last, is what ended up
+remembered — a session that went Albums → Artists → back to Albums (already
+visited, so restored from cache, so silently not persisted) reopened on
+Artists, not Albums, no matter how long Albums was the last thing on screen
+before closing.
+
+Each of the four tabs remembers its own search separately
+(`libFilterByView` in `app.js`), and switching tabs sets the one shared
+filter box to show whichever search that tab has - empty if it has
+never had one - rather than leaving whatever the previous tab had typed
+sitting there. That sharing used to be the actual mechanism by which a
+search typed on one tab could contaminate a completely different one: a
+tab's local snapshot is captured from whatever is on screen the moment
+you switch away from it, with no record of what search produced it, so
+visiting a different tab while a search was still active silently baked
+that filtered (often empty) result into the new tab's own cache as if
+it were its ordinary, unfiltered state - clearing the box afterward
+fixed only whichever tab happened to be current at that exact moment,
+leaving every tab already visited while the search was typed still
+contaminated.
+
+Typing in the library filter clears the visible list immediately,
+before the debounced backend query fires (`applyLibraryFilter` in
+`app.js`), so the interface never sits on a stale result mid-keystroke.
+That debounce captures which tab a search belongs to at the moment it
+is typed, not only the search text itself - switching tabs before its
+120ms delay elapsed used to let it read the current tab fresh only when
+it actually fired, landing the search on whichever different tab was
+current by then rather than the one it was typed on. A result is
+discarded on arrival if the filter text or active tab has moved on
+since it was requested. Escape, and a small clear button inside the
+filter box itself (visible only once something is typed), both run
+that same real, immediate clear - an earlier version of Escape only
+blanked the box's own DOM value and re-rendered whatever was already on
+screen, without actually re-querying anything, so pressing it did not
+really clear the filter. Songs, the one browse surface that can run
+into many thousands of rows, uses a much smaller result cap while a
+filter is active than while browsing unfiltered, since a large result
+there means rebuilding thousands of rows on every settled keystroke.
 
 An expanded album is inserted inline into the album grid as a full-width
 row, immediately after whichever card was clicked, rather than replacing the
@@ -108,7 +146,24 @@ tick, a scan finishing, a root removed, a tag save - so a tab nobody has
 opened yet never goes stale waiting for someone to click into it
 (`_do_library_prewarm_all` in `api.py`). The background art fill is fed by
 the Albums query specifically, the same way it always was; the other
-three tabs have no art of their own to fill.
+three tabs have no art of their own to fill. The frontend keeps up with
+that art independently of Library ever being opened too: `applyLibraryTick`
+collects newly-resolved art on every poll tick from app start, not only
+once Library has been visited - it used to be gated behind that, which
+meant the backend could easily have finished resolving the entire
+library's covers before anyone had looked, and the first visit would
+still open to a grid of blank cards catching up one at a time, because
+nothing had been asking the backend for those results until then.
+
+`_library_browser["view"]` - the single field both the four pre-warm
+queries and the frontend's first visit to Library key off "the current
+tab" - is seeded from `settings.json`'s own `library_view` at
+construction, not hardcoded to Albums: correct before a single query has
+run, rather than only being corrected once Library is first opened.
+`_do_library_prewarm_all` queries that seeded view first, ahead of the
+other three, rather than always starting with Albums regardless of
+relevance - whichever tab is actually going to matter gets a real head
+start rather than running behind three others in a fixed order.
 
 Each view tracks its own query generation, not one shared counter: firing
 all four together must never let one invalidate another's still-in-flight
@@ -118,7 +173,27 @@ finish last regardless of its own actual cost, since it was waiting
 behind the others under one lock. A `(view, needle)` pending set also
 dedupes in-flight queries: a tab switch landing while its own prewarm
 query is still running never starts a second one, it just waits on the
-one already in flight.
+one already in flight - and if that in-flight query was only ever a
+background prewarm (which never persists anything), the tab switch's own
+intent to be remembered escalates it in place rather than being silently
+dropped along with the query it was deduped against.
+
+Escalating that flag is not enough on its own to decide which view ends
+up persisted, though: two *different* tabs can each have a legitimate
+"remember me" query in flight at once - most plainly, switching tabs
+again before the previous switch's own query has resolved - and nothing
+about the remember flag says which of two different views should win.
+A monotonic counter (`_library_view_intent_seq`) does: every call that is
+actually asking to be remembered - a real navigation, or the fast local
+restore above via `library_note_view` - stamps the counter's current
+value, and a result is only allowed to persist as "the current view" if
+that stamp still matches the counter by the time the result comes back.
+Whichever navigation was most *recently* asked for is therefore the only
+one that can win, regardless of which query happens to finish first -
+which matters because Songs, by far the biggest table, is consistently
+the slowest of the four to resolve, and under the old completion-order-
+only rule was consistently the one left standing no matter which tab
+anyone had actually switched to.
 
 The frontend checks a per-view cache (`library_get_prewarmed`) before
 falling through to a live query, at every one of the four places that can
@@ -133,6 +208,74 @@ revision counter a real completed query does: bumping it there was tried
 first, and it made every cache-hit navigation also trigger a second,
 redundant fetch and re-render a moment later, on top of the one that had
 already rendered locally.
+
+### Sort names
+
+Four extra columns on each track (`title_sort`, `artist_sort`,
+`album_sort`, `album_artist_sort`) hold what iTunes calls Sort Name,
+Sort Artist, Sort Album and Sort Album Artist - an explicit filing
+order that overrides how a name sorts without changing what is
+actually displayed, editable on their own Sorting tab in the tag
+editor, next to Album Art. They map to ID3's `TSOT`/`TSOP`/`TSOA`/
+`TSO2` frames for MP3 and WAV, and to `titlesort`/`artistsort`/
+`albumsort`/`albumartistsort` Vorbis comments for FLAC and OGG - the
+same tag names iTunes itself reads and writes, verified with real
+round-trip write/read tests against actual files in all four formats
+rather than assumed from the tag names alone. WAV needed the same
+raw-frame fallback `scanner.py` already uses for title/artist/album/
+genre, since its easy-interface lookup loses these tags the same way.
+
+`_effective_sort()` in `library.py` is what actually applies one: it
+prefers a sort tag, if set, over `sort_key()`'s own guess at the
+display name - but the tag itself still passes through `sort_key()`'s
+own leading-punctuation strip rather than being trusted verbatim. That
+distinction matters: a sort tag being written to reorder something
+("Beatles, The") is a separate fact from it having already been
+normalised for leading punctuation, and is not always both at once -
+plenty of taggers populate the sort field as a plain, untouched copy of
+the display name whenever nothing has been manually reordered, symbols
+and all, and a name like `"Weird Al" Yankovic`, or an album title
+starting with a quote mark, needs that same strip regardless of
+whether a sort tag happens to be present. `_ARTIST_SORT_TAG`, a SQL
+expression shared by `albums()`, `artists()` and `songs()`, picks
+whichever of `album_artist_sort`/`artist_sort` actually corresponds to
+the name that ended up displayed, mirroring `_EFFECTIVE_ARTIST`'s own
+album_artist-then-artist fallback exactly, so the sort tag used is
+never the wrong track-level field's.
+
+A "Various Artists" compilation is deliberately excluded from the
+year-based half of `albums()`'s sort key: a real band's own albums are
+ordered chronologically on purpose, but a shelf of unrelated
+compilations has no such thing as "chronological order" between one
+release and the next, and sorting them by year first, falling back to
+album name only when two happened to share a year, meant compilations
+scattered across decades landed nowhere near their alphabetical
+neighbors. Both year-based keys force to a constant for a compilation,
+so the album name becomes the actual differentiator, the same way the
+rest of the grid already treats a compilation as one thing sorted by
+title alone.
+
+Adding these four columns is a schema migration like any other -
+`ALTER TABLE` plus a forced rescan to backfill them from the actual
+files - see Settings in the README for what that means for an existing
+library.
+
+### Scan concurrency
+
+Checking whether a file actually needs re-reading
+(`os.path.getmtime()` against what is already indexed) is a network
+round trip on a share exactly like opening the file for tags is, and
+used to run in a plain sequential loop over every file in a folder,
+entirely before the already-concurrent tag-reading pass even started -
+paying for that latency one file at a time regardless of how many
+workers were free to help. It now runs through the same pool
+(`_stat_job` in `library.py`, mirroring `_read_job`'s own never-raises
+contract) as the tag reads themselves, for the same reason
+`SCAN_WORKERS` is more than one thread to begin with: these threads
+spend nearly all their time blocked on I/O, which releases the GIL, so
+more of them does not compete for a CPU core the way genuinely
+CPU-bound work would - it just means a slow share is waiting on
+`SCAN_WORKERS` round trips at once for this check too, not one.
 
 ### Album art caching
 
@@ -207,34 +350,58 @@ reason: hiding both of its only in-flow children would otherwise collapse
 the flex container to zero height, taking the absolutely-positioned
 canvas down with it.
 
-One base color, picked from a fully custom picker (`applyTheme()` /
-`deriveTheme()` / `deriveNeutrals()` in `app.js` - a saturation/value
-square, a hue strip, and hex/RGB fields, no OS dialog involved anywhere),
-drives the whole palette. The four accent shades (`--accent`,
-`--accent-hi`, `--accent-dim`, `--accent-wash`) scale the picked color's
-own saturation and lightness by the ratios the original red theme's four
-shades already had to each other, same hue throughout. Eight background
-surfaces (`--panel`, `--panel-2`, `--line`, and five more) that were
-hand-tuned with their own warm undertone in the original red theme scale
-the same way, sharing the picked color's exact hue rather than a fixed
-offset from it - an offset reproduced the original red closely but was
-confirmed, by sampling actual rendered pixels, to rotate an unrelated
+One base color, picked from a fully custom picker (`applyTheme()` in
+`app.js`, calling `deriveTheme()` / `deriveNeutrals()` in `index.html` - a
+saturation/value square, a hue strip, and hex/RGB fields, no OS dialog
+involved anywhere), drives the whole palette. The four accent shades
+(`--accent`, `--accent-hi`, `--accent-dim`, `--accent-wash`) scale the
+picked color's own saturation and lightness by the ratios the original red
+theme's four shades already had to each other, same hue throughout. Eight
+background surfaces (`--panel`, `--panel-2`, `--line`, and five more) that
+were hand-tuned with their own warm undertone in the original red theme
+scale the same way, sharing the picked color's exact hue rather than a
+fixed offset from it - an offset reproduced the original red closely but
+was confirmed, by sampling actual rendered pixels, to rotate an unrelated
 base hue into a different perceived color entirely (a picked teal
 reading green, a picked yellow reading reddish). Saturation in both cases
 scales by the *picked* color's own saturation, not a fixed constant, or a
 fully desaturated pick (black, white, gray) would still come out tinted.
 
+`deriveTheme`/`deriveNeutrals` and their supporting color-math functions
+live in an early inline script in `index.html`'s `<head>`, not in
+`app.js` where the rest of the frontend's own logic lives - deliberately,
+so they are available to run before anything in `<body>` paints, applying
+the saved color immediately rather than leaving `style.css`'s own
+hardcoded default on screen for an instant first. `app.js` still calls
+the same functions for the color picker's live preview and for applying
+a newly-picked color; a classic `<script>` tag shares one global scope
+with everything loaded after it, so this is the one definition, not a
+second copy kept in sync by hand. The actual saved color reaches that
+early script baked directly into the page text, not fetched: `host.py`
+writes a fresh sibling copy of `index.html` on every launch
+(`index.boot.html`, next to the original so its relative references to
+`style.css`/`app.js` keep working) with a placeholder comment replaced by
+the real value, read via `Api.initial_theme_color()` before the window
+even exists - there is no bridge call that could beat first paint, since
+the entire point is running before the window, and so the bridge to
+Python, is up at all.
+
 Canvas-drawn elements - the main waveform, spectrum bars, oscilloscope,
 tunnel and belt visualizers - cannot read CSS custom properties, so they
 read plain JS variables kept in sync by `applyTheme()` instead. Those
-variables animate toward a new color over a short
-`requestAnimationFrame` loop rather than jumping to it instantly, since
-canvas has no built-in transition the way a CSS-driven element gets one
-for free; re-targeting mid-animation (continuous dragging in the picker)
-picks up from wherever the animation currently is, not the original
-start, so a fast drag reads as one continuous fade rather than a series
-of snaps. Melt (`vizMode 5`) runs its own independent palette system
-entirely and reads none of this.
+variables also seed from the same baked-in color at load, rather than
+the original red default, so the first real tick's own call to
+`applyTheme()` (still needed, since the backend is the actual source of
+truth and the two are expected to usually agree, not assumed to always)
+finds them already at the right value and does not visibly re-animate
+canvas colors that had nothing left to change. They animate toward a new
+color over a short `requestAnimationFrame` loop rather than jumping to it
+instantly otherwise, since canvas has no built-in transition the way a
+CSS-driven element gets one for free; re-targeting mid-animation
+(continuous dragging in the picker) picks up from wherever the animation
+currently is, not the original start, so a fast drag reads as one
+continuous fade rather than a series of snaps. Melt (`vizMode 5`) runs its
+own independent palette system entirely and reads none of this.
 
 The album art crop tool (`#artcropmodal` in `index.html`, the `artCrop*`
 functions in `app.js`) only ever exports the actual visible image

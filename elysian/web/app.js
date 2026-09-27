@@ -20,6 +20,13 @@ const prev = {
   shuffleOn: null, repeatOn: null,
   listSig: null, currentId: null, selSig: null,
   waveW: 0, waveH: 0, waveSig: null,
+  // Set from index.html's own early application of this same color
+  // (see its inline script), not left null: applyTick's first real tick
+  // otherwise always finds this unset and calls applyTheme() again for
+  // a color that already matches, which used to also restart the
+  // canvas color animation from scratch even though nothing visible
+  // needed to change.
+  themeColor: window.ELYSIAN_INITIAL_THEME_COLOR || null,
 };
 
 const fmt = (s) => {
@@ -1018,7 +1025,7 @@ document.addEventListener("keydown", (e) => {
       field.value = "";
       field.blur();
       if (field === $("filter")) renderList(true);
-      else if (field === $("libfilter")) renderLibrary();
+      else if (field === $("libfilter")) applyLibraryFilter("", true);
     }
     return;
   }
@@ -1151,6 +1158,8 @@ const TAG_FIELD_INPUTS = {
   track_number: "tag-track-number", track_total: "tag-track-total",
   disc_number: "tag-disc-number", disc_total: "tag-disc-total",
   year: "tag-year",
+  title_sort: "tag-title-sort", artist_sort: "tag-artist-sort",
+  album_sort: "tag-album-sort", album_artist_sort: "tag-album-artist-sort",
 };
 
 let tagEditorTab = "fields";
@@ -1158,11 +1167,14 @@ let tagEditorTab = "fields";
 function setTagTab(name) {
   tagEditorTab = name;
   $("tagtab-fields").classList.toggle("active", name === "fields");
+  $("tagtab-sort").classList.toggle("active", name === "sort");
   $("tagtab-art").classList.toggle("active", name === "art");
   $("tagmodal-body").classList.toggle("tagpane-hidden", name !== "fields");
+  $("tagmodal-sort-body").classList.toggle("tagpane-hidden", name !== "sort");
   $("tagmodal-art-body").classList.toggle("tagpane-hidden", name !== "art");
 }
 $("tagtab-fields").addEventListener("click", () => setTagTab("fields"));
+$("tagtab-sort").addEventListener("click", () => setTagTab("sort"));
 $("tagtab-art").addEventListener("click", () => setTagTab("art"));
 
 function openTagEditor(paths) {
@@ -1518,6 +1530,10 @@ function paintLibPlaying() {
   if (cell) cell.textContent = "\u25B6";
   libPlayingRow = row;
 }
+function paintLibFilterClearBtn() {
+  $("libfilter-clear").classList.toggle("hidden",
+    $("libfilter").value.length === 0);
+}
 let libRoots = [];               // folders currently in the library
 let libShowFolders = false;
 let libConfirmRemove = null;     // path awaiting a second click
@@ -1525,6 +1541,19 @@ let libBrowserRevision = -1;
 let libDetailRevision = -1;
 let libLoading = false;
 let libDesiredNeedle = "";
+// Each of the four tabs remembers its own search text, keyed by view name.
+// #libfilter is one shared DOM element - there is only one box on screen -
+// but what it *shows*, and what it's actually filtering, now changes to
+// match whichever tab is current rather than leaving one tab's typed
+// search sitting there while a different tab is displayed. That sharing
+// used to be the whole bug: switching tabs never touched the box, so a
+// search typed on one tab stayed visible (and stayed the active filter)
+// on every tab visited afterward, silently baking that filtered result
+// into each of those tabs' own cached snapshot as if it were their
+// normal, unfiltered state - clearing the box later fixed only whichever
+// tab was current at that exact moment, not the others already
+// contaminated.
+let libFilterByView = { albums: "", artists: "", genres: "", songs: "" };
 
 const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -1536,51 +1565,72 @@ function libraryOpened() {
     // Open on the tab the library was left on. The backend saves it, and
     // asking for the state first costs one call on the first open only.
     const ask = (view) => {
-      libView = view;
-      libDesiredNeedle = $("libfilter").value.trim();
-      libLoading = true;
-      document.querySelectorAll(".libtab").forEach((x) =>
-        x.classList.toggle("active", x.dataset.lib === libView));
-      libGridSig = "";
-      libItems = [];
-      libDetail = null;
-      libSelected.clear();
-      libAnchor = null;
-      renderLibrary();
-      libPending++;
-      // Every view has been kept warm since app startup, not just since
-      // Library was first opened, and not only Albums (see the startup
-      // prewarm). If this open wants the plain unfiltered version of
-      // whatever tab was last open, use whatever has already finished
-      // directly. request_browser is still safe to fall through to
-      // otherwise: the backend now recognizes an identical query already
-      // in flight and does not start a second one for it - this only
-      // ever waits on that same work, never repeats it.
-      if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
-        a.library_get_prewarmed(view).then((b) => {
-          const stillWanted = view === libView && libDesiredNeedle === "";
-          if (stillWanted && b && Array.isArray(b.items)
-              && (b.needle || "") === "") {
-            libPending--;
-            libLoading = false;
-            libItems = b.items;
-            renderLibrary();
-            libTabState[libView] = captureCurrentLibTabState();
-            libTabState[libView].stale = false;
-            a.library_note_view(view, "");
-          } else if (stillWanted) {
+      traceLibJS(`libraryOpened/ask(${view}) starting`);
+      try {
+        libView = view;
+        libDesiredNeedle = $("libfilter").value.trim();
+        libLoading = true;
+        document.querySelectorAll(".libtab").forEach((x) =>
+          x.classList.toggle("active", x.dataset.lib === libView));
+        libGridSig = "";
+        libItems = [];
+        libDetail = null;
+        libSelected.clear();
+        libAnchor = null;
+        renderLibrary();
+        libPending++;
+        // Every view has been kept warm since app startup, not just since
+        // Library was first opened, and not only Albums (see the startup
+        // prewarm). If this open wants the plain unfiltered version of
+        // whatever tab was last open, use whatever has already finished
+        // directly. request_browser is still safe to fall through to
+        // otherwise: the backend now recognizes an identical query already
+        // in flight and does not start a second one for it - this only
+        // ever waits on that same work, never repeats it.
+        if (!libDesiredNeedle && typeof a.library_get_prewarmed === "function") {
+          a.library_get_prewarmed(view).then((b) => {
+            try {
+              const stillWanted = view === libView && libDesiredNeedle === "";
+              traceLibJS(`libraryOpened/ask(${view}): prewarmed resolved, ` +
+                         `stillWanted=${stillWanted} items=` +
+                         `${b && Array.isArray(b.items) ? b.items.length
+                         : "n/a"}`);
+              if (stillWanted && b && Array.isArray(b.items)
+                  && (b.needle || "") === "") {
+                libPending--;
+                libLoading = false;
+                libItems = b.items;
+                renderLibrary();
+                libTabState[libView] = captureCurrentLibTabState();
+                libTabState[libView].stale = false;
+                traceLibJS(`libraryOpened/ask(${view}): calling ` +
+                           `library_note_view`);
+                a.library_note_view(view, "");
+              } else if (stillWanted) {
+                traceLibJS(`libraryOpened/ask(${view}): cache not usable, ` +
+                           `calling library_request_browser`);
+                a.library_request_browser(libView, libDesiredNeedle);
+              } else {
+                libPending--;
+              }
+              schedule();
+            } catch (err) {
+              traceLibJS(`libraryOpened/ask(${view}): THREW inside ` +
+                         `prewarmed callback: ${err && err.stack || err}`);
+            }
+          }).catch((err) => {
+            traceLibJS(`libraryOpened/ask(${view}): prewarmed rejected: ` +
+                       `${err && err.stack || err}`);
             a.library_request_browser(libView, libDesiredNeedle);
-          } else {
-            libPending--;
-          }
-          schedule();
-        }).catch(() => {
+            schedule();
+          });
+        } else {
           a.library_request_browser(libView, libDesiredNeedle);
           schedule();
-        });
-      } else {
-        a.library_request_browser(libView, libDesiredNeedle);
-        schedule();
+        }
+      } catch (err) {
+        traceLibJS(`libraryOpened/ask(${view}): THREW: ` +
+                   `${err && err.stack || err}`);
       }
     };
     if (typeof a.library_get_state === "function") {
@@ -2495,71 +2545,157 @@ function invalidateAllLibTabState() {
   invalidateLibTabState("songs");
 }
 
+// TEMPORARY DIAGNOSTIC: a real Library tab click has twice now been
+// observed to produce zero backend activity - not the wrong tab,
+// nothing at all. Every function setLibView runs was checked and none
+// of them should throw on real data, but an uncaught exception
+// anywhere inside it would abort silently right where it happened,
+// including skipping the note_view/request_browser call the whole
+// function exists to make. console.log alone needs DevTools open to
+// see, which is an extra step nobody should have to take just to
+// capture this - so this also forwards the same line into the
+// backend's own log file (js_log), the same file already being sent
+// for every other trace, tagged the same way ([LIBDIAG-JS]). Remove
+// both this and js_log in api.py once the cause is confirmed.
+function traceLibJS(msg) {
+  console.log(msg);
+  try {
+    const a = api();
+    if (a && typeof a.js_log === "function") a.js_log(msg);
+  } catch (err) { /* never let tracing itself break anything */ }
+}
+
 function setLibView(name) {
-  if (libView === name) return;
+  traceLibJS(`setLibView(${name}) called, current libView=${libView}`);
+  try {
+    if (libView === name) {
+      traceLibJS(`setLibView(${name}): already on this tab, no-op`);
+      return;
+    }
 
-  libTabState[libView] = captureCurrentLibTabState();
+    // Defensive: the "input" listener already keeps this in sync on every
+    // keystroke, but this guarantees it regardless of how the box's value
+    // got here.
+    libFilterByView[libView] = $("libfilter").value.trim();
+    libTabState[libView] = captureCurrentLibTabState();
 
-  libView = name;
-  document.querySelectorAll(".libtab").forEach((b) =>
-    b.classList.toggle("active", b.dataset.lib === name));
+    libView = name;
+    document.querySelectorAll(".libtab").forEach((b) =>
+      b.classList.toggle("active", b.dataset.lib === name));
+    // The actual fix for a search typed on one tab silently filtering (or
+    // contaminating the cache of) every other tab visited afterward: the
+    // box now shows THIS tab's own remembered search - empty if it has
+    // never had one - instead of whatever was left over from whichever
+    // tab was open before.
+    $("libfilter").value = libFilterByView[name] || "";
+    paintLibFilterClearBtn();
 
-  const saved = libTabState[name];
-  const activeNeedle = $("libfilter").value.trim();
-  // A cached tab snapshot may have been captured under a different (or no)
-  // filter, so it can't be trusted while one is currently active - restore
-  // it only when there is nothing typed to filter by.
-  if (!activeNeedle && saved && !saved.stale) {
-    libLoading = false;
-    restoreLibTabState(saved);
-    return;
-  }
-
-  libGridSig = "";
-  libItems = [];
-  libDetail = null;
-  libSelected.clear();
-  libAnchor = null;
-  renderLibrary();
-
-  const a = api();
-  if (!a) return;
-  libDesiredNeedle = activeNeedle;
-  libLoading = true;
-  libPending++;
-  // The backend has kept every view's unfiltered listing warm since
-  // startup (and refreshed on every library-changing event since), not
-  // just whichever tab happened to be open. If this switch wants that
-  // exact thing (no active filter), use whatever has already finished
-  // directly instead of firing a live query that repeats work already
-  // done. request_browser is still safe to fall through to otherwise -
-  // the backend recognizes an identical query already in flight and
-  // waits on it rather than starting a second one.
-  if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
-    a.library_get_prewarmed(name).then((b) => {
-      const stillWanted = name === libView && libDesiredNeedle === "";
-      if (stillWanted && b && Array.isArray(b.items)
-          && (b.needle || "") === "") {
-        libPending--;
-        libLoading = false;
-        libItems = b.items;
-        renderLibrary();
-        libTabState[libView] = captureCurrentLibTabState();
-        libTabState[libView].stale = false;
-        a.library_note_view(name, "");
-      } else if (stillWanted) {
-        a.library_request_browser(name, activeNeedle);
-      } else {
-        libPending--;
+    const saved = libTabState[name];
+    const activeNeedle = $("libfilter").value.trim();
+    // A cached tab snapshot may have been captured under a different (or no)
+    // filter, so it can't be trusted while one is currently active - restore
+    // it only when there is nothing typed to filter by.
+    if (!activeNeedle && saved && !saved.stale) {
+      traceLibJS(`setLibView(${name}): restoring from local cache`);
+      libLoading = false;
+      restoreLibTabState(saved);
+      // Restoring locally skips the backend round trip for the *data*,
+      // which is the whole point - but it must not also skip telling the
+      // backend this is now the current view. It used to: this branch
+      // returned right after restoreLibTabState, before the api() call
+      // further down that every other path uses to reach
+      // library_note_view - so the FIRST visit to a tab in a session
+      // persisted correctly, and every visit after that (second, third,
+      // ...) silently didn't, because it always took this same early
+      // return. "Current tab" then stuck on whichever tab was last
+      // visited for the first time that session, not whichever was
+      // actually looked at last - exactly backwards, and exactly what
+      // made a revisited tab never get remembered no matter how many
+      // times it was clicked back to right before closing.
+      const a2 = api();
+      if (a2 && typeof a2.library_note_view === "function") {
+        traceLibJS(`setLibView(${name}): calling library_note_view from ` +
+                   `the cache-restore path`);
+        a2.library_note_view(name, "");
       }
-      schedule();
-    }).catch(() => {
+      return;
+    }
+
+    libGridSig = "";
+    libItems = [];
+    libDetail = null;
+    libSelected.clear();
+    libAnchor = null;
+    renderLibrary();
+    traceLibJS(`setLibView(${name}): initial empty renderLibrary done, ` +
+               `querying backend`);
+
+    const a = api();
+    if (!a) {
+      traceLibJS(`setLibView(${name}): api() returned falsy, backend ` +
+                 `never contacted`);
+      return;
+    }
+    libDesiredNeedle = activeNeedle;
+    libLoading = true;
+    libPending++;
+    // The backend has kept every view's unfiltered listing warm since
+    // startup (and refreshed on every library-changing event since), not
+    // just whichever tab happened to be open. If this switch wants that
+    // exact thing (no active filter), use whatever has already finished
+    // directly instead of firing a live query that repeats work already
+    // done. request_browser is still safe to fall through to otherwise -
+    // the backend recognizes an identical query already in flight and
+    // waits on it rather than starting a second one.
+    if (!activeNeedle && typeof a.library_get_prewarmed === "function") {
+      a.library_get_prewarmed(name).then((b) => {
+        try {
+          const stillWanted = name === libView && libDesiredNeedle === "";
+          traceLibJS(`setLibView(${name}): library_get_prewarmed ` +
+                     `resolved, stillWanted=${stillWanted} items=` +
+                     `${b && Array.isArray(b.items) ? b.items.length : "n/a"}` +
+                     ` needle=${JSON.stringify(b && b.needle)}`);
+          if (stillWanted && b && Array.isArray(b.items)
+              && (b.needle || "") === "") {
+            libPending--;
+            libLoading = false;
+            libItems = b.items;
+            renderLibrary();
+            libTabState[libView] = captureCurrentLibTabState();
+            libTabState[libView].stale = false;
+            traceLibJS(`setLibView(${name}): calling library_note_view`);
+            a.library_note_view(name, "");
+          } else if (stillWanted) {
+            traceLibJS(`setLibView(${name}): cache not usable, calling ` +
+                       `library_request_browser`);
+            a.library_request_browser(name, activeNeedle);
+          } else {
+            traceLibJS(`setLibView(${name}): no longer wanted by the ` +
+                       `time this resolved, dropped`);
+            libPending--;
+          }
+          schedule();
+        } catch (err) {
+          traceLibJS(`setLibView(${name}): THREW inside ` +
+                     `library_get_prewarmed callback: ${err && err.stack
+                     || err}`);
+        }
+      }).catch((err) => {
+        traceLibJS(`setLibView(${name}): library_get_prewarmed rejected, ` +
+                   `falling back to request_browser: ${err && err.stack
+                   || err}`);
+        a.library_request_browser(name, activeNeedle);
+        schedule();
+      });
+    } else {
+      traceLibJS(`setLibView(${name}): needle active or ` +
+                 `library_get_prewarmed missing, calling ` +
+                 `request_browser directly`);
       a.library_request_browser(name, activeNeedle);
       schedule();
-    });
-  } else {
-    a.library_request_browser(name, activeNeedle);
-    schedule();
+    }
+  } catch (err) {
+    traceLibJS(`setLibView(${name}): THREW: ${err && err.stack || err}`);
   }
 }
 
@@ -2602,53 +2738,80 @@ document.querySelectorAll(".libtab").forEach((b) =>
   b.addEventListener("click", () => setLibView(b.dataset.lib)));
 
 let libFilterTimer = 0;
-$("libfilter").addEventListener("input", () => {
+
+function applyLibraryFilter(needle, immediate) {
   // Filtering is backend-owned, not a local array filter, because Albums,
   // Artists, Genres and Songs each search against different fields. But
   // the UI should still react immediately while the query is in flight,
   // rather than sitting on the previous result until it lands.
-  const needle = $("libfilter").value.trim();
+  //
+  // Shared by the filter box's own "input" listener, the clear button and
+  // Escape, so all three behave identically - Escape in particular used
+  // to only ever blank the box visually and re-render whatever was
+  // already on screen, without actually re-querying anything, so
+  // clearing the box did not really clear the filter.
+  const view = libView;
+  libFilterByView[view] = needle;
   libDesiredNeedle = needle;
   libDetail = null;
   libAnchor = null;
   libLoading = true;
   libItems = [];
   libGridSig = "";
+  paintLibFilterClearBtn();
   renderLibrary();
   schedule();
 
   clearTimeout(libFilterTimer);
-  libFilterTimer = setTimeout(() => {
+  const fire = () => {
+    // The tab this search was typed on may no longer be the one on
+    // screen by the time this fires - switching tabs never canceled or
+    // redirected this timer, so a search typed on one tab could still
+    // land on whichever *different* tab someone had already moved on
+    // to, silently applying that search as if it belonged there.
+    if (view !== libView) return;
     const a = api();
     if (!a) return;
     libPending++;
     if (!needle && typeof a.library_get_prewarmed === "function") {
-      a.library_get_prewarmed(libView).then((b) => {
-        const stillWanted = libDesiredNeedle === needle;
+      a.library_get_prewarmed(view).then((b) => {
+        const stillWanted = view === libView && libDesiredNeedle === needle;
         if (stillWanted && b && Array.isArray(b.items)
             && (b.needle || "") === "") {
           libPending--;
           libLoading = false;
           libItems = b.items;
           renderLibrary();
-          libTabState[libView] = captureCurrentLibTabState();
-          libTabState[libView].stale = false;
-          a.library_note_view(libView, "");
+          libTabState[view] = captureCurrentLibTabState();
+          libTabState[view].stale = false;
+          a.library_note_view(view, "");
         } else if (stillWanted) {
-          a.library_request_browser(libView, needle);
+          a.library_request_browser(view, needle);
         } else {
           libPending--;
         }
         schedule();
       }).catch(() => {
-        a.library_request_browser(libView, needle);
+        if (view === libView) a.library_request_browser(view, needle);
         schedule();
       });
     } else {
-      a.library_request_browser(libView, needle);
+      a.library_request_browser(view, needle);
       schedule();
     }
-  }, 120);
+  };
+  if (immediate) fire();
+  else libFilterTimer = setTimeout(fire, 120);
+}
+
+$("libfilter").addEventListener("input", () => {
+  applyLibraryFilter($("libfilter").value.trim(), false);
+});
+
+$("libfilter-clear").addEventListener("click", () => {
+  $("libfilter").value = "";
+  applyLibraryFilter("", true);
+  $("libfilter").focus();
 });
 
 $("libfolders").addEventListener("click", (e) => {
@@ -2841,6 +3004,26 @@ function applyLibraryTick(tick) {
   const a = api();
   if (!a) return;
   libScanning = !!tick.library_scanning;
+  // Deliberately ahead of the libOpened gate below. The backend starts
+  // resolving every album's art at startup and keeps going the whole
+  // time the app is open, whether or not Library has ever been visited
+  // (see _do_restore_session / _do_library_prewarm_all on the Python
+  // side) - it does not wait for a click, and never has. But this
+  // frontend used to only ever ask for those results, via collectArt,
+  // from inside the block the libOpened check below guards - so the
+  // work the backend had already finished sat there unread, and the
+  // very first Library visit was the first moment anything client-side
+  // caught up, which is what made it look like nothing had started
+  // before that click. collectArt/paintLibArt are both no-ops before
+  // any card exists (libCards starts as an empty Map), so calling this
+  // early does nothing visible yet - it just keeps the local art cache
+  // caught up continuously, so that by the time Library is actually
+  // opened for the first time, every card it builds paints its cover
+  // immediately instead of one at a time as each one "arrives".
+  if (tick.library_art_revision !== libArtRevision) {
+    libArtRevision = tick.library_art_revision;
+    collectArt(libArtSeq);
+  }
   if (!libOpened) return;
   if (tick.library_browser_revision !== libBrowserRevision) {
     libBrowserRevision = tick.library_browser_revision;
@@ -2921,10 +3104,6 @@ function applyLibraryTick(tick) {
       }
     }).catch(() => {});
   }
-  if (tick.library_art_revision !== libArtRevision) {
-    libArtRevision = tick.library_art_revision;
-    collectArt(libArtSeq);
-  }
   if (tick.library_editor_revision !== libEditorRevision) {
     libEditorRevision = tick.library_editor_revision;
     a.library_get_editor_state().then((st) => {
@@ -2994,129 +3173,44 @@ function applyLibraryTick(tick) {
 
 /* ---------- theme color ---------- */
 
-function hexToHsl(hex) {
-  hex = hex.replace("#", "");
-  const r = parseInt(hex.slice(0, 2), 16) / 255;
-  const g = parseInt(hex.slice(2, 4), 16) / 255;
-  const b = parseInt(hex.slice(4, 6), 16) / 255;
-  const max = Math.max(r, g, b), min = Math.min(r, g, b);
-  let h, s;
-  const l = (max + min) / 2;
-  if (max === min) {
-    h = s = 0;
-  } else {
-    const d = max - min;
-    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
-    else if (max === g) h = (b - r) / d + 2;
-    else h = (r - g) / d + 4;
-    h /= 6;
-  }
-  return { h: h * 360, s: s * 100, l: l * 100 };
-}
-
-function hslToHex(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  s = Math.max(0, Math.min(100, s)) / 100;
-  l = Math.max(0, Math.min(100, l)) / 100;
-  const c = (1 - Math.abs(2 * l - 1)) * s;
-  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
-  const m = l - c / 2;
-  let r, g, b;
-  if (h < 60) [r, g, b] = [c, x, 0];
-  else if (h < 120) [r, g, b] = [x, c, 0];
-  else if (h < 180) [r, g, b] = [0, c, x];
-  else if (h < 240) [r, g, b] = [0, x, c];
-  else if (h < 300) [r, g, b] = [x, 0, c];
-  else [r, g, b] = [c, 0, x];
-  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-}
-
-function hexToRgbTriplet(hex) {
-  hex = hex.replace("#", "");
-  const r = parseInt(hex.slice(0, 2), 16);
-  const g = parseInt(hex.slice(2, 4), 16);
-  const b = parseInt(hex.slice(4, 6), 16);
-  return `${r},${g},${b}`;
-}
-
-/* Ratios of each shade's saturation/lightness to the base's own, taken
-   directly from the original red palette (--accent-hi #e04b3c as base):
-     accent      S x0.836  L x0.842
-     accent-dim  S x0.821  L x0.627
-     accent-wash S x0.671  L x0.275
-   Same hue throughout - only saturation and lightness scale - so picking
-   any base color reproduces the same relative shading the red theme
-   already has, rather than a fixed offset that would land wrong for a
-   very different starting saturation/lightness. */
-// panel/panel-2/line/etc were hand-tuned with their own warm reddish
-// undertone in the original red theme, at a lower saturation than the
-// accent itself. These now share the accent's exact hue (no offset -
-// an earlier version preserved each one's original hue OFFSET from the
-// accent, which kept things in the same color family for red, but the
-// same fixed rotation pushed a very different base hue like teal or
-// yellow into a completely different perceived color - confirmed by
-// sampling actual rendered pixels showing the panel's hue drifting by
-// the same ~35deg the offset applied, regardless of direction). --bg
-// is deliberately left alone: unlike the others, it was independently
-// blue-toned to begin with, not on the same warm-tint family at all.
-const ORIGINAL_BASE_S = 72.6;  // saturation of the original --accent-hi
-// sRatio: this neutral's original saturation as a fraction of the
-// original base's saturation - scaling by the CURRENT base's own
-// saturation means a desaturated pick (gray/black/white) correctly
-// produces a desaturated (truly neutral) result. A fixed absolute
-// saturation here (the previous version) applied the same tint no
-// matter what was picked, including pure black or white - verified
-// directly: black, white, and gray all produced the identical
-// #1c1419 before this fix.
-const NEUTRAL_ORIGINALS = {
-  panel: { sRatio: 16.7 / ORIGINAL_BASE_S, l: 9.4 },
-  panel2: { sRatio: 10.8 / ORIGINAL_BASE_S, l: 12.7 },
-  line: { sRatio: 10.5 / ORIGINAL_BASE_S, l: 14.9 },
-  sliderTrack: { sRatio: 12.2 / ORIGINAL_BASE_S, l: 16.1 },
-  tctlHover: { sRatio: 11.1 / ORIGINAL_BASE_S, l: 17.6 },
-  scrollbarThumb: { sRatio: 10.9 / ORIGINAL_BASE_S, l: 18.0 },
-  tctlActive: { sRatio: 11.9 / ORIGINAL_BASE_S, l: 21.4 },
-  scrollbarThumbHover: { sRatio: 12.1 / ORIGINAL_BASE_S, l: 25.9 },
-};
-
-function deriveNeutrals(baseHex) {
-  const { h, s } = hexToHsl(baseHex);
-  const out = {};
-  for (const k in NEUTRAL_ORIGINALS) {
-    const o = NEUTRAL_ORIGINALS[k];
-    out[k] = hslToHex(h, s * o.sRatio, o.l);
-  }
-  return out;
-}
-
-function deriveTheme(baseHex) {
-  const { h, s, l } = hexToHsl(baseHex);
-  return {
-    hi: baseHex,
-    accent: hslToHex(h, s * 0.836, l * 0.842),
-    dim: hslToHex(h, s * 0.821, l * 0.627),
-    wash: hslToHex(h, s * 0.671, l * 0.275),
-  };
-}
+// hexToHsl, hslToHex, hexToRgbTriplet, deriveNeutrals and deriveTheme now
+// live in index.html's own early inline script, not here: that script
+// runs before first paint specifically so it can apply the saved theme
+// before anything renders with style.css's plain default, and applyTheme
+// below needs the exact same derivation, not a second copy of it that
+// could drift out of sync. A classic <script> shares one scope with
+// everything loaded after it, so they are already in scope here.
 
 // Canvas fillStyle/strokeStyle cannot read CSS custom properties, so the
 // waveform/spectrum/oscilloscope/tunnel/belt drawing code below reads
 // these plain JS variables instead - kept in sync with the CSS variables
 // by applyTheme(). Melt (vizMode 5) uses its own independent palette
 // system entirely and never reads these.
-let themeHi = "#e04b3c";
-let themeDim = "#8e2b24";
-let themeHiRgb = "224,75,60";
+//
+// Seeded from the same color index.html already applied before paint,
+// when available, rather than hardcoded to the original red: without
+// this, the first real tick's applyTheme() call (still needed - see
+// prev.themeColor below) would find these sitting at the red default
+// and animate the waveform/visualizer from red to the actual saved
+// color over the next 220ms, a small but real leftover of the exact
+// flash the rest of this fix removes everywhere else.
+const ELYSIAN_INITIAL_SHADES =
+  /^#[0-9a-fA-F]{6}$/.test(window.ELYSIAN_INITIAL_THEME_COLOR || "")
+    ? deriveTheme(window.ELYSIAN_INITIAL_THEME_COLOR) : null;
+let themeHi = ELYSIAN_INITIAL_SHADES ? ELYSIAN_INITIAL_SHADES.hi : "#e04b3c";
+let themeDim = ELYSIAN_INITIAL_SHADES ? ELYSIAN_INITIAL_SHADES.dim : "#8e2b24";
+let themeHiRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgbTriplet(ELYSIAN_INITIAL_SHADES.hi) : "224,75,60";
 
 // The canvas-drawn colors animate smoothly toward these targets instead
 // of jumping instantly - see startColorAnimation below. themeHi/themeDim/
 // themeHiRgb above stay as the immediate target (read by the picker's
 // own logic); animHiRgb/animDimRgb below are what the drawing code
 // actually paints with, each frame, while catching up to that target.
-let animHiRgb = { r: 224, g: 75, b: 60 };
-let animDimRgb = { r: 142, g: 43, b: 36 };
+let animHiRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgb(ELYSIAN_INITIAL_SHADES.hi) : { r: 224, g: 75, b: 60 };
+let animDimRgb = ELYSIAN_INITIAL_SHADES
+  ? hexToRgb(ELYSIAN_INITIAL_SHADES.dim) : { r: 142, g: 43, b: 36 };
 let colorAnimFromHi = null, colorAnimFromDim = null;
 let colorAnimTargetHi = null, colorAnimTargetDim = null;
 let colorAnimStart = 0, colorAnimHandle = null;

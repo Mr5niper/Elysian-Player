@@ -506,25 +506,32 @@ html, body {
 #tagmodal-sub {
   color: var(--muted); font-size: 11.5px; margin-bottom: 16px;
 }
-#tagmodal-body {
+#tagmodal-body, #tagmodal-sort-body {
   display: flex; flex-direction: column; gap: 11px;
 }
-#tagmodal-body label {
+#tagmodal-body label, #tagmodal-sort-body label {
   display: flex; flex-direction: column; gap: 4px;
   font-size: 11.5px; color: var(--muted);
 }
 #tagmodal-body input[type="text"],
-#tagmodal-body input[type="number"] {
+#tagmodal-body input[type="number"],
+#tagmodal-sort-body input[type="text"] {
   background: rgba(0,0,0,0.28);
   border: 1px solid var(--line); border-radius: 7px;
   padding: 7px 10px; color: var(--text); font-size: 12.5px;
   font-family: inherit; outline: none; user-select: text;
 }
-#tagmodal-body input:focus { border-color: var(--accent); }
+#tagmodal-body input:focus, #tagmodal-sort-body input:focus { border-color: var(--accent); }
 /* A field with more than one value among the selected tracks shows this
    placeholder rather than any one of them, so editing several files at
    once never looks like it silently picked a winner. */
-#tagmodal-body input::placeholder { color: #6a6a74; font-style: italic; }
+#tagmodal-body input::placeholder, #tagmodal-sort-body input::placeholder {
+  color: #6a6a74; font-style: italic;
+}
+#tagmodal-sort-note {
+  font-size: 11px; color: var(--muted); line-height: 1.45;
+  margin-bottom: 2px;
+}
 .tagrow-pair {
   display: flex; gap: 12px;
 }
@@ -570,8 +577,9 @@ html, body {
 .tagtab:hover { color: var(--text); }
 .tagtab.active { color: var(--text); border-bottom-color: var(--accent); }
 #tagmodal-panes { display: grid; }
-#tagmodal-body, #tagmodal-art-body { grid-area: 1 / 1; }
-#tagmodal-body.tagpane-hidden, #tagmodal-art-body.tagpane-hidden {
+#tagmodal-body, #tagmodal-sort-body, #tagmodal-art-body { grid-area: 1 / 1; }
+#tagmodal-body.tagpane-hidden, #tagmodal-sort-body.tagpane-hidden,
+#tagmodal-art-body.tagpane-hidden {
   visibility: hidden; pointer-events: none;
 }
 
@@ -680,14 +688,24 @@ html, body {
 .libtab:hover { background: rgba(255,255,255,0.05); color: var(--text); }
 .libtab.active { border-color: var(--accent); color: var(--accent-hi); }
 .tbtn.on { border-color: var(--accent); color: var(--accent-hi); }
+#libfilter-wrap { flex: 1; min-width: 0; position: relative; display: flex; }
 #libfilter {
   flex: 1; min-width: 0; background: rgba(0,0,0,0.28);
   border: 1px solid var(--line); border-radius: 7px;
-  padding: 7px 11px; color: var(--text); font-size: 12px;
+  padding: 7px 28px 7px 11px; color: var(--text); font-size: 12px;
   font-family: inherit; outline: none; user-select: text;
 }
 #libfilter:focus { border-color: var(--accent); }
 #libfilter::placeholder { color: #6a6a74; }
+#libfilter-clear {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  width: 20px; height: 20px; padding: 0; border: none; background: none;
+  color: var(--muted); font-size: 16px; line-height: 1; cursor: default;
+  display: flex; align-items: center; justify-content: center;
+  border-radius: 5px;
+}
+#libfilter-clear:hover { color: var(--text); background: rgba(255,255,255,0.08); }
+#libfilter-clear.hidden { display: none; }
 
 #libcrumb {
   display: flex; align-items: center; gap: 10px;

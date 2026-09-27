@@ -4,6 +4,161 @@
 <meta charset="utf-8">
 <title>Elysian Player</title>
 <link rel="stylesheet" href="style.css">
+<script>
+/* Runs before anything in <body> paints. style.css's own :root block
+   still carries the original red theme's literal values as a fallback
+   for the rare case this fails or is never injected (a stripped-down
+   dev checkout, say) - without this, the app would open with no
+   accent color set at all rather than the wrong one, which is worse.
+   Overriding those with inline styles here, before first paint, is
+   what stops the app opening in the default red for an instant and
+   then visibly snapping to the saved color a moment later: this makes
+   it the saved color from the very first frame instead.
+
+   These color-derivation functions used to only exist in app.js, run
+   well after the page had already painted with style.css's defaults.
+   Moved here, not duplicated, so applyTheme() in app.js (still used
+   for live edits in the color picker, and for the rare case where the
+   backend's own value differs from what was injected below) calls the
+   exact same code path a plain classic script shares this scope with
+   whatever loads after it. */
+function hexToHsl(hex) {
+  hex = hex.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16) / 255;
+  const g = parseInt(hex.slice(2, 4), 16) / 255;
+  const b = parseInt(hex.slice(4, 6), 16) / 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h, s;
+  const l = (max + min) / 2;
+  if (max === min) {
+    h = s = 0;
+  } else {
+    const d = max - min;
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    if (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+    else if (max === g) h = (b - r) / d + 2;
+    else h = (r - g) / d + 4;
+    h /= 6;
+  }
+  return { h: h * 360, s: s * 100, l: l * 100 };
+}
+
+function hslToHex(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  s = Math.max(0, Math.min(100, s)) / 100;
+  l = Math.max(0, Math.min(100, l)) / 100;
+  const c = (1 - Math.abs(2 * l - 1)) * s;
+  const x = c * (1 - Math.abs((h / 60) % 2 - 1));
+  const m = l - c / 2;
+  let r, g, b;
+  if (h < 60) [r, g, b] = [c, x, 0];
+  else if (h < 120) [r, g, b] = [x, c, 0];
+  else if (h < 180) [r, g, b] = [0, c, x];
+  else if (h < 240) [r, g, b] = [0, x, c];
+  else if (h < 300) [r, g, b] = [x, 0, c];
+  else [r, g, b] = [c, 0, x];
+  const toHex = (v) => Math.round((v + m) * 255).toString(16).padStart(2, "0");
+  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+function hexToRgbTriplet(hex) {
+  hex = hex.replace("#", "");
+  const r = parseInt(hex.slice(0, 2), 16);
+  const g = parseInt(hex.slice(2, 4), 16);
+  const b = parseInt(hex.slice(4, 6), 16);
+  return `${r},${g},${b}`;
+}
+
+/* Ratios of each shade's saturation/lightness to the base's own, taken
+   directly from the original red palette (--accent-hi #e04b3c as base):
+     accent      S x0.836  L x0.842
+     accent-dim  S x0.821  L x0.627
+     accent-wash S x0.671  L x0.275
+   Same hue throughout - only saturation and lightness scale - so picking
+   any base color reproduces the same relative shading the red theme
+   already has, rather than a fixed offset that would land wrong for a
+   very different starting saturation/lightness. */
+// panel/panel-2/line/etc were hand-tuned with their own warm reddish
+// undertone in the original red theme, at a lower saturation than the
+// accent itself. These now share the accent's exact hue (no offset -
+// an earlier version preserved each one's original hue OFFSET from the
+// accent, which kept things in the same color family for red, but the
+// same fixed rotation pushed a very different base hue like teal or
+// yellow into a completely different perceived color - confirmed by
+// sampling actual rendered pixels showing the panel's hue drifting by
+// the same ~35deg the offset applied, regardless of direction). --bg
+// is deliberately left alone: unlike the others, it was independently
+// blue-toned to begin with, not on the same warm-tint family at all.
+const ORIGINAL_BASE_S = 72.6;  // saturation of the original --accent-hi
+// sRatio: this neutral's original saturation as a fraction of the
+// original base's saturation - scaling by the CURRENT base's own
+// saturation means a desaturated pick (gray/black/white) correctly
+// produces a desaturated (truly neutral) result. A fixed absolute
+// saturation here (the previous version) applied the same tint no
+// matter what was picked, including pure black or white - verified
+// directly: black, white, and gray all produced the identical
+// #1c1419 before this fix.
+const NEUTRAL_ORIGINALS = {
+  panel: { sRatio: 16.7 / ORIGINAL_BASE_S, l: 9.4 },
+  panel2: { sRatio: 10.8 / ORIGINAL_BASE_S, l: 12.7 },
+  line: { sRatio: 10.5 / ORIGINAL_BASE_S, l: 14.9 },
+  sliderTrack: { sRatio: 12.2 / ORIGINAL_BASE_S, l: 16.1 },
+  tctlHover: { sRatio: 11.1 / ORIGINAL_BASE_S, l: 17.6 },
+  scrollbarThumb: { sRatio: 10.9 / ORIGINAL_BASE_S, l: 18.0 },
+  tctlActive: { sRatio: 11.9 / ORIGINAL_BASE_S, l: 21.4 },
+  scrollbarThumbHover: { sRatio: 12.1 / ORIGINAL_BASE_S, l: 25.9 },
+};
+
+function deriveNeutrals(baseHex) {
+  const { h, s } = hexToHsl(baseHex);
+  const out = {};
+  for (const k in NEUTRAL_ORIGINALS) {
+    const o = NEUTRAL_ORIGINALS[k];
+    out[k] = hslToHex(h, s * o.sRatio, o.l);
+  }
+  return out;
+}
+
+function deriveTheme(baseHex) {
+  const { h, s, l } = hexToHsl(baseHex);
+  return {
+    hi: baseHex,
+    accent: hslToHex(h, s * 0.836, l * 0.842),
+    dim: hslToHex(h, s * 0.821, l * 0.627),
+    wash: hslToHex(h, s * 0.671, l * 0.275),
+  };
+}
+
+// Replaced with the actual saved color (a JSON string literal) or left
+// as null by host.py just before the window is created - see
+// host._index_path. Exposed on window for app.js to read once it loads,
+// so its own first tick's theme check can recognise this already
+// matches and skip re-animating the canvas-only color state from
+// scratch (see themeHi/animHiRgb near the top of app.js).
+window.ELYSIAN_INITIAL_THEME_COLOR = /*ELYSIAN_THEME_COLOR*/null/*END_ELYSIAN_THEME_COLOR*/;
+
+(function () {
+  const initial = window.ELYSIAN_INITIAL_THEME_COLOR;
+  if (!/^#[0-9a-fA-F]{6}$/.test(initial || "")) return;
+  const shades = deriveTheme(initial);
+  const neutrals = deriveNeutrals(initial);
+  const root = document.documentElement.style;
+  root.setProperty("--accent-hi", shades.hi);
+  root.setProperty("--accent", shades.accent);
+  root.setProperty("--accent-rgb", hexToRgbTriplet(shades.accent).replace(/,/g, " "));
+  root.setProperty("--accent-dim", shades.dim);
+  root.setProperty("--accent-wash", shades.wash);
+  root.setProperty("--panel", neutrals.panel);
+  root.setProperty("--panel-rgb", hexToRgbTriplet(neutrals.panel).replace(/,/g, " "));
+  root.setProperty("--panel-2", neutrals.panel2);
+  root.setProperty("--line", neutrals.line);
+  root.setProperty("--slider-track", neutrals.sliderTrack);
+  root.setProperty("--tctl-hover", neutrals.tctlHover);
+  root.setProperty("--scrollbar-thumb", neutrals.scrollbarThumb);
+  root.setProperty("--tctl-active", neutrals.tctlActive);
+  root.setProperty("--scrollbar-thumb-hover", neutrals.scrollbarThumbHover);
+})();
+</script>
 </head>
 <body>
 <div id="resize-top" class="resize-handle edge" data-edge="top"></div>
@@ -84,7 +239,11 @@
             <button class="libtab" data-lib="genres">Genres</button>
             <button class="libtab" data-lib="songs">Songs</button>
           </div>
-          <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
+          <div id="libfilter-wrap">
+            <input id="libfilter" type="text" placeholder="Filter" spellcheck="false">
+            <button type="button" id="libfilter-clear" class="hidden"
+                    title="Clear filter" aria-label="Clear filter">&times;</button>
+          </div>
           <button class="tbtn" id="lib-folders">Folders</button>
           <button class="tbtn" id="lib-rescan">Rescan</button>
         </div>
@@ -206,6 +365,7 @@
 
       <div id="tagmodal-tabs">
         <button type="button" class="tagtab active" id="tagtab-fields">Tags</button>
+        <button type="button" class="tagtab" id="tagtab-sort">Sorting</button>
         <button type="button" class="tagtab" id="tagtab-art">Album Art</button>
       </div>
 
@@ -248,6 +408,26 @@
           <label class="checkrow">
             <input id="tag-compilation" type="checkbox">
             Part of a compilation
+          </label>
+        </div>
+
+        <div id="tagmodal-sort-body">
+          <p id="tagmodal-sort-note">
+            Overrides how this filters alphabetically, without changing what
+            is shown - the same mechanism iTunes calls Sort Name/Sort Artist/
+            Sort Album/Sort Album Artist. Leave blank to file normally.
+          </p>
+          <label>Sort Title
+            <input id="tag-title-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Artist
+            <input id="tag-artist-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Album
+            <input id="tag-album-sort" type="text" spellcheck="false">
+          </label>
+          <label>Sort Album Artist
+            <input id="tag-album-artist-sort" type="text" spellcheck="false">
           </label>
         </div>
 
