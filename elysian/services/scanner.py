@@ -82,6 +82,8 @@ EMPTY_METADATA = {
     "album_artist": "", "genre": "", "track_number": 0,
     "disc_number": 0, "year": 0, "compilation": 0,
     "track_total": 0, "disc_total": 0,
+    "title_sort": "", "artist_sort": "", "album_sort": "",
+    "album_artist_sort": "",
 }
 
 #: What the tag editor may change, and what LibraryService considers
@@ -93,6 +95,7 @@ EDITABLE_TRACK_FIELDS = (
     "title", "artist", "album", "album_artist", "genre",
     "track_number", "track_total", "disc_number", "disc_total",
     "year", "compilation",
+    "title_sort", "artist_sort", "album_sort", "album_artist_sort",
 )
 
 
@@ -128,6 +131,28 @@ def read_metadata(path: str) -> dict:
         info["album_artist"] = (_first(meta.get("albumartist"), "")
                                 or _first(meta.get("album artist"), "")
                                 or _raw(meta, "TPE2"))
+        # "Sort name" tags: what iTunes calls Sort Name/Sort Artist/Sort
+        # Album/Sort Album Artist, used to file "The Beatles" under B or
+        # "The White Album" under W without changing what is actually
+        # displayed. mutagen's easy interface recognises the same plain
+        # keys for both ID3 (TSOT/TSOP/TSOA/TSO2) and Vorbis comments
+        # (titlesort/artistsort/albumsort/albumartistsort) - verified
+        # directly with a real round-trip write/read on both container
+        # types, not assumed from the tag names alone.
+        info["title_sort"] = _first(meta.get("titlesort"), "")
+        info["artist_sort"] = _first(meta.get("artistsort"), "")
+        info["album_sort"] = _first(meta.get("albumsort"), "")
+        info["album_artist_sort"] = _first(meta.get("albumartistsort"), "")
+        # WAV loses these through the easy interface exactly the way it
+        # loses title/artist/album/genre above - same fallback to the raw
+        # ID3 frames directly.
+        if not any((info["title_sort"], info["artist_sort"],
+                   info["album_sort"], info["album_artist_sort"])):
+            _sort_frames = {"title_sort": "TSOT", "artist_sort": "TSOP",
+                            "album_sort": "TSOA", "album_artist_sort": "TSO2"}
+            for field, frame in _sort_frames.items():
+                if not info[field]:
+                    info[field] = _raw(meta, frame)
         # Captured once so the "3" and the "of 12" come from the exact same
         # string; asking meta.get(...) twice risks the two halves coming
         # from a different tag if a file oddly carries both spellings.

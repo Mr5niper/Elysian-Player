@@ -1158,6 +1158,8 @@ const TAG_FIELD_INPUTS = {
   track_number: "tag-track-number", track_total: "tag-track-total",
   disc_number: "tag-disc-number", disc_total: "tag-disc-total",
   year: "tag-year",
+  title_sort: "tag-title-sort", artist_sort: "tag-artist-sort",
+  album_sort: "tag-album-sort", album_artist_sort: "tag-album-artist-sort",
 };
 
 let tagEditorTab = "fields";
@@ -1165,11 +1167,14 @@ let tagEditorTab = "fields";
 function setTagTab(name) {
   tagEditorTab = name;
   $("tagtab-fields").classList.toggle("active", name === "fields");
+  $("tagtab-sort").classList.toggle("active", name === "sort");
   $("tagtab-art").classList.toggle("active", name === "art");
   $("tagmodal-body").classList.toggle("tagpane-hidden", name !== "fields");
+  $("tagmodal-sort-body").classList.toggle("tagpane-hidden", name !== "sort");
   $("tagmodal-art-body").classList.toggle("tagpane-hidden", name !== "art");
 }
 $("tagtab-fields").addEventListener("click", () => setTagTab("fields"));
+$("tagtab-sort").addEventListener("click", () => setTagTab("sort"));
 $("tagtab-art").addEventListener("click", () => setTagTab("art"));
 
 function openTagEditor(paths) {

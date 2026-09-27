@@ -6,7 +6,7 @@ A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
 megabytes. Audio runs on miniaudio.
 
-- **Version**: 2.6.0.0
+- **Version**: 2.6.1.0
 - **License**: MIT
 - **OS**: Windows 10 or 11 (WebView2 runtime required, see below)
 - **Python**: exactly **3.13.12**

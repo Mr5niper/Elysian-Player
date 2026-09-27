@@ -29,7 +29,8 @@ log = _get_logger("tag_editor")
 #: type even though the frames themselves are identical to MP3's.
 _VORBIS_EXTS = {".flac", ".ogg", ".oga", ".opus"}
 
-_TEXT_FIELDS = ("title", "artist", "album", "album_artist", "genre")
+_TEXT_FIELDS = ("title", "artist", "album", "album_artist", "genre",
+               "title_sort", "artist_sort", "album_sort", "album_artist_sort")
 
 #: What the editor may change. Defined once in scanner.py and shared with
 #: LibraryService.EDITABLE_FIELDS, so the two cannot silently disagree
@@ -89,12 +90,20 @@ def _write_one(path, changes) -> None:
 # ---- ID3: mp3 and wav -----------------------------------------------
 
 def _apply_id3(tags, changes) -> None:
-    from mutagen.id3 import TIT2, TPE1, TALB, TPE2, TCON, TRCK, TPOS, TDRC, TCMP
+    from mutagen.id3 import (TIT2, TPE1, TALB, TPE2, TCON, TRCK, TPOS, TDRC,
+                             TCMP, TSOT, TSOP, TSOA, TSO2)
 
     text_frames = {
         "title": ("TIT2", TIT2), "artist": ("TPE1", TPE1),
         "album": ("TALB", TALB), "album_artist": ("TPE2", TPE2),
         "genre": ("TCON", TCON),
+        # "Sort name" tags: what iTunes calls Sort Name/Sort Artist/Sort
+        # Album Artist/Sort Album, filed under the same TSOx frames it
+        # itself writes (TSO2 for album artist is an iTunes extension,
+        # not in the base ID3v2 spec, but as widely read as the other
+        # three).
+        "title_sort": ("TSOT", TSOT), "artist_sort": ("TSOP", TSOP),
+        "album_sort": ("TSOA", TSOA), "album_artist_sort": ("TSO2", TSO2),
     }
     for field, (name, cls) in text_frames.items():
         if field not in changes:
@@ -171,6 +180,8 @@ def _write_vorbis(path, changes) -> None:
     text_keys = {
         "title": "title", "artist": "artist", "album": "album",
         "album_artist": "albumartist", "genre": "genre",
+        "title_sort": "titlesort", "artist_sort": "artistsort",
+        "album_sort": "albumsort", "album_artist_sort": "albumartistsort",
     }
     for field, key in text_keys.items():
         if field not in changes:
