@@ -70,13 +70,39 @@ visited, so restored from cache, so silently not persisted) reopened on
 Artists, not Albums, no matter how long Albums was the last thing on screen
 before closing.
 
-Typing in the library filter clears the visible list immediately, before the
-debounced backend query fires, so the interface never sits on a stale result
-mid-keystroke. A result is discarded on arrival if the filter text or active
-tab has moved on since it was requested. Songs, the one browse surface that
-can run into many thousands of rows, uses a much smaller result cap while a
-filter is active than while browsing unfiltered, since a large result there
-means rebuilding thousands of rows on every settled keystroke.
+Each of the four tabs remembers its own search separately
+(`libFilterByView` in `app.js`), and switching tabs sets the one shared
+filter box to show whichever search that tab has - empty if it has
+never had one - rather than leaving whatever the previous tab had typed
+sitting there. That sharing used to be the actual mechanism by which a
+search typed on one tab could contaminate a completely different one: a
+tab's local snapshot is captured from whatever is on screen the moment
+you switch away from it, with no record of what search produced it, so
+visiting a different tab while a search was still active silently baked
+that filtered (often empty) result into the new tab's own cache as if
+it were its ordinary, unfiltered state - clearing the box afterward
+fixed only whichever tab happened to be current at that exact moment,
+leaving every tab already visited while the search was typed still
+contaminated.
+
+Typing in the library filter clears the visible list immediately,
+before the debounced backend query fires (`applyLibraryFilter` in
+`app.js`), so the interface never sits on a stale result mid-keystroke.
+That debounce captures which tab a search belongs to at the moment it
+is typed, not only the search text itself - switching tabs before its
+120ms delay elapsed used to let it read the current tab fresh only when
+it actually fired, landing the search on whichever different tab was
+current by then rather than the one it was typed on. A result is
+discarded on arrival if the filter text or active tab has moved on
+since it was requested. Escape, and a small clear button inside the
+filter box itself (visible only once something is typed), both run
+that same real, immediate clear - an earlier version of Escape only
+blanked the box's own DOM value and re-rendered whatever was already on
+screen, without actually re-querying anything, so pressing it did not
+really clear the filter. Songs, the one browse surface that can run
+into many thousands of rows, uses a much smaller result cap while a
+filter is active than while browsing unfiltered, since a large result
+there means rebuilding thousands of rows on every settled keystroke.
 
 An expanded album is inserted inline into the album grid as a full-width
 row, immediately after whichever card was clicked, rather than replacing the
@@ -182,6 +208,74 @@ revision counter a real completed query does: bumping it there was tried
 first, and it made every cache-hit navigation also trigger a second,
 redundant fetch and re-render a moment later, on top of the one that had
 already rendered locally.
+
+### Sort names
+
+Four extra columns on each track (`title_sort`, `artist_sort`,
+`album_sort`, `album_artist_sort`) hold what iTunes calls Sort Name,
+Sort Artist, Sort Album and Sort Album Artist - an explicit filing
+order that overrides how a name sorts without changing what is
+actually displayed, editable on their own Sorting tab in the tag
+editor, next to Album Art. They map to ID3's `TSOT`/`TSOP`/`TSOA`/
+`TSO2` frames for MP3 and WAV, and to `titlesort`/`artistsort`/
+`albumsort`/`albumartistsort` Vorbis comments for FLAC and OGG - the
+same tag names iTunes itself reads and writes, verified with real
+round-trip write/read tests against actual files in all four formats
+rather than assumed from the tag names alone. WAV needed the same
+raw-frame fallback `scanner.py` already uses for title/artist/album/
+genre, since its easy-interface lookup loses these tags the same way.
+
+`_effective_sort()` in `library.py` is what actually applies one: it
+prefers a sort tag, if set, over `sort_key()`'s own guess at the
+display name - but the tag itself still passes through `sort_key()`'s
+own leading-punctuation strip rather than being trusted verbatim. That
+distinction matters: a sort tag being written to reorder something
+("Beatles, The") is a separate fact from it having already been
+normalised for leading punctuation, and is not always both at once -
+plenty of taggers populate the sort field as a plain, untouched copy of
+the display name whenever nothing has been manually reordered, symbols
+and all, and a name like `"Weird Al" Yankovic`, or an album title
+starting with a quote mark, needs that same strip regardless of
+whether a sort tag happens to be present. `_ARTIST_SORT_TAG`, a SQL
+expression shared by `albums()`, `artists()` and `songs()`, picks
+whichever of `album_artist_sort`/`artist_sort` actually corresponds to
+the name that ended up displayed, mirroring `_EFFECTIVE_ARTIST`'s own
+album_artist-then-artist fallback exactly, so the sort tag used is
+never the wrong track-level field's.
+
+A "Various Artists" compilation is deliberately excluded from the
+year-based half of `albums()`'s sort key: a real band's own albums are
+ordered chronologically on purpose, but a shelf of unrelated
+compilations has no such thing as "chronological order" between one
+release and the next, and sorting them by year first, falling back to
+album name only when two happened to share a year, meant compilations
+scattered across decades landed nowhere near their alphabetical
+neighbors. Both year-based keys force to a constant for a compilation,
+so the album name becomes the actual differentiator, the same way the
+rest of the grid already treats a compilation as one thing sorted by
+title alone.
+
+Adding these four columns is a schema migration like any other -
+`ALTER TABLE` plus a forced rescan to backfill them from the actual
+files - see Settings in the README for what that means for an existing
+library.
+
+### Scan concurrency
+
+Checking whether a file actually needs re-reading
+(`os.path.getmtime()` against what is already indexed) is a network
+round trip on a share exactly like opening the file for tags is, and
+used to run in a plain sequential loop over every file in a folder,
+entirely before the already-concurrent tag-reading pass even started -
+paying for that latency one file at a time regardless of how many
+workers were free to help. It now runs through the same pool
+(`_stat_job` in `library.py`, mirroring `_read_job`'s own never-raises
+contract) as the tag reads themselves, for the same reason
+`SCAN_WORKERS` is more than one thread to begin with: these threads
+spend nearly all their time blocked on I/O, which releases the GIL, so
+more of them does not compete for a CPU core the way genuinely
+CPU-bound work would - it just means a slow share is waiting on
+`SCAN_WORKERS` round trips at once for this check too, not one.
 
 ### Album art caching
 

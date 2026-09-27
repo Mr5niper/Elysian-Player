@@ -78,16 +78,31 @@ unreachable.
   not two, and sorting ignores both case and leading punctuation, so
   `"Weird Al" Yankovic` files under W instead of jumping to the front on its
   quote mark.
+* **Sort names for anything that should file somewhere other than its own
+  first letter.** `The Beatles` sorts under T on its own, the same way most
+  file browsers would; setting a Sort Artist of `Beatles, The` files it
+  under B instead, without renaming anything you actually see. Album, Artist,
+  Album Artist and Title each have their own sort-name field - the same
+  Sort Name/Sort Artist/Sort Album/Sort Album Artist mechanism iTunes uses -
+  editable on their own Sorting tab in the tag editor, next to Album Art.
+  Leave it blank and a name still files sensibly on its own, exactly as
+  above.
 * **Compilations get grouped, unrelated albums don't.** A track flagged as
   part of a compilation, or whose album artist tag says something like
   Various Artists, joins every other track sharing that album title under
   one card labelled that way. Two different bands who both called an album
-  Greatest Hits stay as two separate cards.
+  Greatest Hits stay as two separate cards. Compilations sort alphabetically
+  by album title among themselves rather than by year, since a shelf of
+  unrelated compilations has no meaningful release order the way one band's
+  own discography does.
 * **Search only searches what the tab shows you**: album and artist names on
   Albums, artist names on Artists, genre names on Genres, song titles on
-  Songs. Typing clears the current list right away and the filtered result
-  loads in as it settles, so a fast typist is never left staring at a stale
-  list.
+  Songs. Each of the four tabs remembers its own search separately, so
+  switching tabs never carries one tab's filter onto another, and a clear
+  button appears in the box itself once something is typed - or press
+  Escape - to clear it in one click. Typing clears the current list right
+  away and the filtered result loads in as it settles, so a fast typist is
+  never left staring at a stale list.
 * **Click an album to expand it in place**, cover and full track list, right
   under the row of cards it belongs to; the rest of the grid stays where it
   is above and below. Click a different album and the expansion moves there;
@@ -104,8 +119,10 @@ unreachable.
   field left alone across a mixed selection is shown blank rather than
   guessed at, and only the fields you actually touch get written. Editing
   the track that's currently playing pauses it just long enough to save,
-  then picks back up right where it left off. A separate Album Art tab
-  handles the cover - see [Album Art Editing](#album-art-editing) below.
+  then picks back up right where it left off. Two more tabs sit alongside
+  the fields: Sorting holds the four sort-name fields described above, and
+  Album Art handles the cover - see [Album Art Editing](#album-art-editing)
+  below.
 * **Queue tracks straight from an open album, artist or genre.** Add to
   playlist queues whatever's selected, or everything shown if nothing is.
   Add all to playlist always queues everything regardless of selection, so
@@ -123,7 +140,9 @@ unreachable.
 * **Scanning a folder works one subfolder at a time**, and each one is
   written and made browsable the moment it finishes rather than all at once
   at the end. A rescan only re-reads a file if its modification time
-  changed, so once a folder is indexed, checking it again is quick.
+  changed, and checking that is itself as concurrent as reading the files
+  that do need it, so once a folder is indexed, checking it again stays
+  quick even at many thousands of files on a network share.
 * **Manage the folders from the Folders button**, next to the tabs. It lists
   everything currently indexed with a Remove next to each; removing asks you
   to click a second time before it does anything. It only ever touches the
@@ -142,7 +161,7 @@ unreachable.
 
 <img width="385" height="621" alt="image" src="https://github.com/user-attachments/assets/03a0f48b-f617-4f07-9c49-81a58f048209" />
 
-A second tab in the tag editor, next to the text fields.
+A tab in the tag editor, alongside Sorting.
 
 * Choose a file, paste one from the clipboard, or copy the current cover out - all on the original image, not a downsized copy.
 * Clicking on the album cover opens a crop tool that zooms and positions it in a square viewport. Left alone, the whole image is used instead, resized to 500px on its longer side at its natural aspect ratio.
@@ -156,7 +175,7 @@ A second tab in the tag editor, next to the text fields.
 
 <img width="1846" height="1096" alt="image" src="https://github.com/user-attachments/assets/ed055991-9fbe-4d85-998e-33d1b7f33a23" />
 
-A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts.
+A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts - and the saved color is what the app opens in from the very first frame on every launch after, rather than a flash of the default red first.
 
 ### Visualizer
 
@@ -213,7 +232,9 @@ any edge or corner of the window to resize it, the same as a normal window.
 
 Selection in the library track lists follows the same rules as the playlist.
 Double-clicking a row plays it and continues through the rest of whatever list
-you had open, as described above.
+you had open, as described above. In the library, `Escape` and the filter box
+clear button both clear that tab's own search specifically - see
+[Library](#library).
 
 ## Working With Files On A Network Share
 
@@ -265,10 +286,13 @@ also in your home folder, indexed by the same database above. Deleting that
 folder loses nothing but the cache: covers just get decoded again the next
 time each one is needed.
 
-If you are updating from a version older than 2.4.0.0 and already have folders
-indexed, the next scan will take longer than usual, since a couple of columns
-were added to the database and every file needs to be read once to fill them
-in. After that one pass, rescans go back to being fast.
+If you are updating from a version older than 2.6.1.0 and already have folders
+indexed, the next scan will take longer than usual, since a few columns
+were added to the database (most recently the sort-name fields, described
+under [Library](#library)) and every file needs to be read once to fill them
+in. After that one pass, rescans go back to being fast - checking whether a
+file needs re-reading at all is itself concurrent, not just the reading, so
+this holds even for a large library on a network share.
 
 Problems are logged to `.elysian_player.log` in the same folder, rotating at
 512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
