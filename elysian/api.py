@@ -134,6 +134,10 @@ class Api:
             # a *different* tab needs to change this at all.
             "view": self._settings.get("library_view", "albums"),
             "items": [], "needle": "", "revision": 0}
+        log.info("[LIBDIAG] __init__: seeded _library_browser view=%r "
+                 "(from settings library_view=%r)",
+                 self._library_browser["view"],
+                 self._settings.get("library_view"))
         self._library_detail = {"kind": "", "key": "", "key2": "",
                                 "title": "", "items": [], "revision": 0}
         # Cover art, resolved only for the cards actually on screen. A
@@ -212,6 +216,11 @@ class Api:
         self._art_urgent: queue.Queue = queue.Queue()
         self._art_bulk: queue.Queue = queue.Queue()
         self._art_workers = []
+        # TEMPORARY DIAGNOSTIC: lets _art_worker log the first resolve in
+        # full and then only every 50th, so a large library's art-priming
+        # doesn't flood the rotating log file and push the startup
+        # sequence (the actual thing under investigation) out of it.
+        self._art_diag_count = 0
         # Keys sitting in the background queue and not yet started. A key
         # here can be promoted to the urgent queue when it scrolls into
         # view; the background copy is skipped when a worker reaches it.
@@ -1326,6 +1335,7 @@ class Api:
                 self._library_view_intent_seq += 1
             intent = self._library_view_intent_seq
         pending = self._library_browser_pending.get(key)
+        call_t = time.monotonic()
         if pending is not None:
             # This exact query is already running - nothing new to
             # start, the one in flight will deliver its result normally
@@ -1346,16 +1356,25 @@ class Api:
             # remember only ever escalates False -> True here, never
             # the reverse, so a real navigation's intent always wins
             # regardless of which call happened to start the thread.
+            before = dict(pending)
             if remember:
                 if not pending["remember"]:
                     pending["remember"] = True
                 if pending["intent"] is None or intent > pending["intent"]:
                     pending["intent"] = intent
+            log.info("[LIBDIAG] _do_library_browser t=%.3f DEDUPED "
+                     "view=%r needle=%r remember=%r new_intent=%r "
+                     "intent=%r; pending was %r, now %r",
+                     call_t, view, needle, remember, new_intent, intent,
+                     before, pending)
             return
         self._library_browser_pending[key] = {"remember": remember,
                                                "intent": intent}
         gen = self._library_browser_gen.get(view, 0) + 1
         self._library_browser_gen[view] = gen
+        log.info("[LIBDIAG] _do_library_browser t=%.3f STARTING "
+                 "view=%r needle=%r remember=%r new_intent=%r intent=%r",
+                 call_t, view, needle, remember, new_intent, intent)
 
         def work():
             try:
@@ -1375,7 +1394,13 @@ class Api:
                 except Exception:
                     log.exception("library browser query failed")
                     items = []
+                done_t = time.monotonic()
                 if gen != self._library_browser_gen.get(view):
+                    log.info("[LIBDIAG] _do_library_browser t=%.3f "
+                             "SUPERSEDED (gen) view=%r needle=%r "
+                             "(%.3fs elapsed, %d items discarded)",
+                             done_t, view, needle, done_t - call_t,
+                             len(items))
                     return  # a newer request for this same view has
                             # since been made; this result is not wrong,
                             # just late, and showing it now would
@@ -1386,6 +1411,11 @@ class Api:
                 # have escalated remember, or raised the intent, in the
                 # meantime (see above), and both must win.
                 entry = self._library_browser_pending[key]
+                log.info("[LIBDIAG] _do_library_browser t=%.3f FINISHED "
+                         "view=%r needle=%r %d items (%.3fs elapsed) "
+                         "final remember=%r intent=%r",
+                         done_t, view, needle, len(items), done_t - call_t,
+                         entry["remember"], entry["intent"])
                 self._post("library_browser_ready", view, items, needle,
                            entry["remember"], entry["intent"])
             finally:
@@ -1420,6 +1450,8 @@ class Api:
         current = self._library_browser.get("view", "albums")
         order = [current] + [v for v in ("albums", "artists", "genres", "songs")
                              if v != current]
+        log.info("[LIBDIAG] _do_library_prewarm_all at t=%.3f: current=%r "
+                 "order=%r", time.monotonic(), current, order)
         for view in order:
             self._do_library_browser(view, "", remember=False)
 
@@ -1429,6 +1461,9 @@ class Api:
         needle = str(needle or "")
         cached = self._library_browser_cache.get(view) if not needle else None
         items = cached["items"] if cached else []
+        log.info("[LIBDIAG] _do_library_note_view t=%.3f view=%r "
+                 "needle=%r cache_hit=%r (%d items)", time.monotonic(),
+                 view, needle, cached is not None, len(items))
         # A genuine navigation confirmation, exactly like a real
         # library_request_browser call - bumped here too so an older,
         # still-in-flight query for a *different* tab (someone
@@ -1457,9 +1492,17 @@ class Api:
 
     def _do_library_browser_ready(self, view, items, needle="",
                                   remember=True, intent=None) -> None:
+        log.info("[LIBDIAG] _do_library_browser_ready t=%.3f view=%r "
+                 "needle=%r %d items remember=%r intent=%r "
+                 "current_intent_seq=%r", time.monotonic(), view, needle,
+                 len(items or []), remember, intent,
+                 self._library_view_intent_seq)
         if view == "albums" and not needle:
             keys = [f"{i.get('album_artist','')}\u0000{i.get('album','')}"
                    for i in (items or [])]
+            log.info("[LIBDIAG] _do_library_browser_ready: albums branch, "
+                     "%d album keys, art_startup_primed=%r",
+                     len(keys), self._art_startup_primed)
             if not self._art_startup_primed:
                 self._art_startup_primed = True
                 # Jump the first screenful to the front of the queue
@@ -1477,8 +1520,14 @@ class Api:
             # the moment it's opened.
             self._library_browser_cache[view] = {"items": items,
                                                  "needle": needle}
-        if remember and (intent is None
-                        or intent == self._library_view_intent_seq):
+        should_persist = remember and (intent is None
+                        or intent == self._library_view_intent_seq)
+        log.info("[LIBDIAG] _do_library_browser_ready: view=%r -> %s",
+                 view, "PERSISTING as current view"
+                 if should_persist else
+                 f"SKIPPED (remember={remember}, intent={intent} != "
+                 f"current_intent_seq={self._library_view_intent_seq})")
+        if should_persist:
             # Only an actual navigation updates which view is "current" -
             # a background prewarm completing must never touch this
             # (remember=False short-circuits this whole block for
@@ -1551,6 +1600,8 @@ class Api:
     def _start_art_workers(self) -> None:
         if self._art_workers:
             return
+        log.info("[LIBDIAG] _start_art_workers: starting 12 workers at "
+                 "t=%.3f", time.monotonic())
         # Each worker spends almost all of its time blocked - waiting on
         # a network file read, or waiting on the queue - not on CPU, so
         # running many more of them in parallel does not compete for a
@@ -1585,6 +1636,12 @@ class Api:
             except Exception:
                 log.warning("library art failed for %s", album, exc_info=True)
                 url = None
+            self._art_diag_count += 1
+            n = self._art_diag_count
+            if n == 1 or n % 50 == 0:
+                log.info("[LIBDIAG] _art_worker t=%.3f resolved #%d %r -> "
+                         "%s", time.monotonic(), n, key,
+                         "found" if url else "no cover")
             self._post("library_art_ready", key, url)
 
     def _do_library_visible_art(self, keys) -> None:
@@ -1595,6 +1652,8 @@ class Api:
         worth doing, so it stays in the background queue rather than being
         thrown away.
         """
+        log.info("[LIBDIAG] _do_library_visible_art t=%.3f: %d keys",
+                 time.monotonic(), len(keys or []))
         while True:
             try:
                 dropped = self._art_urgent.get_nowait()
@@ -1620,6 +1679,8 @@ class Api:
 
     def _do_library_fill_art(self, keys) -> None:
         """Queue the rest of the library, behind anything on screen."""
+        log.info("[LIBDIAG] _do_library_fill_art t=%.3f: %d keys",
+                 time.monotonic(), len(keys or []))
         self._start_art_workers()
         for key in keys or []:
             if key in self._library_art or key in self._library_art_pending:
@@ -2110,6 +2171,17 @@ class Api:
         entry = self._library_browser_cache.get(str(view or ""))
         return dict(entry) if entry is not None else {}
 
+    def js_log(self, message) -> None:
+        """TEMPORARY DIAGNOSTIC: forwards a frontend trace line into this
+        process's own log file. A plain, synchronous log write - not
+        posted through the command queue, since there is no state to
+        change here and this must never wait behind, or be dropped
+        along with, anything else queued. Lets a click that silently
+        never reaches this file's other [LIBDIAG] lines still show up
+        here instead of requiring DevTools to be open to see it at all.
+        """
+        log.info("[LIBDIAG-JS] %s", str(message)[:2000])
+
     def library_get_detail(self) -> dict:
         return dict(self._library_detail)
 
@@ -2501,6 +2573,8 @@ class Api:
     # ---- session -------------------------------------------------------
 
     def _do_restore_session(self) -> None:
+        log.info("[LIBDIAG] _do_restore_session starting at t=%.3f "
+                 "(process monotonic)", time.monotonic())
         # Deliberately no os.path.isfile() here. On a network share that is
         # one round trip per saved path before the window has even drawn.
         # Missing files surface only when something later tries to open them.
@@ -2673,6 +2747,7 @@ class Api:
         "library_open_editor", "library_close_editor",
         "library_save_editor", "library_get_editor_state",
         "paste_image_from_clipboard", "copy_image_to_clipboard",
+        "js_log",
     })
 
     #: Public for the host process only, never called from JavaScript, but
