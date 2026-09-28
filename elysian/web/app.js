@@ -3550,6 +3550,18 @@ function drawWave() {
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
+// True once a real frame has actually been drawn since entering the
+// current mode - drawVizModeLabel only ever fills in for a canvas that
+// has never had real content, never a canvas that's just paused on an
+// already-frozen frame. See enterVisualizerMode and vizPoll.
+let vizHasFrame = false;
+// Same names the README uses for these five modes, shown centered on the
+// canvas whenever there is nothing actually playing to draw from - see
+// drawVizModeLabel below.
+const VIZ_MODE_NAMES = {
+  1: "Spectrum Bars", 2: "Oscilloscope Trace", 3: "Tunnel",
+  4: "Belt", 5: "Melt",
+};
 let tunnelPhase = 0;
 let tunnelBlobs = null;
 let beltYaw = 0;
@@ -3643,6 +3655,7 @@ function enterVisualizerMode() {
   const c = $("visualizer");
   const ctx = c.getContext("2d");
   ctx.clearRect(0, 0, c.width, c.height);
+  vizHasFrame = false;
   vizPoll();
 }
 
@@ -3677,6 +3690,12 @@ function vizPoll() {
   // Frozen here instead: every visualizer just stops exactly where it
   // is, and resumes the moment playback actually starts again.
   if (!state.playing) {
+    // Only fills in when the canvas genuinely has nothing on it yet -
+    // just entered this mode, never played. Pausing partway through an
+    // already-running visualizer must keep freezing on its last real
+    // frame exactly as it always did, not get replaced by the label;
+    // that's the whole point of vizHasFrame existing.
+    if (!vizHasFrame) drawVizModeLabel();
     vizTimer = setTimeout(vizPoll, 200);
     return;
   }
@@ -3685,11 +3704,33 @@ function vizPoll() {
   a.visualizer_frame().then((frame) => {
     if (vizMode === 0 || view !== "now") return;
     drawVisualizerFrame(frame || {});
+    vizHasFrame = true;
     vizTimer = setTimeout(vizPoll, 33);
   }).catch(() => {
     if (vizMode === 0 || view !== "now") return;
     vizTimer = setTimeout(vizPoll, 200);
   });
+}
+
+function drawVizModeLabel() {
+  const c = $("visualizer");
+  const r = c.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  // Same "only touch canvas.width on a real change" rule as
+  // drawVisualizerFrame - and shares its vizW/vizH, so the two agree on
+  // the canvas's current size rather than tracking it separately.
+  if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  const name = VIZ_MODE_NAMES[vizMode];
+  if (!name) return;
+  ctx.font = `${Math.round(h * 0.055)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = `rgba(${animHiTriplet()},0.5)`;
+  ctx.fillText(name, w / 2, h / 2);
 }
 
 function drawVisualizerFrame(frame) {
