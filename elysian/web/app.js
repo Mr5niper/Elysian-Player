@@ -1131,7 +1131,8 @@ let libEditorTouched = new Set();
 /* Album art editing. pendingArtDataUrl is the final cropped square JPEG
    once the person confirms a crop; null means no art change is pending.
    The crop tool itself works on a fixed-resolution square canvas (backing
-   store ART_EXPORT_SIZE, displayed smaller via CSS at ART_DISPLAY_SIZE),
+   store ART_EXPORT_SIZE, rendered smaller on screen by CSS filling its
+   viewport - see the drag handler below for reading that actual size),
    drawing the source image at a "cover" scale (its shorter side exactly
    fills the square) times whatever the zoom slider adds on top, panned by
    dragging. What's actually painted on that canvas is exported directly
@@ -1139,7 +1140,6 @@ let libEditorTouched = new Set();
    what the person saw. */
 let pendingArtDataUrl = null;
 const ART_EXPORT_SIZE = 500;
-const ART_DISPLAY_SIZE = 260;
 let artCropImg = null;
 let artCropBaseScale = 1;
 let artCropScale = 1;
@@ -1374,10 +1374,16 @@ artCropViewport.addEventListener("pointerdown", (e) => {
 });
 artCropViewport.addEventListener("pointermove", (e) => {
   if (!artCropDragging || !artCropDragStart) return;
-  // The canvas backing store is ART_EXPORT_SIZE but displayed at
-  // ART_DISPLAY_SIZE via CSS, so a screen-pixel drag delta has to be
-  // scaled up to canvas-pixel space before it's applied as an offset.
-  const ratio = ART_EXPORT_SIZE / ART_DISPLAY_SIZE;
+  // The canvas backing store is ART_EXPORT_SIZE but rendered smaller via
+  // CSS, so a screen-pixel drag delta has to be scaled up to
+  // canvas-pixel space before it's applied as an offset. Reads the
+  // canvas's own actual rendered size rather than trusting a constant
+  // to independently match it - ART_DISPLAY_SIZE was exactly that kind
+  // of assumption, and it silently went stale the moment the canvas's
+  // CSS size changed to fill its parent instead of repeating a fixed
+  // 260px of its own.
+  const displayRect = $("artcrop-canvas").getBoundingClientRect();
+  const ratio = ART_EXPORT_SIZE / displayRect.width;
   artCropOffsetX = artCropDragStart.offsetX + (e.clientX - artCropDragStart.x) * ratio;
   artCropOffsetY = artCropDragStart.offsetY + (e.clientY - artCropDragStart.y) * ratio;
   artCropClamp();
