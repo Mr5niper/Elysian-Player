@@ -3600,6 +3600,14 @@ function stopVisualizer() {
   $("visualizer").classList.add("hidden");
   $("artwrap").classList.remove("hidden");
   $("wave").classList.remove("hidden");
+  // Force a real redraw rather than just uncovering whatever the canvas
+  // already held - it was hidden, not cleared, while the visualizer was
+  // up, so if the theme color changed during that time (readily done:
+  // switch to Library, pick a new color, switch back - the visualizer
+  // keeps running the whole time), what was last painted on it is still
+  // the old color, and nothing else was going to repaint it on the way
+  // back out.
+  prev.waveW = 0; prev.waveSig = null; drawWave();
 }
 
 // The exact sequence for entering a non-zero visualizer mode - shown
@@ -3632,6 +3640,11 @@ function cycleVisualizer() {
     $("visualizer").classList.add("hidden");
     $("artwrap").classList.remove("hidden");
     $("wave").classList.remove("hidden");
+    // Same reasoning as stopVisualizer just above: force a real redraw
+    // rather than uncovering whatever the canvas already held, which can
+    // be a stale color if it changed while a visualizer mode was
+    // covering the waveform.
+    prev.waveW = 0; prev.waveSig = null; drawWave();
     return;
   }
   enterVisualizerMode();
