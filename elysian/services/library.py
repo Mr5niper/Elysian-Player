@@ -53,7 +53,7 @@ BATCH_SIZE = 400
 #: once instead of one, and a rescan of the whole library (every schema
 #: migration that adds a column forces exactly this) clears proportionally
 #: faster.
-SCAN_WORKERS = 16
+SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
