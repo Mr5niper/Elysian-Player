@@ -175,7 +175,7 @@ A tab in the tag editor, alongside Sorting.
 
 <img width="1846" height="1096" alt="image" src="https://github.com/user-attachments/assets/ed055991-9fbe-4d85-998e-33d1b7f33a23" />
 
-A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts - and the saved color is what the app opens in from the very first frame on every launch after, rather than a flash of the default red first.
+A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts - and the saved color is what the app opens in from the very first frame on every launch after.
 <img width="1923" height="575" alt="image" src="https://github.com/user-attachments/assets/da94a439-7a2a-4dcb-bc10-8b2990c77edd" />
 
 ### Visualizer
