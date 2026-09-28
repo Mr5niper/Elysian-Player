@@ -14,7 +14,22 @@ log = _get_logger("waveform")
 BUCKETS = 72
 
 
-def peaks_for(path: str, buckets: int = BUCKETS) -> list[float]:
+def peaks_for(path: str, buckets: int = BUCKETS) -> tuple[list[float], float]:
+    """Returns (peaks, duration).
+
+    duration is the file's real length, computed from the exact same full
+    decode already needed for the peaks themselves - a free by-product, not
+    an extra pass. Worth having: a tag reader's own duration estimate can
+    be badly wrong for a VBR file with no Xing/VBRI header to summarise it
+    - confirmed directly against a real file, one with no such header,
+    that mutagen (and separately, the playback engine's own .duration
+    property) each read as roughly six and a half times too long, close to
+    39 minutes for an actual 4-minute track - both fall back to "read one
+    frame's bitrate, assume the whole file is constant at it" when no
+    header is present, which is exactly wrong for a file that is variable
+    throughout. An actual decode has no such failure mode: it is
+    unambiguous regardless of how the file happens to be encoded.
+    """
     try:
         import miniaudio
 
@@ -33,11 +48,12 @@ def peaks_for(path: str, buckets: int = BUCKETS) -> list[float]:
         samples = decoded.samples
     except Exception:
         log.warning("could not decode %s for a waveform", path, exc_info=True)
-        return []
+        return [], 0.0
 
     total = len(samples)
     if total == 0:
-        return []
+        return [], 0.0
+    duration = total / 8000
 
     step = max(1, total // buckets)
     out = []
@@ -57,6 +73,6 @@ def peaks_for(path: str, buckets: int = BUCKETS) -> list[float]:
         out.append(hi / 32768.0)
 
     if not out:
-        return []
+        return [], duration
     ceiling = max(out) or 1.0
-    return [round(min(1.0, (v / ceiling) ** 0.75), 4) for v in out]
+    return [round(min(1.0, (v / ceiling) ** 0.75), 4) for v in out], duration
