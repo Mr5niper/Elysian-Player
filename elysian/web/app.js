@@ -1297,8 +1297,8 @@ $("tag-save").addEventListener("click", () => {
 
 function artCropClamp() {
   if (!artCropImg) return;
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
   // Independent per axis: an axis the image doesn't reach across (still
   // showing transparent padding on that axis) stays centered rather than
   // being panned, since there is nothing useful to drag into view there.
@@ -1322,8 +1322,8 @@ function artCropRedraw() {
   const canvas = $("artcrop-canvas");
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, ART_EXPORT_SIZE, ART_EXPORT_SIZE);
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
   ctx.drawImage(artCropImg, artCropOffsetX, artCropOffsetY, dispW, dispH);
 }
 
@@ -1332,11 +1332,11 @@ function openArtCropModal(img) {
   // "Contain" fit: the image's longer side exactly fills the square, so
   // the whole image is visible with the shorter axis left as transparent
   // padding - never cropping anything away until the person zooms in.
-  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.naturalWidth, img.naturalHeight);
+  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.width, img.height);
   $("artcrop-zoom").value = 100;
   artCropScale = artCropBaseScale;
-  const dispW = img.naturalWidth * artCropScale;
-  const dispH = img.naturalHeight * artCropScale;
+  const dispW = img.width * artCropScale;
+  const dispH = img.height * artCropScale;
   artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
   artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
   artCropRedraw();
@@ -1345,6 +1345,7 @@ function openArtCropModal(img) {
 
 function closeArtCropModal() {
   $("artcropmodal").classList.remove("show");
+  if (artCropImg && typeof artCropImg.close === "function") artCropImg.close();
   artCropImg = null;
 }
 
@@ -1392,8 +1393,8 @@ artCropViewport.addEventListener("pointercancel", artCropEndDrag);
 $("artcrop-cancel").addEventListener("click", closeArtCropModal);
 $("artcrop-use").addEventListener("click", () => {
   if (!artCropImg) return;
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
 
   // The actual visible portion of the ORIGINAL image, in that image's
   // own pixel coordinates - not the padded workspace square. At "fit"
@@ -1401,17 +1402,17 @@ $("artcrop-use").addEventListener("click", () => {
   // narrows it to a genuine sub-crop.
   let sx0, sx1, sy0, sy1;
   if (dispW <= ART_EXPORT_SIZE) {
-    sx0 = 0; sx1 = artCropImg.naturalWidth;
+    sx0 = 0; sx1 = artCropImg.width;
   } else {
     sx0 = Math.max(0, (0 - artCropOffsetX) / artCropScale);
-    sx1 = Math.min(artCropImg.naturalWidth,
+    sx1 = Math.min(artCropImg.width,
                     (ART_EXPORT_SIZE - artCropOffsetX) / artCropScale);
   }
   if (dispH <= ART_EXPORT_SIZE) {
-    sy0 = 0; sy1 = artCropImg.naturalHeight;
+    sy0 = 0; sy1 = artCropImg.height;
   } else {
     sy0 = Math.max(0, (0 - artCropOffsetY) / artCropScale);
-    sy1 = Math.min(artCropImg.naturalHeight,
+    sy1 = Math.min(artCropImg.height,
                     (ART_EXPORT_SIZE - artCropOffsetY) / artCropScale);
   }
   const srcW = sx1 - sx0, srcH = sy1 - sy0;
@@ -1435,13 +1436,20 @@ $("artcrop-use").addEventListener("click", () => {
   renderTagEditor();
 });
 
-function loadImageFromDataUrl(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
+async function loadImageFromDataUrl(dataUrl) {
+  const blob = await (await fetch(dataUrl)).blob();
+  // canvas.drawImage() does not reliably respect EXIF orientation the way
+  // a plain <img> or CSS background-image (used everywhere else this same
+  // image is shown - the large preview, Now Playing, the library grid)
+  // already does by default - confirmed directly, not assumed: drawing an
+  // EXIF-rotated test image through a canvas came out with its edges in
+  // rotated positions relative to where a normal image element shows the
+  // same file. imageOrientation: "from-image" is exactly what the canvas
+  // spec provides to make drawImage respect that same orientation, so
+  // this is the one image source the crop tool uses now, guaranteed to
+  // match what every other part of the app already shows for this file
+  // rather than a second, differently-behaved way of decoding it.
+  return await createImageBitmap(blob, { imageOrientation: "from-image" });
 }
 
 $("tag-art-choose").addEventListener("click", () => $("tag-art-file").click());
