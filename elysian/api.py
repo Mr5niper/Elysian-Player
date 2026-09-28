@@ -2594,12 +2594,40 @@ class Api:
                     self._current_id = self._playlist.id_at(i)
                     if self._resume_at > 1.0:
                         self._resume_id = self._current_id
-                    # The restored track is shown in Now Playing immediately,
-                    # so queue its tags now. Without this it sat on its
-                    # filename until it was played again or scrolled into
-                    # view, since only _do_play_id scanned the current track.
+                    # The restored track's title/artist/art show immediately
+                    # from the playlist itself, independent of the engine -
+                    # but its progress bar does not work the same way.
+                    # duration/position/seek are all backed directly by the
+                    # decoder, and the engine was otherwise left completely
+                    # untouched here, so until the first real Play press
+                    # there was no file loaded into it at all: duration
+                    # read 0 (nothing to report), position read 0
+                    # (regardless of what was actually saved), and seeking
+                    # silently did nothing - confirmed directly against the
+                    # backend, not assumed: seek() on a stream that was
+                    # only ever load_file()'d, never played, does not raise
+                    # anything, it just does not move curr_pos either,
+                    # matching the guard already in PlaybackEngine.seek()
+                    # rather than fighting it. play() -> seek() -> pause()
+                    # in immediate succession (confirmed under 15ms) is
+                    # what actually starting the audio device and then
+                    # instantly pausing it looks like from the outside -
+                    # a track correctly shown paused at its saved position,
+                    # exactly as if Play had already been pressed once and
+                    # then paused again, without ever audibly starting.
+                    try:
+                        self._engine.play(track.path, self._resume_at)
+                        self._engine.pause()
+                    except PlaybackError:
+                        log.warning("could not preload %s to resume",
+                                   track.path, exc_info=True)
+                    # Queued now regardless of whether the engine load
+                    # above succeeded. Without this it sat on its filename
+                    # until it was played again or scrolled into view,
+                    # since only _do_play_id scanned the current track.
                     # _scan_one only submits to the background queue, so
-                    # startup still opens no files.
+                    # startup still opens no files beyond the one line
+                    # above.
                     self._scan_one(self._current_id)
                     break
         self._bump()
