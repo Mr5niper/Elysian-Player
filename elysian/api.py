@@ -1070,6 +1070,25 @@ class Api:
     def _do_next_track(self, auto: bool = False) -> None:
         if not len(self._playlist):
             return
+        if auto:
+            # The track finished on its own here - nothing the user
+            # asked for directly - so this must never be treated as the
+            # one-time "pick up where the last session left off" moment
+            # _do_play_id (see there) reserves for a track being played
+            # deliberately. Without this: restoring a session preloads
+            # the engine directly (play() then pause(), never through
+            # _do_play_id), and pressing Play on it afterward just
+            # resumes that same preload via engine.toggle() - so
+            # _do_play_id is never actually called for that track at
+            # all until it naturally reaches the end. For repeat-one,
+            # that automatic restart calls _do_play_id for the very
+            # same track for the first time - and _do_play_id, seeing a
+            # still-pending resume for that exact id, reapplied the old
+            # saved position instead of 0.0, for exactly that first
+            # loop. Confirmed directly by tracing _do_restore_session,
+            # _do_toggle_play and _do_play_id together - not guessed at.
+            self._resume_id = -1
+            self._resume_at = 0.0
         if auto and self._repeat == "one":
             self._do_play_id(self._current_id)
             return
