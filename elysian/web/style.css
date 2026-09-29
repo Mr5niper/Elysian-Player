@@ -630,7 +630,19 @@ html, body {
 }
 #artcrop-viewport:active { cursor: grabbing; }
 #artcrop-canvas {
-  width: 260px; height: 260px; display: block; touch-action: none;
+  /* Fills whatever content area the viewport actually has, rather than
+     duplicating its 260px as a second, independent number that has to
+     happen to match. It didn't: box-sizing:border-box applies globally
+     (see the * rule near the top of this file), so the viewport's own
+     declared 260px already includes its 1px border, leaving only 258px
+     of real content area - this element's own hardcoded 260px then
+     overflowed that by 2px on the right and bottom, which the
+     viewport's overflow:hidden silently clipped off. Exactly the
+     reported bug: the top and left, where nothing pushes the canvas
+     out of place, lined up perfectly; only the far edges were missing
+     a couple of rows/columns of pixels.
+  */
+  width: 100%; height: 100%; display: block; touch-action: none;
   background-image:
     linear-gradient(45deg, #7a7a7a 25%, transparent 25%),
     linear-gradient(-45deg, #7a7a7a 25%, transparent 25%),

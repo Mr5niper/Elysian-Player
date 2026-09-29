@@ -1131,7 +1131,8 @@ let libEditorTouched = new Set();
 /* Album art editing. pendingArtDataUrl is the final cropped square JPEG
    once the person confirms a crop; null means no art change is pending.
    The crop tool itself works on a fixed-resolution square canvas (backing
-   store ART_EXPORT_SIZE, displayed smaller via CSS at ART_DISPLAY_SIZE),
+   store ART_EXPORT_SIZE, rendered smaller on screen by CSS filling its
+   viewport - see the drag handler below for reading that actual size),
    drawing the source image at a "cover" scale (its shorter side exactly
    fills the square) times whatever the zoom slider adds on top, panned by
    dragging. What's actually painted on that canvas is exported directly
@@ -1139,7 +1140,6 @@ let libEditorTouched = new Set();
    what the person saw. */
 let pendingArtDataUrl = null;
 const ART_EXPORT_SIZE = 500;
-const ART_DISPLAY_SIZE = 260;
 let artCropImg = null;
 let artCropBaseScale = 1;
 let artCropScale = 1;
@@ -1297,8 +1297,8 @@ $("tag-save").addEventListener("click", () => {
 
 function artCropClamp() {
   if (!artCropImg) return;
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
   // Independent per axis: an axis the image doesn't reach across (still
   // showing transparent padding on that axis) stays centered rather than
   // being panned, since there is nothing useful to drag into view there.
@@ -1322,8 +1322,8 @@ function artCropRedraw() {
   const canvas = $("artcrop-canvas");
   const ctx = canvas.getContext("2d");
   ctx.clearRect(0, 0, ART_EXPORT_SIZE, ART_EXPORT_SIZE);
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
   ctx.drawImage(artCropImg, artCropOffsetX, artCropOffsetY, dispW, dispH);
 }
 
@@ -1332,11 +1332,11 @@ function openArtCropModal(img) {
   // "Contain" fit: the image's longer side exactly fills the square, so
   // the whole image is visible with the shorter axis left as transparent
   // padding - never cropping anything away until the person zooms in.
-  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.naturalWidth, img.naturalHeight);
+  artCropBaseScale = ART_EXPORT_SIZE / Math.max(img.width, img.height);
   $("artcrop-zoom").value = 100;
   artCropScale = artCropBaseScale;
-  const dispW = img.naturalWidth * artCropScale;
-  const dispH = img.naturalHeight * artCropScale;
+  const dispW = img.width * artCropScale;
+  const dispH = img.height * artCropScale;
   artCropOffsetX = (ART_EXPORT_SIZE - dispW) / 2;
   artCropOffsetY = (ART_EXPORT_SIZE - dispH) / 2;
   artCropRedraw();
@@ -1345,6 +1345,7 @@ function openArtCropModal(img) {
 
 function closeArtCropModal() {
   $("artcropmodal").classList.remove("show");
+  if (artCropImg && typeof artCropImg.close === "function") artCropImg.close();
   artCropImg = null;
 }
 
@@ -1373,10 +1374,16 @@ artCropViewport.addEventListener("pointerdown", (e) => {
 });
 artCropViewport.addEventListener("pointermove", (e) => {
   if (!artCropDragging || !artCropDragStart) return;
-  // The canvas backing store is ART_EXPORT_SIZE but displayed at
-  // ART_DISPLAY_SIZE via CSS, so a screen-pixel drag delta has to be
-  // scaled up to canvas-pixel space before it's applied as an offset.
-  const ratio = ART_EXPORT_SIZE / ART_DISPLAY_SIZE;
+  // The canvas backing store is ART_EXPORT_SIZE but rendered smaller via
+  // CSS, so a screen-pixel drag delta has to be scaled up to
+  // canvas-pixel space before it's applied as an offset. Reads the
+  // canvas's own actual rendered size rather than trusting a constant
+  // to independently match it - ART_DISPLAY_SIZE was exactly that kind
+  // of assumption, and it silently went stale the moment the canvas's
+  // CSS size changed to fill its parent instead of repeating a fixed
+  // 260px of its own.
+  const displayRect = $("artcrop-canvas").getBoundingClientRect();
+  const ratio = ART_EXPORT_SIZE / displayRect.width;
   artCropOffsetX = artCropDragStart.offsetX + (e.clientX - artCropDragStart.x) * ratio;
   artCropOffsetY = artCropDragStart.offsetY + (e.clientY - artCropDragStart.y) * ratio;
   artCropClamp();
@@ -1392,8 +1399,8 @@ artCropViewport.addEventListener("pointercancel", artCropEndDrag);
 $("artcrop-cancel").addEventListener("click", closeArtCropModal);
 $("artcrop-use").addEventListener("click", () => {
   if (!artCropImg) return;
-  const dispW = artCropImg.naturalWidth * artCropScale;
-  const dispH = artCropImg.naturalHeight * artCropScale;
+  const dispW = artCropImg.width * artCropScale;
+  const dispH = artCropImg.height * artCropScale;
 
   // The actual visible portion of the ORIGINAL image, in that image's
   // own pixel coordinates - not the padded workspace square. At "fit"
@@ -1401,17 +1408,17 @@ $("artcrop-use").addEventListener("click", () => {
   // narrows it to a genuine sub-crop.
   let sx0, sx1, sy0, sy1;
   if (dispW <= ART_EXPORT_SIZE) {
-    sx0 = 0; sx1 = artCropImg.naturalWidth;
+    sx0 = 0; sx1 = artCropImg.width;
   } else {
     sx0 = Math.max(0, (0 - artCropOffsetX) / artCropScale);
-    sx1 = Math.min(artCropImg.naturalWidth,
+    sx1 = Math.min(artCropImg.width,
                     (ART_EXPORT_SIZE - artCropOffsetX) / artCropScale);
   }
   if (dispH <= ART_EXPORT_SIZE) {
-    sy0 = 0; sy1 = artCropImg.naturalHeight;
+    sy0 = 0; sy1 = artCropImg.height;
   } else {
     sy0 = Math.max(0, (0 - artCropOffsetY) / artCropScale);
-    sy1 = Math.min(artCropImg.naturalHeight,
+    sy1 = Math.min(artCropImg.height,
                     (ART_EXPORT_SIZE - artCropOffsetY) / artCropScale);
   }
   const srcW = sx1 - sx0, srcH = sy1 - sy0;
@@ -1435,13 +1442,20 @@ $("artcrop-use").addEventListener("click", () => {
   renderTagEditor();
 });
 
-function loadImageFromDataUrl(dataUrl) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    img.onload = () => resolve(img);
-    img.onerror = reject;
-    img.src = dataUrl;
-  });
+async function loadImageFromDataUrl(dataUrl) {
+  const blob = await (await fetch(dataUrl)).blob();
+  // canvas.drawImage() does not reliably respect EXIF orientation the way
+  // a plain <img> or CSS background-image (used everywhere else this same
+  // image is shown - the large preview, Now Playing, the library grid)
+  // already does by default - confirmed directly, not assumed: drawing an
+  // EXIF-rotated test image through a canvas came out with its edges in
+  // rotated positions relative to where a normal image element shows the
+  // same file. imageOrientation: "from-image" is exactly what the canvas
+  // spec provides to make drawImage respect that same orientation, so
+  // this is the one image source the crop tool uses now, guaranteed to
+  // match what every other part of the app already shows for this file
+  // rather than a second, differently-behaved way of decoding it.
+  return await createImageBitmap(blob, { imageOrientation: "from-image" });
 }
 
 $("tag-art-choose").addEventListener("click", () => $("tag-art-file").click());
@@ -3536,6 +3550,18 @@ function drawWave() {
 let vizMode = 0;
 let vizTimer = 0;
 let vizW = 0, vizH = 0;
+// True once a real frame has actually been drawn since entering the
+// current mode - drawVizModeLabel only ever fills in for a canvas that
+// has never had real content, never a canvas that's just paused on an
+// already-frozen frame. See enterVisualizerMode and vizPoll.
+let vizHasFrame = false;
+// Same names the README uses for these five modes, shown centered on the
+// canvas whenever there is nothing actually playing to draw from - see
+// drawVizModeLabel below.
+const VIZ_MODE_NAMES = {
+  1: "Spectrum Bars", 2: "Oscilloscope Trace", 3: "Tunnel",
+  4: "Belt", 5: "Melt",
+};
 let tunnelPhase = 0;
 let tunnelBlobs = null;
 let beltYaw = 0;
@@ -3629,6 +3655,7 @@ function enterVisualizerMode() {
   const c = $("visualizer");
   const ctx = c.getContext("2d");
   ctx.clearRect(0, 0, c.width, c.height);
+  vizHasFrame = false;
   vizPoll();
 }
 
@@ -3663,6 +3690,12 @@ function vizPoll() {
   // Frozen here instead: every visualizer just stops exactly where it
   // is, and resumes the moment playback actually starts again.
   if (!state.playing) {
+    // Only fills in when the canvas genuinely has nothing on it yet -
+    // just entered this mode, never played. Pausing partway through an
+    // already-running visualizer must keep freezing on its last real
+    // frame exactly as it always did, not get replaced by the label;
+    // that's the whole point of vizHasFrame existing.
+    if (!vizHasFrame) drawVizModeLabel();
     vizTimer = setTimeout(vizPoll, 200);
     return;
   }
@@ -3671,11 +3704,33 @@ function vizPoll() {
   a.visualizer_frame().then((frame) => {
     if (vizMode === 0 || view !== "now") return;
     drawVisualizerFrame(frame || {});
+    vizHasFrame = true;
     vizTimer = setTimeout(vizPoll, 33);
   }).catch(() => {
     if (vizMode === 0 || view !== "now") return;
     vizTimer = setTimeout(vizPoll, 200);
   });
+}
+
+function drawVizModeLabel() {
+  const c = $("visualizer");
+  const r = c.getBoundingClientRect();
+  if (!r.width || !r.height) return;
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.round(r.width * dpr), h = Math.round(r.height * dpr);
+  // Same "only touch canvas.width on a real change" rule as
+  // drawVisualizerFrame - and shares its vizW/vizH, so the two agree on
+  // the canvas's current size rather than tracking it separately.
+  if (w !== vizW || h !== vizH) { c.width = w; c.height = h; vizW = w; vizH = h; }
+  const ctx = c.getContext("2d");
+  ctx.clearRect(0, 0, w, h);
+  const name = VIZ_MODE_NAMES[vizMode];
+  if (!name) return;
+  ctx.font = `${Math.round(h * 0.055)}px "Segoe UI", system-ui, sans-serif`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = `rgba(${animHiTriplet()},0.5)`;
+  ctx.fillText(name, w / 2, h / 2);
 }
 
 function drawVisualizerFrame(frame) {

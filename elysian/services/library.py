@@ -53,7 +53,7 @@ BATCH_SIZE = 400
 #: once instead of one, and a rescan of the whole library (every schema
 #: migration that adds a column forces exactly this) clears proportionally
 #: faster.
-SCAN_WORKERS = 16
+SCAN_WORKERS = 8
 
 _COLUMNS = ("path", "key", "title", "artist", "album", "album_artist",
             "genre", "duration", "track_number", "disc_number", "year",
@@ -306,6 +306,25 @@ class LibraryService:
                     con.execute("UPDATE tracks SET modified_at = 0")
                     log.info("library upgraded; a rescan will fill in "
                              "sort-name tags")
+                # Not tied to a column, since this fix (an MP3 whose real
+                # length was misread from a missing/wrong VBR header -
+                # see scanner.py's read_metadata) only changes what value
+                # gets computed for the existing duration column, not the
+                # schema itself. A file already indexed with an unchanged
+                # mtime is otherwise never re-read at all (see
+                # _scan_directory below), so without this a rescan would
+                # never touch, let alone fix, a library that predates the
+                # fix - confirmed directly: the exact bug report that led
+                # to this migration. PRAGMA user_version is SQLite's own
+                # built-in slot for exactly this, a version marker
+                # independent of the schema, since there is no column
+                # whose presence could be checked instead.
+                if con.execute("PRAGMA user_version").fetchone()[0] < 1:
+                    con.execute("UPDATE tracks SET modified_at = 0")
+                    con.execute("PRAGMA user_version = 1")
+                    log.info("library upgraded; a rescan will correct any "
+                             "MP3 whose length was misread from a "
+                             "missing/wrong VBR header")
                 # Indexes are created after the column checks above, not in
                 # the schema script: on an existing table the CREATE TABLE is
                 # skipped, so an index naming a newly added column would fail

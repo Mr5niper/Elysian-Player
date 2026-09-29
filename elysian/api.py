@@ -499,12 +499,25 @@ class Api:
     def _rebuild_snapshot(self) -> None:
         with self._lock:
             track = self._playlist.by_id(self._current_id)
+            # track.length (from tags, corrected at scan time for a VBR
+            # file with no Xing/VBRI header - see scanner.py's
+            # read_metadata) is preferred over the engine's own duration
+            # property here: just_playback/miniaudio uses a similar fast
+            # estimate internally and is wrong for exactly the same
+            # files, confirmed directly against a real one (reported
+            # roughly six and a half times too long, the same failure
+            # mode as the tag reader, not merely a rounding difference).
+            # Falls back to the engine's value only for a track with no
+            # length yet - not yet scanned, or genuinely unreadable.
+            engine_duration = self._engine.duration
+            duration = (track.length if track is not None
+                       and track.length > 0 else engine_duration)
             tick = {
                 "current_id": self._current_id,
                 "playing": self._engine.playing,
                 "paused": self._engine.paused,
                 "position": round(self._engine.position, 2),
-                "duration": round(self._engine.duration, 2),
+                "duration": round(duration, 2),
                 "volume": round(self._premute_volume if self._muted
                                 else self._engine.volume, 3),
                 "muted": self._muted,
@@ -633,7 +646,12 @@ class Api:
         path = track.path
         def work():
             try:
-                found = peaks_for(path)
+                # peaks_for now also returns the file's real duration (a
+                # by-product scanner.py uses to correct a library-index
+                # length that's badly wrong for a VBR MP3 with no
+                # Xing/VBRI header - see read_metadata). Not needed here;
+                # this is the same waveform-only path it always was.
+                found, _duration = peaks_for(path)
             except Exception:
                 log.warning("waveform failed for %s", path, exc_info=True)
                 found = []
@@ -1052,6 +1070,25 @@ class Api:
     def _do_next_track(self, auto: bool = False) -> None:
         if not len(self._playlist):
             return
+        if auto:
+            # The track finished on its own here - nothing the user
+            # asked for directly - so this must never be treated as the
+            # one-time "pick up where the last session left off" moment
+            # _do_play_id (see there) reserves for a track being played
+            # deliberately. Without this: restoring a session preloads
+            # the engine directly (play() then pause(), never through
+            # _do_play_id), and pressing Play on it afterward just
+            # resumes that same preload via engine.toggle() - so
+            # _do_play_id is never actually called for that track at
+            # all until it naturally reaches the end. For repeat-one,
+            # that automatic restart calls _do_play_id for the very
+            # same track for the first time - and _do_play_id, seeing a
+            # still-pending resume for that exact id, reapplied the old
+            # saved position instead of 0.0, for exactly that first
+            # loop. Confirmed directly by tracing _do_restore_session,
+            # _do_toggle_play and _do_play_id together - not guessed at.
+            self._resume_id = -1
+            self._resume_at = 0.0
         if auto and self._repeat == "one":
             self._do_play_id(self._current_id)
             return

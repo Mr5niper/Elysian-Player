@@ -8,9 +8,9 @@ import logging
 import logging.handlers
 import os
 import sys
-from pathlib import Path
 
-LOG_FILE = Path.home() / ".elysian_player.log"
+from .config import LOG_FILE
+
 MAX_BYTES = 512 * 1024
 BACKUPS = 2
 

@@ -1,6 +1,6 @@
 # Elysian Player
 
-<img width="2350" height="855" alt="image" src="https://github.com/user-attachments/assets/d6eb0d39-8113-471b-95ca-ffb44b30773c" />
+<img width="2350" height="855" alt="image" src="https://github.com/user-attachments/assets/5ef3550e-96fa-4e70-90a6-4857554f2b02" />
 
 A music player for Windows. The interface is drawn with WebView2, which already
 ships with Windows, so the whole thing stays a single executable of about forty
@@ -59,7 +59,7 @@ megabytes. Audio runs on miniaudio.
 
 ### Library
 
-<img width="1734" height="1095" alt="image" src="https://github.com/user-attachments/assets/232ef6eb-57ef-4c41-9da1-dd66d5e8e864" />
+<img width="1734" height="1095" alt="image" src="https://github.com/user-attachments/assets/c1604c60-2172-4da0-b4e4-46c1669e77df" />
 
 
 A second way to get at your music, separate from the playlist. Point it at
@@ -159,14 +159,14 @@ unreachable.
 
 ### Album Art Editing
 
-<img width="385" height="621" alt="image" src="https://github.com/user-attachments/assets/03a0f48b-f617-4f07-9c49-81a58f048209" />
+<img width="385" height="621" alt="image" src="https://github.com/user-attachments/assets/07b80d5a-3107-439e-91d0-3d844fd94bfb" />
 
 A tab in the tag editor, alongside Sorting.
 
 * Choose a file, paste one from the clipboard, or copy the current cover out - all on the original image, not a downsized copy.
 * Clicking on the album cover opens a crop tool that zooms and positions it in a square viewport. Left alone, the whole image is used instead, resized to 500px on its longer side at its natural aspect ratio.
 
-<img width="385" height="511" alt="image" src="https://github.com/user-attachments/assets/35051863-7edd-4940-934d-5f537bd92eab" />
+<img width="385" height="511" alt="image" src="https://github.com/user-attachments/assets/5413fd1b-70bf-4a03-b5b1-6d1366fc07af" />
  
 * Applies to whichever files are open in the editor, or every track on the album if a checkbox is ticked.
 * Written directly with mutagen: ID3 APIC for MP3/WAV, FLAC's native picture block, or base64 `METADATA_BLOCK_PICTURE` for OGG/Opus.
@@ -175,7 +175,8 @@ A tab in the tag editor, alongside Sorting.
 
 <img width="1846" height="1096" alt="image" src="https://github.com/user-attachments/assets/ed055991-9fbe-4d85-998e-33d1b7f33a23" />
 
-A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts - and the saved color is what the app opens in from the very first frame on every launch after, rather than a flash of the default red first.
+A color-wheel button next to the mute icon opens a built-in picker - an SV square, a hue strip, hex/RGB fields, no OS dialog. Whatever is picked becomes the accent color; every other shade, the waveform, and every visualizer but Melt re-derive from it the same way the built-in red theme already shades itself. Default resets to red, Cancel reverts, OK saves and persists across restarts - and the saved color is what the app opens in from the very first frame on every launch after.
+<img width="1923" height="575" alt="image" src="https://github.com/user-attachments/assets/da94a439-7a2a-4dcb-bc10-8b2990c77edd" />
 
 ### Visualizer
 
@@ -268,34 +269,45 @@ opens in about the same time as a two-thousand track one.
 
 ## Settings
 
-Written to `.elysian_player.json` in your home folder, not the program folder,
-so the executable can live anywhere. Delete that file to reset the app.
+Everything the app writes outside its own install folder lives in one place,
+`.elysian_player` in your home folder - not the program folder, so the
+executable can live anywhere, and not scattered across half a dozen separate
+dot-files either.
 
-A second small file, `.elysian_player_instance`, holds a token used by the
-single-instance check. That check talks over a Windows named pipe rather than
-a network socket, so it never triggers a firewall prompt and cannot collide
-with another program over a port number.
+* `settings.json` - your playlist, volume, shuffle/repeat state, saved
+  library folders, and the last track and position played. Delete it to
+  reset the app.
+* `library.db` - a SQLite database holding the tags and file paths the
+  Library index has seen, never the audio itself. Deleting it loses nothing
+  but the index: the folders are remembered in settings.json and a rescan
+  rebuilds it.
+* `art_cache/` - resolved album covers, cached as small JPEGs, indexed by
+  the database above. Deleting it loses nothing but the cache: covers just
+  get decoded again the next time each one is needed.
+* `instance` - a token used by the single-instance check, so double-clicking
+  a track in Explorer while the player is already open hands the file to
+  that copy instead of starting a second one. That check talks over a
+  Windows named pipe rather than a network socket, so it never triggers a
+  firewall prompt and cannot collide with another program over a port
+  number.
+* `player.log` - problems, rotating at 512 KB with two backups. Set
+  `ELYSIAN_DEBUG=1` for debug-level detail.
 
-The library index is a SQLite database at `.elysian_library.db`, also in your
-home folder. It holds the tags and file paths it has seen, never the audio
-itself. Deleting it loses nothing but the index: the folders are remembered in
-the settings file and a rescan rebuilds it.
+If you are updating from a version older than 2.6.1.0, these used to be five
+separate dot-files and a folder directly in your home directory
+(`.elysian_player.json`, `.elysian_library.db`, `.elysian_art_cache`,
+`.elysian_player.log` plus its rotated backups, `.elysian_player_instance`).
+The first launch after updating moves each of them into the new folder
+automatically - your playlist, library index, art cache and settings are
+carried over, not lost.
 
-Resolved album covers are cached as small JPEGs in `.elysian_art_cache`,
-also in your home folder, indexed by the same database above. Deleting that
-folder loses nothing but the cache: covers just get decoded again the next
-time each one is needed.
-
-If you are updating from a version older than 2.6.1.0 and already have folders
-indexed, the next scan will take longer than usual, since a few columns
-were added to the database (most recently the sort-name fields, described
-under [Library](#library)) and every file needs to be read once to fill them
-in. After that one pass, rescans go back to being fast - checking whether a
-file needs re-reading at all is itself concurrent, not just the reading, so
-this holds even for a large library on a network share.
-
-Problems are logged to `.elysian_player.log` in the same folder, rotating at
-512 KB with two backups. Set `ELYSIAN_DEBUG=1` for debug-level detail.
+Separately, if you are updating from a version older than 2.6.1.0 and already
+have folders indexed, the next scan will take longer than usual, since a few
+columns were added to the database (most recently the sort-name fields,
+described under [Library](#library)) and every file needs to be read once to
+fill them in. After that one pass, rescans go back to being fast - checking
+whether a file needs re-reading at all is itself concurrent, not just the
+reading, so this holds even for a large library on a network share.
 
 ## Installation
 

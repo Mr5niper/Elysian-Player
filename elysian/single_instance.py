@@ -21,16 +21,15 @@ import threading
 import time
 import uuid
 
+from .config import INSTANCE_SOCKET_FILE, INSTANCE_TOKEN_FILE
 from .logs import get as _get_logger
 
 log = _get_logger("instance")
 
 IS_WINDOWS = sys.platform == "win32"
 PIPE_NAME = r"\\.\pipe\Elysian-Player-Instance"
-UNIX_SOCKET = os.path.join(
-    os.path.expanduser("~"), ".elysian_player_instance.sock")
-TOKEN_FILE = os.path.join(
-    os.path.expanduser("~"), ".elysian_player_instance")
+UNIX_SOCKET = str(INSTANCE_SOCKET_FILE)
+TOKEN_FILE = str(INSTANCE_TOKEN_FILE)
 
 _BUFFER = 64 * 1024
 
