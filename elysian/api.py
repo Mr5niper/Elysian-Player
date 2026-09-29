@@ -1089,7 +1089,19 @@ class Api:
             # _do_toggle_play and _do_play_id together - not guessed at.
             self._resume_id = -1
             self._resume_at = 0.0
-        if auto and self._repeat == "one":
+        if self._repeat == "one":
+            # Repeat-one traps you on the current track - Next restarts
+            # it from 0:00 rather than advancing, same as letting it
+            # finish naturally already does. Clearing any pending
+            # resume here too, not just in the auto branch above: a
+            # manual Next pressed on a just-restored track, before its
+            # one-time resume was otherwise consumed, would otherwise
+            # hit the exact same stale-position bug that branch exists
+            # to prevent - this is a request to play the track from the
+            # start, not to continue a prior session, regardless of
+            # which path asked for it.
+            self._resume_id = -1
+            self._resume_at = 0.0
             self._do_play_id(self._current_id)
             return
         nxt = self._next_id(auto)

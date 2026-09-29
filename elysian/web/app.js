@@ -1568,6 +1568,7 @@ let libDesiredNeedle = "";
 // tab was current at that exact moment, not the others already
 // contaminated.
 let libFilterByView = { albums: "", artists: "", genres: "", songs: "" };
+let libSelfHealAttempted = false;
 
 const fmtCount = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
@@ -1900,6 +1901,9 @@ function updateExpandedBorderConnectors() {
 }
 
 function renderLibrary() {
+  traceLibJS(`renderLibrary: libView=${libView} items=${libItems.length} ` +
+             `topView=${view} filter=${JSON.stringify(libFilterByView[libView])} ` +
+             `libLoading=${libLoading} libLibDetail=${libDetail ? "set" : "null"}`);
   const grid = $("libgrid");
   const tracks = $("libtracks");
   const crumb = $("libcrumb");
@@ -2475,6 +2479,8 @@ function cloneLibDetail(d) {
 }
 
 function captureCurrentLibTabState() {
+  traceLibJS(`captureCurrentLibTabState: libView=${libView} ` +
+             `items=${libItems.length} topView=${view}`);
   return {
     view: libView,
     items: Array.isArray(libItems) ? libItems.slice() : [],
@@ -2606,6 +2612,10 @@ function setLibView(name) {
 
     const saved = libTabState[name];
     const activeNeedle = $("libfilter").value.trim();
+    traceLibJS(`setLibView(${name}): cache decision - saved=` +
+               `${saved ? `items=${saved.items ? saved.items.length : "n/a"} ` +
+               `stale=${saved.stale}` : "none"} activeNeedle=` +
+               `${JSON.stringify(activeNeedle)}`);
     // A cached tab snapshot may have been captured under a different (or no)
     // filter, so it can't be trusted while one is currently active - restore
     // it only when there is nothing typed to filter by.
@@ -2765,6 +2775,8 @@ function applyLibraryFilter(needle, immediate) {
   // already on screen, without actually re-querying anything, so
   // clearing the box did not really clear the filter.
   const view = libView;
+  traceLibJS(`applyLibraryFilter: view=${view} needle=${JSON.stringify(needle)} ` +
+             `immediate=${immediate} itemsBefore=${libItems.length}`);
   libFilterByView[view] = needle;
   libDesiredNeedle = needle;
   libDetail = null;
@@ -3127,6 +3139,9 @@ function applyLibraryTick(tick) {
     }).catch(() => {});
   }
   if (tick.library_revision !== libRevision) {
+    traceLibJS(`applyLibraryTick: library_revision changed ${libRevision} -> ` +
+               `${tick.library_revision}, invalidating all tab state. ` +
+               `topView=${view} libView=${libView} libOpened=${libOpened}`);
     libRevision = tick.library_revision;
     invalidateAllLibTabState();
     a.library_get_state().then((st) => {
@@ -3156,6 +3171,11 @@ function applyLibraryTick(tick) {
             a.library_get_prewarmed(thisView).then((b) => {
               const stillWanted = thisView === libView
                                  && libDesiredNeedle === thisNeedle;
+              traceLibJS(`applyLibraryTick/library_revision refresh: ` +
+                         `thisView=${thisView} stillWanted=${stillWanted} ` +
+                         `items=${b && Array.isArray(b.items) ? b.items.length : "n/a"} ` +
+                         `currentLibView=${libView} currentDesiredNeedle=` +
+                         `${JSON.stringify(libDesiredNeedle)}`);
               if (stillWanted && b && Array.isArray(b.items)
                   && (b.needle || "") === "") {
                 libPending--;
@@ -3166,8 +3186,12 @@ function applyLibraryTick(tick) {
                 libTabState[libView].stale = false;
                 a.library_note_view(thisView, "");
               } else if (stillWanted) {
+                traceLibJS(`applyLibraryTick/library_revision refresh: ` +
+                           `cache not usable, falling to live query`);
                 a.library_request_browser(thisView, thisNeedle);
               } else {
+                traceLibJS(`applyLibraryTick/library_revision refresh: ` +
+                           `abandoned, no longer wanted`);
                 libPending--;
               }
               schedule();
@@ -3182,6 +3206,35 @@ function applyLibraryTick(tick) {
         }
       }
     }).catch(() => {});
+  }
+
+  // Self-healing check for an intermittent bug where the browse grid ends
+  // up empty with nothing actually wrong: two independent paths above
+  // (this function's own library_revision handling, and setLibView) can
+  // each decide on their own to blank the grid and re-fetch the current
+  // tab, with no coordination between them - if one fetch gets
+  // superseded and its result silently dropped ("not wrong, just no
+  // longer wanted"), nothing else was ever responsible for correcting
+  // the blank state left behind. A browse grid showing zero items, with
+  // no filter actually typed, not currently mid-load, for a library that
+  // demonstrably has at least one folder added, is never a legitimate
+  // state - so this fires the exact same immediate re-query Escape
+  // already does, automatically, rather than waiting for that to be
+  // noticed and pressed by hand. libLoading is set synchronously and
+  // immediately by every path that legitimately blanks the grid, before
+  // anything else can run - so this can never fire in the middle of an
+  // ordinary, working tab switch, only once something has gone wrong.
+  if (libItems.length > 0) {
+    libSelfHealAttempted = false;
+  } else if (libOpened && view === "library" && !libShowFolders
+      && libDetail === null && !libLoading && libItems.length === 0
+      && !libFilterByView[libView] && libRoots.length > 0
+      && !libSelfHealAttempted) {
+    libSelfHealAttempted = true;
+    traceLibJS(`applyLibraryTick: SELF-HEAL firing - libView=${libView} ` +
+               `showed 0 items with no active filter and libRoots.length=` +
+               `${libRoots.length}, forcing an immediate re-query`);
+    applyLibraryFilter("", true);
   }
 }
 
