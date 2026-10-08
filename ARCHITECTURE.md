@@ -109,7 +109,12 @@ row, immediately after whichever card was clicked, rather than replacing the
 grid with a separate view. Widening or narrowing the window can change how
 many cards fit per row, which can move which row the expansion belongs
 under; a resize re-measures and repositions it rather than leaving it
-attached to a card count that no longer applies. Maximizing shows the row
+attached to a card count that no longer applies. The outline segments that
+join the expanded card's border to the panel's are positioned from live
+layout, so they are also re-measured over the first few frames every time
+the Library view is shown again, covering a window resized while another
+view was up. That re-measure only rewrites those segments; it never moves
+the panel or the scroll position. Maximizing shows the row
 above the expansion for context; restoring to a smaller size keeps the whole
 album visible if it fits, and otherwise keeps its cover and first track
 visible rather than scrolling to chase a bottom that cannot fit anyway.
