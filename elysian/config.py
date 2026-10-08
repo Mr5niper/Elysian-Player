@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 APP_NAME = "Elysian Player"
-APP_VERSION = "2.6.1.0"
+APP_VERSION = "2.6.2.0"
 
 #: Everything the app writes outside its own install folder lives here -
 #: settings, the library index, the art cache, the log, the single-instance
