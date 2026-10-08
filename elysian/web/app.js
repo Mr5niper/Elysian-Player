@@ -91,8 +91,12 @@ function setView(name) {
   if (name === "playlists") renderWindow(false);
   // Ask for the pane's contents the first time it is opened, rather than
   // querying a database nobody is looking at on startup.
-  if (name === "library") libraryOpened();
-  else { libShowFolders = false; libConfirmRemove = null; }
+  if (name === "library") {
+    libraryOpened();
+    // Re-measure the expanded album's outline connectors now that this view
+    // is visible. See refreshExpandedBorderUntilSettled.
+    refreshExpandedBorderUntilSettled();
+  } else { libShowFolders = false; libConfirmRemove = null; }
 }
 
 document.querySelectorAll(".navitem").forEach((n) =>
@@ -1898,6 +1902,30 @@ function updateExpandedBorderConnectors() {
   } else {
     right.classList.add("hidden");
   }
+}
+
+/* Re-measures the expanded album's outline connectors every frame for a
+   short while, then stops. Used when the Library view is shown again:
+   while it was hidden its layout had no size, so a window resize in the
+   meantime was handled against that, and the connectors were last
+   measured before the grid had settled at its real size and scroll
+   position - leaving the outline misaligned until something happened to
+   scroll. This only reads layout and rewrites the connector boxes; it
+   never moves the panel, the cards, or the scroll position. Cheap no-op
+   when no album is expanded. */
+let libBorderSettleRaf = 0;
+function refreshExpandedBorderUntilSettled() {
+  if (libBorderSettleRaf) cancelAnimationFrame(libBorderSettleRaf);
+  let tries = 0;
+  const step = () => {
+    libBorderSettleRaf = 0;
+    // Left the library again before this finished: nothing to measure.
+    if (view !== "library") return;
+    updateExpandedBorderConnectors();
+    tries++;
+    if (tries < 20) libBorderSettleRaf = requestAnimationFrame(step);
+  };
+  step();
 }
 
 function renderLibrary() {
